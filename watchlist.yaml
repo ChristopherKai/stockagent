@@ -1,0 +1,166 @@
+# 自选股清单。
+# listings：market 取 HK / A / US；美股请填写 exchange（NASDAQ / NYSE / AMEX）。
+# benchmark：计算超额收益用的指数（东方财富 secid），不填用该市场 benchmarks 的第一个。
+# notes / watch_items 是给 LLM 的研究背景；更完整的"公司画像"会根据年报自动生成。
+
+companies:
+  - id: innoscience
+    name: 英诺赛科
+    name_en: Innoscience
+    aliases: [英諾賽科, InnoScience]
+    listings:
+      - {market: HK, code: "02577", benchmark: "124.HSTECH"}
+    sector: 第三代半导体 · 硅基氮化镓（GaN）功率器件 IDM
+    notes: >
+      8 英寸硅基氮化镓 IDM，产品覆盖低压与高压 GaN 功率器件。下游包括消费电子快充、AI 数据中心电源（800V 高压直流架构）、
+      汽车电子、激光雷达、机器人等。2024 年 12 月在港股上市，此前处于亏损，毛利率与产能利用率是盈利拐点的关键。
+    watch_items:
+      - AI 数据中心电源（800V HVDC）相关订单、客户认证与出货
+      - 与 EPC、英飞凌等的专利诉讼进展
+      - 毛利率、产能利用率与扭亏节奏
+      - 解禁、配售等股本变动
+    news_queries:
+      zh-CN: ['"英诺赛科"']
+      zh-HK: ['"英諾賽科"']
+      en-US: ['"Innoscience"']
+
+  - id: innolight
+    name: 中际旭创
+    name_en: Zhongji Innolight
+    aliases: [中際旭創, 旭创科技, InnoLight]
+    listings:
+      - {market: A, code: "300308", benchmark: "0.399006"}
+      - {market: HK, code: "03308", benchmark: "124.HSTECH"}
+    sector: 光通信 · 数据中心高速光模块（800G / 1.6T）
+    notes: >
+      全球领先的数据中心高速光模块厂商，主要客户为海外云厂商与 AI 算力厂商。上游：光芯片（EML、VCSEL、硅光 CW 激光器）、
+      DSP 芯片、PCB 等；下游取决于 AI 数据中心资本开支与 GPU/ASIC 集群建设。A+H 两地上市（H 股 2026 年 7 月上市）。
+    watch_items:
+      - 北美云厂商资本开支指引与 AI 集群建设节奏
+      - 1.6T 放量、硅光与 CPO 等技术路线变化
+      - 上游光芯片、DSP 的供给与价格
+      - 美国对华科技限制、关税与出口管制
+      - AH 溢价与南向资金
+    news_queries:
+      zh-CN: ['"中际旭创"']
+      zh-HK: ['"中際旭創"']
+      en-US: ['"Zhongji Innolight"', '"Innolight" optical']
+
+  - id: dongyue
+    name: 东岳集团
+    name_en: Dongyue Group
+    aliases: [東岳集團]
+    listings:
+      - {market: HK, code: "00189", benchmark: "100.HSI"}
+    sector: 氟硅化工 · 制冷剂 / 含氟高分子 / 有机硅 / 膜材料
+    notes: >
+      山东氟硅化工企业，业务包括制冷剂（R22、R32、R125、R134a 等）、含氟高分子（PTFE、PVDF 等）、有机硅，以及氯碱和
+      氢燃料电池用的膜材料。三代制冷剂（HFCs）实行生产配额，制冷剂价格对利润弹性大。子公司东岳硅材在 A 股上市（300821）。
+    watch_items:
+      - 三代制冷剂配额政策与 R32、R134a、R125 价格
+      - 萤石等原材料价格
+      - 空调排产与出口
+      - PTFE、PVDF 等含氟高分子的价格与需求（PCB、锂电、半导体）
+      - 有机硅（DMC）价格周期
+    news_queries:
+      zh-CN: ['"东岳集团"']
+      zh-HK: ['"東岳集團"']
+      en-US: ['"Dongyue Group"']
+
+  - id: rigol
+    name: 普源精电
+    name_en: RIGOL Technologies
+    aliases: [普源精電, RIGOL]
+    listings:
+      - {market: A, code: "688337", benchmark: "1.000688"}
+      - {market: HK, code: "00537", benchmark: "124.HSTECH"}
+    sector: 电子测量仪器 · 数字示波器 / 信号源 / 频谱与网络分析仪
+    notes: >
+      国产通用电子测量仪器厂商，核心产品为数字示波器（自研示波器芯片组），另有信号发生器、频谱与网络分析仪、电源、万用表等。
+      海外对标是德科技、泰克、罗德与施瓦茨，国内同业有鼎阳科技。主线是高端产品突破与国产替代；有海外收入，
+      受关税与出口管制影响（比例以年报为准）。A+H 两地上市。
+    watch_items:
+      - 高带宽示波器等高端新品与订单
+      - 国产替代政策，政府、高校、半导体客户的采购
+      - 毛利率与海外收入（关税、汇率）
+      - 是德科技等海外龙头的业绩与指引（行业景气度）
+    news_queries:
+      zh-CN: ['"普源精电"']
+      zh-HK: ['"普源精電"']
+      en-US: ['"RIGOL Technologies"', '"RIGOL" oscilloscope']
+
+  - id: minimax
+    name: MiniMax
+    name_en: MiniMax
+    aliases: [稀宇科技, MINIMAX-W]
+    listings:
+      - {market: HK, code: "00100", benchmark: "124.HSTECH"}
+    sector: AI 大模型 · 多模态基础模型（文本 / 语音 / 视频）与 AI 应用
+    notes: >
+      中国通用大模型公司（上海稀宇科技），2021 年成立，创始人闫俊杰。自研文本（M 系列）、语音、视频（海螺）、音乐等多模态模型，
+      部分模型开源；收入来自开放平台 API（企业与开发者）和消费端应用（海螺 AI、Talkie / 星野、MiniMax Agent），海外收入占比较高
+      （比例以年报为准）。2026 年 1 月 9 日在港股上市（同股不同权）。仍处于大额亏损，收入增速、毛利率、算力成本与现金消耗是判断的关键。
+      港股同业有智谱（02513）。
+    watch_items:
+      - 模型迭代与评测排名（M 系列、海螺视频、语音），开源模型的开发者采用度
+      - 商业化：API 调用量与价格、订阅用户与付费率、海外收入占比
+      - 亏损、毛利率、算力采购成本与现金消耗；融资与配售
+      - 版权诉讼与监管（海螺视频相关的版权诉讼、生成式 AI 备案、出海合规）
+      - 解禁、港股通纳入与南向资金
+      - 竞争：智谱、月之暗面、阶跃星辰、DeepSeek、字节豆包、阿里通义、快手可灵
+    news_queries:
+      zh-CN: ['"MiniMax"']
+      zh-HK: ['"MiniMax"']
+      en-US: ['"MiniMax" AI', '"Hailuo AI"']
+
+  - id: xpeng
+    name: 小鹏汽车
+    name_en: XPeng
+    aliases: [小鵬汽車, 小鹏集团, 小鵬集團, XPENG, XPEV]
+    listings:
+      - {market: HK, code: "09868", benchmark: "124.HSTECH"}
+      - {market: US, code: "XPEV", exchange: NYSE}
+    sector: 智能电动汽车 · 智能驾驶 / 自研芯片 / 人形机器人 / 飞行汽车
+    notes: >
+      中国智能电动车企业（2014 年成立，创始人何小鹏），港股与纽交所两地上市（1 股 ADS = 2 股 A 类普通股，报表以人民币列示）。
+      车型覆盖轿车、SUV、MPV 与低价车系 MONA，主打自研智能驾驶（XNGP）与自研芯片。与大众汽车有平台和电子电气架构合作
+      （大众入股，合作带来技术服务收入）；滴滴以旗下智能汽车业务换股成为股东。另有人形机器人与飞行汽车（小鹏汇天）等新业务。
+      盈亏在平衡点附近，月度交付量、汽车毛利率、现金消耗与价格战是判断的关键（具体数字以公司公告为准）。
+    watch_items:
+      - 月度 / 季度交付量、车型结构与新车上市节奏
+      - 汽车毛利率、单车均价与价格战；大众合作的技术服务收入
+      - 季度盈亏、经营现金流与现金储备
+      - 智能驾驶（XNGP、端到端大模型）、自研芯片与 Robotaxi 进展
+      - 海外市场与欧盟对中国电动车的关税
+      - 人形机器人、飞行汽车等新业务的投入、融资与分拆
+      - 竞争：比亚迪、特斯拉、理想、蔚来、零跑、小米、华为鸿蒙智行
+    news_queries:
+      zh-CN: ['"小鹏汽车"', '"小鹏集团"']
+      zh-HK: ['"小鵬汽車"', '"小鵬集團"']
+      en-US: ['"XPeng"']
+
+benchmarks:
+  HK:
+    - {secid: "100.HSI", name: 恒生指数}
+    - {secid: "124.HSTECH", name: 恒生科技指数}
+  A:
+    - {secid: "1.000300", name: 沪深300}
+    - {secid: "0.399006", name: 创业板指}
+    - {secid: "1.000688", name: 科创50}
+  US:
+    - {secid: "100.SPX", name: 标普500}
+    - {secid: "100.NDX", name: 纳斯达克100}
+
+# 产业链与宏观参照（只看行情，出现在简报的"市场概览"里）
+market_watch:
+  - {secid: "100.SPX", name: 标普500}
+  - {secid: "100.NDX", name: 纳斯达克100}
+  - {secid: "105.NVDA", name: 英伟达（AI 算力需求）}
+  - {secid: "105.AVGO", name: 博通（DSP / 定制 ASIC）}
+  - {secid: "106.COHR", name: Coherent（光模块同业）}
+  - {secid: "105.LITE", name: Lumentum（光芯片）}
+  - {secid: "105.NVTS", name: Navitas（GaN 同业）}
+  - {secid: "106.KEYS", name: 是德科技（测试测量龙头）}
+  - {secid: "105.TSLA", name: 特斯拉（电动车同业）}
+  - {secid: "133.USDCNH", name: 美元兑离岸人民币}
+  - {secid: "133.HKDCNH", name: 港币兑离岸人民币}

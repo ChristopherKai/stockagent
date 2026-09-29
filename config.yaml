@@ -1,0 +1,141 @@
+# 自选股研究系统配置。API key、webhook 等敏感信息写在 .env，不要写在这里。
+
+data_dir: data                      # 数据库、文档、简报的存放位置
+
+# ------------------------------------------------------------------ LLM
+# 每个 profile 是一个模型端点：
+#   protocol: anthropic → 官方 Anthropic SDK（Claude）；base_url 可改成中转地址
+#   protocol: openai    → OpenAI 兼容接口（DeepSeek、通义千问、Kimi、OpenRouter、Ollama、vLLM 等）
+#   protocol: mock      → 离线模拟，不调用任何模型（演练流程用）
+# tasks 决定每个环节用哪个 profile；换模型只需改这里。配置后用 `stock llm-test` 验证。
+llm:
+  default_profile: local
+  concurrency: 4
+  max_continuations: 3                      # 文本输出达到 max_tokens 时，自动让模型从中断处续写的次数
+  profiles:
+    local:                                  # 本地 LLM 网关（127.0.0.1:18080），key 在 .env
+      protocol: openai
+      base_url: http://127.0.0.1:18080/v1
+      model: cn:deepseek-v4-flash
+      api_key_env: LOCAL_LLM_API_KEY
+      json_mode: true
+      tool_mode: native                     # 该接口支持原生工具调用；不支持的服务改为 text
+      max_tokens: 32000                     # 单次输出上限（实测该模型可用 32000）；超出时会自动续写
+      # max_input_chars: 60000              # 单次最多送入的资料字数；不填 = 不限制（只受 report.profile_max_doc_chars 控制）
+      timeout: 900
+      fallback: qwen                        # 本模型不可用（上游未启动、账号池繁忙、限流等）时自动改用
+
+    deepseek:                               # 同一网关上的 DeepSeek v4.1 flash（1M 上下文，经 OpenRouter，需账户有余额）
+      protocol: openai
+      base_url: http://127.0.0.1:18080/v1
+      model: anthropic/deepseek/deepseek-v4.1-flash[1m]
+      api_key_env: LOCAL_LLM_API_KEY
+      json_mode: true
+      tool_mode: native
+      max_tokens: 16000
+      timeout: 900
+
+    qwen:                                   # 同一网关上的本地 Qwen 3.8 27B（MLX，不依赖外部额度，作为备用）
+      protocol: openai
+      base_url: http://127.0.0.1:18080/v1
+      model: qwen3.8-27b-splash
+      api_key_env: LOCAL_LLM_API_KEY
+      json_mode: true
+      tool_mode: native
+      max_tokens: 16000
+      timeout: 900
+
+    claude:
+      protocol: anthropic
+      base_url: https://api.anthropic.com   # 用中转站时改成中转地址
+      model: claude-opus-5                  # 可选：claude-opus-5-5、claude-sonnet-5、claude-haiku-4-5
+      api_key_env: ANTHROPIC_API_KEY        # 从 .env 读取
+      auth: api_key                         # 中转站要求 "Authorization: Bearer" 时改为 bearer
+      effort: high                          # low | medium | high | xhigh | max
+      thinking: adaptive                    # adaptive | off（claude-haiku-4-5 需设为 off 并删掉 effort）
+      structured_output: true               # 中转站不支持 output_config 时改为 false（改用提示词约束 JSON）
+      refusal_fallback: true                # 官方 API 的拒答自动回退（beta）；中转站不支持时改为 false
+      max_tokens: 32000
+
+    # deepseek:
+    #   protocol: openai
+    #   base_url: https://api.deepseek.com
+    #   model: deepseek-chat
+    #   api_key_env: DEEPSEEK_API_KEY
+    #   json_mode: true
+    #   max_tokens: 8000
+
+    # qwen:
+    #   protocol: openai
+    #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    #   model: qwen-max
+    #   api_key_env: DASHSCOPE_API_KEY
+    #   max_tokens: 8000
+
+    # ollama:                               # 其他本地模型服务（Ollama / vLLM）
+    #   protocol: openai
+    #   base_url: http://localhost:11434/v1
+    #   model: qwen2.5:32b
+    #   json_mode: false
+    #   tool_mode: text
+    #   max_tokens: 8000
+
+    mock:
+      protocol: mock
+      model: mock
+
+  tasks:
+    triage: local           # 事件分级
+    stock_brief: local      # 个股研判
+    market_brief: local     # 今日要点
+    profile: local          # 公司画像（读年报，输入很长）
+    research: local         # 深度报告：带工具的研究 agent
+    dossier: local          # 深度报告：撰写与跟踪卡
+    monitor: local          # 事件类证伪条件检查
+
+# ------------------------------------------------------------------ 数据源
+sources:
+  announcements_lookback_days: 30   # 首次运行回溯多少天的公告
+  news_lookback_days: 7
+  price_history_days: 400
+  price_sources: [eastmoney, tencent]   # 行情源顺序：前一个失败自动切换到下一个
+  request_delay: 0.6                # 同一网站两次请求的最小间隔（秒）；太小会被东方财富断开
+  eastmoney_news: true
+  eastmoney_news_page_size: 20
+  google_news: true                 # 在中国大陆需要能访问 Google，否则改为 false
+  google_news_locales: [zh-CN, zh-HK, en-US]
+  google_news_max_per_query: 40     # 每个检索词最多保留最新的多少条
+  plan_keywords_max: 6              # 深度报告给出的产业链跟踪词，每次最多检索几个
+  blocked_news_sources: [TradingView]
+  blocked_title_patterns: []        # 正则，匹配到的新闻标题直接丢弃
+  auto_download_reports: true       # 自动下载最新年报/中期报告（A+H 公司优先巨潮简体全文）
+  sec_user_agent: null              # 跟踪美股时必填，格式 "姓名 邮箱"（SEC 要求）
+
+# ------------------------------------------------------------------ 研究 agent（深度报告）
+agent:
+  max_steps: 12                     # 每个研究子任务最多调用工具的轮数
+  tool_result_chars: 4000           # 单次工具结果最多返回给模型的字数
+  # 网页搜索源。搜索 API 排在最前：exa（经 agent-reach 配置的 mcporter 调用，本机装了就启用）、
+  # bocha 博查 / tavily / serper（.env 填了 key 才启用）；免费源中前三个轮流使用，其余在它们都失败时备用
+  web_search: [exa, bocha, tavily, serper, so360, toutiao, gnews, baidu, bing, duckduckgo]
+  parallel_sections: true           # 研究子任务并行（模型服务支持并发时开启）
+
+# ------------------------------------------------------------------ 推送（webhook 地址写在 .env）
+notify:
+  feishu_webhook_env: FEISHU_WEBHOOK
+  feishu_secret_env: FEISHU_SECRET  # 飞书机器人开启"签名校验"时需要
+  wecom_webhook_env: WECOM_WEBHOOK
+  telegram_token_env: TELEGRAM_BOT_TOKEN
+  telegram_chat_id: null
+  alert_min_materiality: 4          # stock alert 推送的最低重要性（1–5）
+
+# ------------------------------------------------------------------ 简报
+report:
+  lookback_hours: 36                # 简报收录最近多少小时的事件
+  min_materiality: 2                # 简报里显示的最低重要性
+  max_items_per_company: 12
+  triage_batch_size: 20             # 每次送给模型分级的条数（同一时段的转载尽量在同一批，便于模型去重）
+  profile_max_doc_chars: 180000     # 生成公司画像时最多送入的字数；年报超出时按关键章节节选
+  auto_profile: true                # stock run 时资料有更新就自动重新生成画像
+  dossier_stale_days: 30            # 深度报告超过多少天在简报里提示更新
+  color_scheme: red_up              # red_up 红涨绿跌 / green_up 绿涨红跌
