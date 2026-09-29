@@ -92,6 +92,7 @@ llm:
     research: local         # 深度报告：带工具的研究 agent
     dossier: local          # 深度报告：撰写与跟踪卡
     monitor: local          # 事件类证伪条件检查
+    tracker: local          # 标的追踪：按新事件修正估值假设（带工具的 agent + 结构化修正）
 
 # ------------------------------------------------------------------ 数据源
 sources:
@@ -119,6 +120,41 @@ agent:
   # bocha 博查 / tavily / serper（.env 填了 key 才启用）；免费源中前三个轮流使用，其余在它们都失败时备用
   web_search: [exa, bocha, tavily, serper, so360, toutiao, gnews, baidu, bing, duckduckgo]
   parallel_sections: true           # 研究子任务并行（模型服务支持并发时开启）
+
+# ------------------------------------------------------------------ 标的追踪（stock target；stock run 每次都会执行）
+# 以深度报告的估值矩阵为基线（代码重建，不调用 LLM），按新事件修正驱动指标、倍数、情景概率、股本、净现金；
+# 目标价（情景加权估值）始终由代码按修正后的假设计算，不采用模型给出的数字。
+tracker:
+  min_materiality: 3                # 触发修正的最低事件重要性（1–5）
+  max_events: 25                    # 每次修正最多处理的依据条数，其余留到下次
+  max_steps: 8                      # 修正 agent 最多调用工具的轮数
+  web_search: true                  # 修正 agent 可用网页搜索（深度报告运行期间自动暂停，避免争抢搜索源）
+  target: expected                  # 目标价口径：expected 概率加权 / base 基准情景
+  notify_min_change: 0.05           # 目标价变动达到 5% 时推送（stock run --push 时并入日报）
+  flag_change: 0.25                 # 单项假设变动超过 25% 时标注「大幅修正」
+  auto_rebaseline: true             # 有新的深度报告时自动重建估值基线
+  redo_materiality: 5               # 重要性 5 的事件被判为实质影响时，自动排队重跑深度报告（由 stock web 执行）
+  redo_on_broken: true              # 论点被判失效时自动排队重跑深度报告
+  redo_cooldown_days: 3             # 同一公司自动重跑深度报告的冷却天数
+
+# ------------------------------------------------------------------ WebUI（stock web，只监听 127.0.0.1）
+web:
+  port: 8765
+  max_jobs: 2                       # 同时运行的后台任务数上限（深度报告另有全局互斥：同一时间只跑一个）
+  upload_max_mb: 50                 # 上传文档的大小上限
+
+# ------------------------------------------------------------------ 内置调度器（随 stock web 运行，与系统 crontab 二选一）
+# 按北京时间把任务放进队列。cron 为 5 段：分 时 日 月 周（1-5 为工作日，0 或 7 为周日）。
+# task 取任务登记表中的名称：run 日常流程（已包含标的追踪）、alert 盘中提醒、target_run 标的追踪、dossier 深度报告……
+# args 为开关与公司 id（不填公司表示全部）。也可以在 WebUI「设置 → 日程」里修改。
+scheduler:
+  enabled: true
+  catchup_minutes: 120              # 电脑睡眠等原因错过的时点，醒来后在该窗口内补跑一次
+  jobs:
+    - {name: 早盘日报, task: run, args: [--push], cron: "30 8 * * 1-5", enabled: true}
+    - {name: 收盘日报, task: run, args: [--push], cron: "30 17 * * 1-5", enabled: true}
+    - {name: 盘中提醒, task: alert, args: [], cron: "*/20 9-16 * * 1-5", enabled: true}
+    - {name: 周末深度报告, task: dossier, args: [], cron: "0 20 * * 6", enabled: false}   # 重大事件已会自动重跑单家报告
 
 # ------------------------------------------------------------------ 推送（webhook 地址写在 .env）
 notify:

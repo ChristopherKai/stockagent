@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% from "_macros.html" import thesis_badge, stance_badge, kind_badge, delta %}
+{% block title %}修正 #{{ r.id }} · {{ c.name }}{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="card-head">
+    <div><h1>{{ c.name }} · {{ KIND_LABEL[r.kind] }} #{{ r.id }}</h1>
+      <div class="muted small">{{ r.created_at | when }} · 来源 {{ {'cli': '命令行', 'run': '日常流程', 'web': 'WebUI', 'scheduler': '日程', 'dossier': '深度报告', 'tracker': '标的追踪'}.get(r.origin, r.origin or '—') }}
+        · 基线深度报告 #{{ r.dossier_id }}{% if r.llm_model %} · 模型 {{ r.llm_model }}{% endif %}</div></div>
+    <a class="btn ghost" href="/c/{{ c.id }}#rev-{{ r.id }}">返回时间线</a>
+  </div>
+  <div class="kpis">
+    <div class="kpi main"><div class="k">{{ TARGET_LABEL }}</div><div class="v">{{ r.target | num }}</div>
+      <div class="s">{% if r.prev_target and r.kind != 'baseline' %}上次 {{ r.prev_target | num }} {{ delta(r.target, r.prev_target) }}{% endif %}</div></div>
+    <div class="kpi"><div class="k">牛 / 基准 / 熊</div><div class="v small">{{ r.bull | num }} / {{ r.base | num }} / {{ r.bear | num }}</div></div>
+    <div class="kpi"><div class="k">当时现价</div><div class="v small">{{ r.price | num }}</div><div class="s">{{ r.price_date or '' }}</div></div>
+    <div class="kpi"><div class="k">立场 / 论点</div><div class="v small">{{ stance_badge(r.stance) }} {{ thesis_badge(r.thesis_status) }}</div>
+      <div class="s">{{ THESIS_HELP.get(r.thesis_status, '') }}</div></div>
+  </div>
+  <p><b>{{ r.summary }}</b></p>
+  {% if r.narrative_md %}<div class="md">{{ r.narrative_md | md }}</div>{% endif %}
+  {% for f in r.flags or [] %}<div class="flash warn small">⚠ {{ f }}</div>{% endfor %}
+</section>
+
+{% if r.changes %}
+<section class="card">
+  <h2>假设变化</h2>
+  <div class="tblwrap"><table class="tbl">
+    <thead><tr><th>假设</th><th class="r">原值</th><th class="r">新值</th><th>操作</th><th>理由</th><th>依据</th></tr></thead>
+    <tbody>{% for ch in r.changes %}
+      <tr><td>{{ ch.label }}{% for fl in ch.flags or [] %} <span class="badge warn">{{ fl }}</span>{% endfor %}</td>
+        <td class="r">{{ ch.old | num(4) }}</td><td class="r"><b>{{ ch.new | num(4) }}</b> {{ delta(ch.new, ch.old) }}</td>
+        <td class="small">{{ OP_LABEL.get(ch.op, ch.op) }} {{ ch.operand | num(4) }}<div class="muted">{{ ch.source }}</div></td>
+        <td class="small">{{ ch.reason }}{% if ch.derivation %}<div class="muted">推导：{{ ch.derivation }}</div>{% endif %}</td>
+        <td class="small">{{ ch.evidence | join('、') }}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+</section>
+{% endif %}
+
+{% if r.rejected %}
+<section class="card">
+  <h2>未采纳的修改</h2>
+  {% for x in r.rejected %}
+    <div class="item small">{% if x.confirm %}<span class="badge warn">待你确认</span>{% else %}<span class="badge bad">未采纳</span>{% endif %}
+      {{ x.why }}
+      {% if x.change and x.change.reason %}<div class="muted">模型理由：{{ x.change.reason }}</div>{% endif %}
+      {% if x.confirm %}{% if (r.id ~ ':' ~ loop.index0) in confirmed %}<span class="badge ok">已采纳</span>{% else %}
+        <form method="post" action="/c/{{ c.id }}/confirm/{{ r.id }}/{{ loop.index0 }}" class="inline" data-confirm="采纳这条修改并重算目标价？">{{ csrf_field }}
+          <button class="btn tiny">采纳</button></form>{% endif %}{% endif %}
+    </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if r.events %}
+<section class="card">
+  <h2>本次评估的依据（{{ r.events | length }} 条）</h2>
+  <div class="tblwrap"><table class="tbl">
+    <thead><tr><th>编号</th><th>影响</th><th>依据</th><th>评估</th></tr></thead>
+    <tbody>{% for e in r.events %}
+      <tr><td class="small mono">{{ e.code }}</td>
+        <td><span class="badge imp-{{ e.impact }}">{{ IMPACT_LABEL.get(e.impact, e.impact) }}</span></td>
+        <td class="small">{{ e.text.split('｜', 1)[1] if '｜' in e.text else e.text }}{% if e.url | safe_url %} <a href="{{ e.url | safe_url }}" target="_blank" rel="noopener noreferrer">原文</a>{% endif %}</td>
+        <td class="small">{{ e.note }}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+</section>
+{% endif %}
+
+{% if r.catalysts %}
+<section class="card"><h2>催化剂评估</h2>
+  {% for x in r.catalysts %}<div class="item small"><b>{{ x.when or '' }}</b> {{ x.event }}：<span class="badge">{{ IMPACT_LABEL.get(x.status, x.status) }}</span> {{ x.note }}</div>{% endfor %}
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>修正后的估值模型</h2>
+  {% set probs = model.probabilities() %}
+  <div class="tblwrap"><table class="tbl">
+    <thead><tr><th>情景</th>{% if model.method == 'matrix' %}<th class="r">{{ model.driver_label }}</th><th class="r">{{ model.multiple_label }}</th>{% endif %}<th class="r">股价</th><th class="r">概率</th></tr></thead>
+    <tbody>{% for sp in model.scenarios %}
+      <tr><td>{{ SCENARIO_LABEL[sp.name] }}</td>{% if model.method == 'matrix' %}<td class="r">{{ sp.driver | num }}</td><td class="r">{{ sp.multiple | num }}</td>{% endif %}
+        <td class="r">{{ model.price(sp) | num }}</td><td class="r">{{ probs[sp.name] | pct(0, false) }}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+  {% if model.method == 'matrix' %}<p class="formula">净现金 {{ model.net_cash | num }} · 总股本 {{ model.shares | num(4) }} 亿股 · 汇率 {{ model.fx | num(4) }} · {{ model.source }}</p>{% endif %}
+  {% if r.unverified %}<p class="muted small">修正说明中找不到出处的数字（请核对）：{{ r.unverified | join('、') }}</p>{% endif %}
+</section>
+
+{% if r.notes_md %}
+<section class="card"><details><summary><b>修正研究笔记</b></summary><div class="md">{{ r.notes_md | md }}</div></details></section>
+{% endif %}
+{% if r.tool_log %}
+<section class="card"><details><summary><b>工具调用（{{ r.tool_log | length }} 次）</b></summary>
+  {% for x in r.tool_log %}<details class="tool"><summary class="small mono">T{{ loop.index }} {{ x.tool }} {{ x.args | tojson | truncate(160) }}</summary>
+    <pre class="log">{{ x.result }}</pre></details>{% endfor %}
+</details></section>
+{% endif %}
+{% endblock %}

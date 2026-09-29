@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}任务{% endblock %}
+{% block content %}
+{% set status_label = {'queued': '排队中', 'running': '运行中', 'done': '完成', 'failed': '失败', 'cancelled': '已取消', 'interrupted': '中断'} %}
+<section class="card">
+  <div class="card-head"><h2>提交任务</h2></div>
+  <p class="muted small">平时不用手动提交：日程会定时运行「日常流程」（其中包含标的追踪）。其余任务是日常流程拆开的单步或维护操作，需要时再用。</p>
+  <form method="post" action="/jobs" class="form" id="jobform">{{ csrf_field }}
+    <div class="row3">
+      <div>
+        <label>任务<select name="task" required data-task-select>
+          {% for cat in TASK_CATEGORIES %}<optgroup label="{{ cat }}">
+            {% for k, t in tasks.items() if t.category == cat %}
+              <option value="{{ k }}" data-desc="{{ t.desc }}" data-flags="{{ t.flags | join(' ') }}" data-companies="{{ t.companies }}"
+                      data-profile="{{ 1 if t.profile else 0 }}">{{ t.title }}</option>
+            {% endfor %}</optgroup>{% endfor %}
+        </select></label>
+        <p class="small task-desc" data-task-desc>{{ (tasks.values() | first).desc }}</p>
+      </div>
+      <label data-field="companies">公司<select name="companies" multiple size="6">
+        {% for c in app.watchlist.companies %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select>
+        <small data-companies-hint>不选 = 全部公司（按住 ⌘ 可多选）</small></label>
+      <div>
+        <div data-field="flags">
+          <div class="muted small">选项</div>
+          {% for flag, label in FLAG_LABEL.items() %}
+            <label class="check" data-flag="{{ flag }}"><input type="checkbox" name="flags" value="{{ flag }}"> {{ label }}</label>
+          {% endfor %}
+        </div>
+        <label data-field="profile">要测试的模型<select name="profile">
+          {% for p in profiles %}<option value="{{ p }}">{{ p }}</option>{% endfor %}</select></label>
+      </div>
+    </div>
+    <button class="btn">提交</button>
+    <span class="muted small">任务在后台子进程运行，互斥规则：深度报告同一时间只跑一个；日常流程 / 盘中提醒 / 标的追踪互不重叠。
+      {% if dossier_pid %}当前有深度报告在运行（进程 {{ dossier_pid }}）。{% endif %}
+      {% if pipeline_pid %}当前有日常流程类任务在运行（进程 {{ pipeline_pid }}）。{% endif %}</span>
+  </form>
+</section>
+<section class="card">
+  <div class="card-head"><h2>任务记录</h2></div>
+  <div class="tblwrap"><table class="tbl">
+    <thead><tr><th>#</th><th>任务</th><th>状态</th><th>来源</th><th>提交</th><th>开始</th><th>结束</th><th></th></tr></thead>
+    <tbody>{% for j in jobs %}
+      <tr><td><a href="/jobs/{{ j.id }}">#{{ j.id }}</a></td>
+        <td><a href="/jobs/{{ j.id }}">{{ j.title }}</a>{% if j.note %}<div class="muted small">{{ j.note }}</div>{% endif %}</td>
+        <td><span class="badge job-{{ j.status }}">{{ status_label.get(j.status, j.status) }}</span>{% if j.exit_code %} <span class="muted small">退出码 {{ j.exit_code }}</span>{% endif %}</td>
+        <td class="small">{{ {'web': 'WebUI', 'scheduler': '日程', 'tracker': '标的追踪'}.get(j.source, j.source) }}</td>
+        <td class="small nowrap">{{ j.created_at | when }}</td><td class="small nowrap">{{ j.started_at | when if j.started_at else '' }}</td>
+        <td class="small nowrap">{{ j.finished_at | when if j.finished_at else '' }}</td>
+        <td>{% if j.status in ('queued', 'running') %}<form method="post" action="/jobs/{{ j.id }}/cancel" class="inline" data-confirm="取消任务 #{{ j.id }}？">{{ csrf_field }}<button class="btn tiny ghost">取消</button></form>{% endif %}</td></tr>
+    {% else %}<tr><td colspan="8" class="muted">还没有任务。</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}

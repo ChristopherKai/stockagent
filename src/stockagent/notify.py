@@ -32,6 +32,19 @@ def channels(settings: Settings) -> list[str]:
     return out
 
 
+def missing(settings: Settings) -> list[str]:
+    """配置了一半、因此不会推送的渠道（例如 Telegram 只有 token 没有 chat id）。"""
+    n = settings.notify
+    out = []
+    if env(n.telegram_token_env) and not n.telegram_chat_id:
+        out.append("Telegram 已设置 token，但还没有填写 chat id（设置 → 通用 → 推送）")
+    if n.telegram_chat_id and not env(n.telegram_token_env):
+        out.append(f"Telegram 已填写 chat id，但环境变量 {n.telegram_token_env} 里没有 token（设置 → 密钥）")
+    if env(n.feishu_secret_env) and not env(n.feishu_webhook_env):
+        out.append(f"飞书只设置了签名密钥，缺少 webhook（{n.feishu_webhook_env}）")
+    return out
+
+
 def push(settings: Settings, title: str, text: str) -> list[str]:
     """返回每个渠道的结果描述。"""
     n = settings.notify

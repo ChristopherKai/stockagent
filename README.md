@@ -1,12 +1,15 @@
 # stockagent · 自选股研究系统
 
-自动跟踪自选股的公告、新闻、行情和产业链，用带工具的 LLM agent 做研究，产出三类结果：
+自动跟踪自选股的公告、新闻、行情和产业链，用带工具的 LLM agent 做研究，产出四类结果：
 
 - **每日简报**：事件分级（重要性 1–5、方向、相对预期）、技术面、消息发布后的价格反应、论点跟踪。
 - **深度报告**（Deep Dossier）：结构参照买方深度报告，包括现状、核心洞见、盈利驱动、资本与稀释、估值（可比公司、反向 DCF、敏感性矩阵）、12 个月情景、证伪条件和催化剂日历。
 - **跟踪卡**：把报告里的证伪条件、催化剂、跟踪指标和产业链相关标的存成结构化数据，每天自动检查，触发时推送。
+- **标的追踪**：以深度报告的估值矩阵为基线，每天按新事件增量修正估值假设，由代码重算目标价（情景加权估值），每次修正都写明改了什么、依据哪条事件；重大事件时自动排队重跑深度报告。
 
-系统辅助研究，**不构成投资建议**，也不会自动下单。
+另有本机 **WebUI**（`stock web`）：事件与修正时间线、观察清单增删改、开始 / 停止追踪、模型连接与任务路由、日程等配置都可在界面上完成，内置调度器按时运行。
+
+系统辅助研究，**不构成投资建议**，也不会自动下单。目标价是按估值假设计算的情景加权估值，仅供研究参考。
 
 ## 工作方式：研究闭环
 
@@ -19,7 +22,9 @@
   理解层：公司画像（读年报）→ 深度报告（agent + 工具）───────┘
              │
              ▼
-  跟踪层：事件分级 → 证伪条件检查（价格类由代码判定、事件类由 LLM 判定）→ 简报 / 提醒
+  跟踪层：事件分级 → 证伪条件检查（价格类由代码判定、事件类由 LLM 判定）→ 标的追踪（修正估值假设）→ 简报 / 提醒
+             │
+             └─ 重大事件 / 论点失效 → 自动排队重跑深度报告 → 新的估值基线
 ```
 
 数据采集不是只按公司名搜索：
@@ -36,6 +41,8 @@ uv run stock init          # 创建 .env、数据目录和收件箱
 uv run stock llm-test      # 逐个测试模型：连通、JSON 输出
 uv run stock run --open    # 日常流程：导入 → 抓取 → 定期报告 → 画像 → 分级 → 证伪检查 → 简报
 uv run stock dossier       # 深度报告（每家公司需要若干分钟，建议每周或财报后运行）
+uv run stock target add 公司   # 开始追踪：用深度报告建立估值基线（代码计算，不调用模型）
+uv run stock web --open    # WebUI（只监听 127.0.0.1）；内置调度器按日程运行日常流程
 uv run stock track         # 查看论点、证伪条件状态、催化剂、跟踪计划
 ```
 
@@ -51,6 +58,7 @@ uv run stock track         # 查看论点、证伪条件状态、催化剂、跟
 | `research` | 深度报告的研究 agent（调用工具） |
 | `dossier` | 深度报告撰写与跟踪卡 |
 | `monitor` | 事件类证伪条件检查 |
+| `tracker` | 标的追踪：修正 agent（带工具）与结构化修正 |
 
 每个 profile 的关键参数：
 
@@ -119,6 +127,134 @@ agent 参数在 `config.yaml` 的 `agent` 部分：最多几轮工具调用、�
 - 重新生成报告时，上一版中已触发或出现苗头的证伪条件会交给新报告重新核实，不会被悄悄清零；旧记录保留在数据库里。
 - 深度报告超过 `report.dossier_stale_days`（默认 30 天）时，简报会提示更新。
 
+## 标的追踪（情景加权估值）
+
+`stock target add 公司` 开始追踪；之后每次 `stock run`（或 `stock target run`）都会检查新依据并修正估值。
+
+**估值基线（代码计算，不调用模型）**：深度报告里跟踪卡的情景价格区间，来自研究 agent 调用 `valuation_matrix` 算出的格点（隐含股价 =（倍数 × 驱动指标 + 净现金）÷ 股本 × 汇率）。程序从工具日志里找回能解释最多情景端点的那次调用（股本与行情对不上的调用会被跳过），为牛 / 基准 / 熊每个情景定出（驱动指标, 倍数）点，使代码算出的情景股价恰好等于卡片区间中值。找不到可用矩阵时退回「区间模型」（只能按比例修正情景价格）。
+
+**目标价**：各情景股价按概率加权（`tracker.target: expected`，可改为 `base` 取基准情景）。汇率由代码按最新港元 / 美元兑离岸人民币日线计算；A+H 公司另给按汇率折算的 H 股等值（未计 AH 溢价）。
+
+**每次修正**：
+1. 收集尚未处理的依据：报告之后分级的事件（重要性 ≥ `tracker.min_materiality`，按分级时间取窗口，补抓的旧新闻也不会漏）、升级的证伪条件、新入库资料、新补充的数据。没有依据时不调用模型。
+2. 修正 agent 对照跟踪卡（论点、证伪条件、催化剂、跟踪指标）和报告的估值章节，打开事件原文核实、用工具量化影响；工具有白名单，网页搜索在深度报告运行期间自动暂停。
+3. 结构化修正：模型只给出「改哪个假设（驱动 / 倍数 / 情景概率 / 股本 / 净现金）、set / add / mul 与操作数、理由、依据编号」，新值与目标价由代码计算。
+4. 代码校验后应用：没有引用本次依据的、取值越界的、事实类数字（股本、净现金、直接设定的驱动）在所引依据和工具结果里找不到出处的，一律不采纳；**股本、净现金单次变动超过 25% 的不自动采纳**（可能是口径变化而不是新信息），列为「待你确认」，在 WebUI 里一键采纳。估值口径问题、报告内部不一致由模型单列，交给你决定。
+5. 每条修正记录保存：原值 → 新值、理由、依据链接、评估过的全部事件、修正研究笔记与工具调用；找不到出处的数字另列提示核对。
+
+**论点状态**：「论点」指深度报告的核心判断（跟踪卡上的核心论点与立场：偏多 / 中性 / 偏空），与公司基本面好坏无关。每次修正给出四种状态之一：
+
+| 状态 | 含义 |
+|---|---|
+| 论点完好 | 新依据对报告的判断没有实质影响 |
+| 论点加强 | 新依据支持报告的判断。报告偏空时，新的利空也属于加强 |
+| 论点削弱 | 新依据与报告的判断相左，但还不足以推翻 |
+| 论点失效 | 证伪条件触发，或核心前提被推翻；会自动排队重跑深度报告 |
+
+**重大事件**：重要性 5 的事件被修正判为实质影响，或论点被判失效时，自动排队重跑该公司的深度报告（冷却期 `tracker.redo_cooldown_days`，由 `stock web` 的任务执行器在没有其他深度报告运行时执行）；新报告完成后自动重建估值基线。上一版以来的修正记录会交给新报告的研究与撰写环节核实。
+
+| 命令 | 作用 |
+|---|---|
+| `stock target add 公司 [--dossier]` | 开始追踪（没有深度报告时加 `--dossier` 先生成） |
+| `stock target list` / `show 公司` | 追踪状态与目标价 / 当前估值模型与修正记录 |
+| `stock target run [公司] [--no-fetch] [--push]` | 抓取、分级后按新依据修正（`stock run` 已包含这一步） |
+| `stock target rebase 公司` / `remove 公司` | 用最新深度报告重建基线 / 停止追踪（历史保留） |
+
+## WebUI（stock web）
+
+`uv run stock web --open` 启动本机界面（默认 http://127.0.0.1:8765，只监听本机）：
+
+- **仪表盘**：追踪标的的现价、目标价、空间、论点状态与最近修正；最新修正流；证伪条件苗头；近期催化剂；待补充数据；任务与日程。
+- **标的页面**：走势图（收盘价、目标价阶梯线、牛熊区间、事件节点与修正节点，点击跳到时间线）、当前估值模型（与基线对比）、事件与修正的时间线、证伪条件、催化剂、待确认的修改；可立即检查、重建基线、重跑深度报告，录入消息、补充数据、上传文档。
+- **修正详情**与**深度报告（当前版本）**：原报告不改动，修正记录与最新估值表附在前面。
+- **观察清单**：增删改公司（写回 `watchlist.yaml`，保留注释，股票代码加引号防止被当成数字），批量开始 / 停止追踪，新公司一键初始化（抓取 → 年报 → 分级 → 画像 → 深度报告 → 开始追踪）。
+- **设置**：LLM 端点（profile）的增删改、key（写入 `.env`，页面只显示掩码）、获取模型列表、连接测试、任务路由；日程；标的追踪与数据源等参数；密钥；直接编辑原始配置。所有修改写前完整校验，原文件备份到 `data/backups/`。
+- **任务**：抓取、分级、深度报告、修正等耗时操作在后台子进程运行，日志实时显示，可取消。只能运行登记过的命令（固定参数，不经过 shell）；深度报告同一时间只跑一个。
+
+安全：只监听 127.0.0.1，校验 Host（防 DNS rebinding）；所有修改操作校验 Origin 与 CSRF token（防止其他网页借浏览器改掉模型地址、把 key 发出去）；报告与修正说明里的 HTML 一律净化。
+
+## 事件重要性如何评估
+
+每条新闻、公告、手动录入的消息都由分级模型（任务 `triage`）逐条判断相关性、类型、方向、是否新信息、相对预期和重要性（1–5）。
+
+**模型看到的材料**：条目的标题、摘要、来源与发布时间；公司背景（画像、深度报告的论点与证伪条件、重点跟踪项）；当前行情；近 3 天已分级的事件（用于识别同一事件的多次报道）。
+
+**评分标准**（写在 `triage.py` 的提示词里）：
+
+| 分值 | 标准 | 例子 |
+|---|---|---|
+| 5 | 可能改变投资逻辑，或引发 10% 以上的波动 | 业绩大幅超预期或盈利警告、大客户得失、大比例折价配售、重大诉讼结果、纳入或剔除港股通 / 重要指数、重大处罚 |
+| 4 | 显著影响，可能引发 5–10% 的波动 | 重要订单、业绩指引变化、大股东增减持、临近解禁、关键产品或认证突破 |
+| 3 | 值得跟踪 | 产能进展、行业政策、竞争对手或上下游的重要变化、带新信息的研报 |
+| 2 | 次要信息 | — |
+| 1 | 噪音或例行公告 | 章程修订、会议通知等 |
+
+**附加规则**：只报道涨跌或资金流、没有新基本面信息的，一般不超过 2；公司只是被顺带提及的标为不相关；同一事件的多条报道只保留一条，其余标为重复；定期报告只有标题、看不到数字的按 3 处理并注明要核对原文。交给模型之前，代码先做一次保守的标题去重。
+
+**各环节的门槛**：
+
+| 环节 | 门槛 |
+|---|---|
+| 简报 | 显示重要性 ≥ 2（`report.min_materiality`） |
+| 证伪条件检查 | ≥ 3 |
+| 标的追踪 | ≥ 3 的事件才进入修正（`tracker.min_materiality`） |
+| 盘中推送 | ≥ 4（`notify.alert_min_materiality`） |
+| 自动重跑深度报告 | = 5，且修正时判为「实质影响」（`tracker.redo_materiality`） |
+
+重要性是模型对每条信息的一次性判断，会有误差；「事后检验」按事件发布后的实际超额收益，统计各档位的判断到底准不准。
+
+## 后台任务说明
+
+WebUI「任务」页和内置日程能运行的任务如下（与命令行一一对应）。平时不需要手动提交：日程定时运行「日常流程」，其中已包含标的追踪；临时检查某家公司，点标的页面的「立即检查」即可。
+
+**常用**
+
+| 任务 | 做什么 |
+|---|---|
+| 日常流程（`run`） | 导入收件箱 → 抓取行情、公告、新闻 → 检查定期报告 → 分级 → 证伪检查 → 标的追踪（修正估值）→ 生成简报；加 `--push` 推送日报 |
+| 标的追踪（`target_run`） | 只处理追踪中的公司：抓取、分级、证伪检查后修正估值；勾选「不抓取」则只处理已分级的依据 |
+| 深度报告（`dossier`） | 4 个研究 agent 并行研究后撰写报告与跟踪卡，每家数分钟；不选公司表示全部；同一时间只运行一个 |
+| 盘中提醒（`alert`） | 抓取公告和新闻、分级，推送重要事件与已触发的证伪条件；不修正估值 |
+
+**资料与分级**
+
+| 任务 | 做什么 |
+|---|---|
+| 抓取（`fetch`） | 只抓行情、公告、新闻，不调用模型 |
+| 事件分级（`triage`） | 给还没分级的条目打分 |
+| 下载年报 / 中报（`docs_fetch`） | 从港交所、巨潮下载缺失的定期报告 |
+| 公司画像（`profile`） | 读年报生成公司画像，作为分级与研究的背景 |
+| 生成简报（`brief`） | 只生成简报，不抓取 |
+
+**追踪管理**
+
+| 任务 | 做什么 |
+|---|---|
+| 开始追踪（`target_add`） | 用深度报告的估值矩阵建立估值基线（代码计算，不调用模型）；勾选「缺报告时先生成」会先生成深度报告 |
+| 重建基线（`target_rebase`） | 改用最新的深度报告作为基线 |
+| 新公司初始化（`onboard`） | 依次运行：抓取 → 下载年报 → 分级 → 画像 → 深度报告 → 开始追踪 |
+
+**维护**
+
+| 任务 | 做什么 |
+|---|---|
+| 测试模型连接（`llm_test`） | 逐个测试 profile 的文本输出与 JSON 输出 |
+| 事后检验（`eval`） | 统计已分级事件发布后 1、5、20 个交易日的超额收益，检验分级的预测力 |
+
+## 推送内容
+
+在 `.env` 配好飞书、企业微信或 Telegram 后，以下情况会推送（Telegram 需要 bot token 和 `notify.telegram_chat_id` 两项；在中国大陆访问 api.telegram.org 需要给 stock web 设置 `HTTPS_PROXY`）：
+
+| 时机 | 内容 |
+|---|---|
+| 日常流程加 `--push`（默认日程的早盘、收盘日报） | 今日要点；各股现价、当日涨跌、事件条数与最高重要性；值得关注的目标价修正（变动 ≥ `tracker.notify_min_change`、论点削弱或失效、立场改变、已排队重跑报告）；简报文件位置 |
+| 盘中提醒（默认推送，`--no-push` 关闭） | 24 小时内重要性 ≥ 4 的新事件（带摘要、来源、链接）；新触发的证伪条件及预设动作（复核 / 减仓 / 退出）。同一条只推一次 |
+| 深度报告完成 | 「需要你补充的数据」清单（补缺检索后仍缺的关键数据及补充方法） |
+| `stock target run --push` | 值得关注的目标价修正（同日报里的那部分） |
+| 状态页「发送测试推送」 | 一条测试消息 |
+
+单条推送过长时会截断（Telegram 约 4000 字、企业微信约 4000 字节）；完整内容在简报与 WebUI 里。
+
 ## 事后检验（这套分级到底准不准）
 
 `stock eval [--days 90]` 统计已分级的利好或利空事件发布后 1、5、20 个交易日的超额收益，按重要性和方向分组，给出平均超额收益和方向命中率。
@@ -162,7 +298,9 @@ agent 参数在 `config.yaml` 的 `agent` 部分：最多几轮工具调用、�
 
 | 命令 | 作用 |
 |---|---|
-| `stock run [--push] [--open] [--no-llm]` | 日常完整流程 |
+| `stock run [--push] [--open] [--no-llm]` | 日常完整流程（含标的追踪） |
+| `stock web [--port] [--no-scheduler] [--open]` | WebUI 与内置调度器 |
+| `stock target add/list/show/run/rebase/remove` | 标的追踪（见上文） |
 | `stock alert [--no-push]` | 盘中：抓取 → 分级 → 证伪检查 → 推送重要事件和触发的证伪条件 |
 | `stock dossier [公司] [--open] [--reuse-notes]` | 生成深度报告与跟踪卡（可复用已保存的研究笔记） |
 | `stock track [公司] [--check]` | 查看或检查论点跟踪 |
@@ -175,14 +313,40 @@ agent 参数在 `config.yaml` 的 `agent` 部分：最多几轮工具调用、�
 
 ## 定时运行
 
-`crontab -e` 添加（路径按实际情况修改）：
+**内置调度器**（推荐）：随 `stock web` 运行，日程写在 `config.yaml` 的 `scheduler`，也可在 WebUI「设置 → 日程」修改。默认：工作日 08:30、17:30 运行日常流程并推送（含标的追踪），9–16 点每 20 分钟盘中提醒；周末深度报告默认关闭（重大事件已会自动重跑单家报告）。按北京时间触发；电脑睡眠错过的时点，醒来后在 `catchup_minutes` 内补跑一次。
+
+让 `stock web` 开机自启（macOS launchd），保存为 `~/Library/LaunchAgents/com.stockagent.web.plist` 后运行 `launchctl load ~/Library/LaunchAgents/com.stockagent.web.plist`（路径按实际情况修改）：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.stockagent.web</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/youruser/.local/bin/uv</string><string>run</string><string>--directory</string>
+    <string>/Users/youruser/myProjects/stock</string><string>stock</string><string>web</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/youruser/myProjects/stock</string>
+  <!-- launchd 默认的 PATH 不含 homebrew：不设置的话找不到 mcporter / node，Exa 搜索会悄悄失效 -->
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/Users/youruser/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/youruser/myProjects/stock/data/web.log</string>
+  <key>StandardErrorPath</key><string>/Users/youruser/myProjects/stock/data/web.log</string>
+</dict></plist>
+```
+
+**系统 cron**（备选，与内置调度器二选一，此时把 `scheduler.enabled` 设为 false）。`crontab -e` 添加（路径按实际情况修改；WebUI 日程页会显示当前日程对应的写法）：
 
 ```cron
 30 8 * * 1-5   cd /Users/youruser/myProjects/stock && /Users/youruser/.local/bin/uv run stock run --push >> data/cron.log 2>&1
 30 17 * * 1-5  cd /Users/youruser/myProjects/stock && /Users/youruser/.local/bin/uv run stock run --push >> data/cron.log 2>&1
 */20 9-16 * * 1-5 cd /Users/youruser/myProjects/stock && /Users/youruser/.local/bin/uv run stock alert >> data/cron.log 2>&1
-0 20 * * 6     cd /Users/youruser/myProjects/stock && /Users/youruser/.local/bin/uv run stock dossier >> data/cron.log 2>&1
 ```
+
+同一时间只运行一个深度报告、日常流程与盘中提醒不重叠：由进程锁（`data/tmp/locks/`）保证，cron 与 WebUI 启动的任务同样适用；上一次还没结束时，新的一次直接跳过。
 
 推送渠道：在 `.env` 中填写 `FEISHU_WEBHOOK`（可选 `FEISHU_SECRET`）、`WECOM_WEBHOOK`，或 `TELEGRAM_BOT_TOKEN` 加上 config 中的 `telegram_chat_id`。
 
@@ -201,12 +365,16 @@ src/stockagent/
   llm.py        LLM 调用层：多协议、fallback、JSON、agent 工具循环
   tools.py      研究 agent 的工具箱
   dossier.py    深度报告与跟踪卡
+  valuation.py  估值模型：从估值矩阵重建基线、汇率、情景股价与目标价
+  tracker.py    标的追踪：收集依据、修正 agent、校验与应用修正、自动重跑报告
   monitor.py    证伪条件与催化剂跟踪
   triage.py     事件分级
   profile.py    公司画像
   brief.py      每日简报与提醒
   technical.py  技术面、价格反应、AH 溢价
   docs.py       文档入库、收件箱、手动数据、定期报告下载
+  jobs.py / jobrun.py / scheduler.py / cron.py   后台任务登记表与执行、内置调度器
+  web/          WebUI（FastAPI + Jinja2，服务端渲染；走势图由 Python 生成 SVG）
   sources/      东方财富、腾讯、港交所、巨潮、SEC、Google News、网页搜索、Frankfurter
 tests/          单元测试与离线端到端测试（uv run pytest）
 ```

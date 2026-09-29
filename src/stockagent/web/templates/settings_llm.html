@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}设置 · LLM 连接{% endblock %}
+{% block content %}
+{% include "_settings_nav.html" %}
+<section class="card">
+  <div class="card-head"><h2>模型端点（profile）</h2><a class="btn" href="/settings/llm/profile/_new">+ 新建 profile</a></div>
+  <p class="muted small">每个 profile 是一个模型端点；key 写在 .env，config.yaml 里只记环境变量名。系统不绑定任何一个模型：各环节用哪个 profile 在下方「任务路由」里选。</p>
+  <div class="tblwrap"><table class="tbl">
+    <thead><tr><th>名称</th><th>协议</th><th>模型</th><th>地址</th><th>key</th><th>备用</th><th>用于</th><th>状态</th></tr></thead>
+    <tbody>{% for r in rows %}
+      <tr><td><a href="/settings/llm/profile/{{ r.name }}"><b>{{ r.name }}</b></a></td>
+        <td>{{ r.p.protocol }}</td><td class="mono small">{{ r.p.model }}</td><td class="small mono">{{ r.p.base_url or '默认' }}</td>
+        <td class="small">{% if r.p.api_key_env %}<span class="mono">{{ r.p.api_key_env }}</span><div class="muted">{{ r.key }}</div>{% else %}—{% endif %}</td>
+        <td class="small">{{ r.p.fallback or '—' }}</td>
+        <td class="small">{{ r.used | join('、') or '—' }}</td>
+        <td class="small">{% if r.reason %}<span class="badge bad" title="{{ r.reason }}">不可用</span>{% else %}<span class="badge ok">配置齐全</span>{% endif %}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+</section>
+<section class="card">
+  <div class="card-head"><h2>任务路由</h2></div>
+  <form method="post" action="/settings/llm/routing" class="form">{{ csrf_field }}
+    <input type="hidden" name="etag" value="{{ etag }}">
+    <label>默认 profile（未单独指定的任务使用）<select name="default_profile">
+      {% for p in profiles %}<option value="{{ p }}" {{ 'selected' if p == default }}>{{ p }}</option>{% endfor %}</select></label>
+    <div class="grid-routes">
+    {% for t, label in task_label.items() %}
+      <label>{{ label }} <span class="muted mono small">{{ t }}</span><select name="task_{{ t }}">
+        <option value="">（默认：{{ default }}）</option>
+        {% for p in profiles %}<option value="{{ p }}" {{ 'selected' if routes.get(t) == p }}>{{ p }}</option>{% endfor %}</select></label>
+    {% endfor %}
+    </div>
+    <button class="btn">保存路由</button>
+  </form>
+</section>
+{% endblock %}

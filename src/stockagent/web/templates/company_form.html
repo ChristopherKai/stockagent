@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}{{ '新增公司' if is_new else '编辑 ' ~ company.name }}{% endblock %}
+{% block content %}
+{% set f = form if form is defined and form else none %}
+{% macro val(name, default='') -%}{{ f.get(name) if f else default }}{%- endmacro %}
+<section class="card">
+  <div class="card-head"><h2>{{ '新增公司' if is_new else '编辑：' ~ company.name }}</h2>
+    {% if not is_new %}<a class="btn small ghost" href="/c/{{ company.id }}">返回标的页面</a>{% endif %}</div>
+  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+  <form method="post" class="form">{{ csrf_field }}
+    <input type="hidden" name="etag" value="{{ etag }}">
+    <div class="row2">
+      <label>公司 id<input name="id" required pattern="[A-Za-z0-9][A-Za-z0-9_\-]*" value="{{ val('id', company.id if company else '') }}"
+        {% if not is_new %}disabled title="id 是数据库里所有数据的键，不能修改"{% endif %} placeholder="如 tencent">
+        <small>字母、数字、-、_；保存后不能修改</small></label>
+      <label>名称<input name="name" required value="{{ val('name', company.name if company else '') }}" placeholder="如 腾讯控股"></label>
+    </div>
+    <div class="row2">
+      <label>英文名<input name="name_en" value="{{ val('name_en', company.name_en or '' if company else '') }}"></label>
+      <label>别名<input name="aliases" value="{{ val('aliases', company.aliases | join('、') if company else '') }}"><small>用顿号或逗号分隔（繁体名、旧称、英文简称）</small></label>
+    </div>
+    <label>行业<input name="sector" value="{{ val('sector', company.sector or '' if company else '') }}"></label>
+
+    <fieldset><legend>上市地</legend>
+      <p class="muted small">港股 5 位数字、A 股 6 位数字、美股代码；美股须选交易所。对比基准填东方财富 secid（如 100.HSI、124.HSTECH），不填用该市场的第一个基准。</p>
+      {% set ls = company.listings if company else [] %}
+      {% for i in range(6) %}{% set l = ls[i] if i < ls | length else none %}
+      <div class="row4 {{ 'hidden-row' if not l and i > 0 and not (f and f.get('listing' ~ i ~ '_code')) }}" data-row>
+        <select name="listing{{ i }}_market">
+          {% for m in ['HK', 'A', 'US'] %}<option value="{{ m }}" {{ 'selected' if (val('listing' ~ i ~ '_market', l.market if l else 'HK')) == m }}>{{ MARKET_LABEL[m] }}</option>{% endfor %}
+        </select>
+        <input name="listing{{ i }}_code" placeholder="代码" value="{{ val('listing' ~ i ~ '_code', l.code if l else '') }}">
+        <select name="listing{{ i }}_exchange">
+          {% set ex = val('listing' ~ i ~ '_exchange', l.exchange if l and l.market == 'US' else '') %}
+          <option value="">（交易所：A 股自动判断）</option>
+          {% for e in ['NASDAQ', 'NYSE', 'AMEX'] %}<option value="{{ e }}" {{ 'selected' if ex == e }}>{{ e }}</option>{% endfor %}
+        </select>
+        <input name="listing{{ i }}_benchmark" placeholder="对比基准 secid（可空）" value="{{ val('listing' ~ i ~ '_benchmark', l.benchmark or '' if l else '') }}">
+      </div>
+      {% endfor %}
+      <button type="button" class="btn tiny ghost" data-show-row>+ 添加上市地</button>
+    </fieldset>
+
+    <label>研究备注<textarea name="notes" rows="4" placeholder="业务、产业链、关键变量……（作为 LLM 的研究背景）">{{ val('notes', company.notes or '' if company else '') }}</textarea></label>
+    <label>重点跟踪（每行一条）<textarea name="watch_items" rows="4">{{ val('watch_items', company.watch_items | join('\n') if company else '') }}</textarea></label>
+    <fieldset><legend>新闻检索词（每行一个；不填用公司名）</legend>
+      <div class="row3">
+      {% for loc, label in [('zh-CN', '简体'), ('zh-HK', '繁体（香港）'), ('en-US', '英文')] %}
+        <label>{{ label }}<textarea name="q_{{ loc }}" rows="2">{{ val('q_' ~ loc, company.news_queries.get(loc, []) | join('\n') if company else '') }}</textarea></label>
+      {% endfor %}
+      </div>
+    </fieldset>
+    <div class="actions"><button class="btn">保存到 watchlist.yaml</button>
+      <span class="muted small">保存前会完整校验；原文件自动备份到 data/backups/。</span></div>
+  </form>
+  {% if not is_new %}
+  <hr>
+  <form method="post" action="/c/{{ company.id }}/onboard" class="inline"
+        data-confirm="依次运行：抓取 → 下载年报 → 分级 → 画像 → 深度报告 → 开始追踪。深度报告需要数分钟，同一时间只运行一个。继续？">{{ csrf_field }}
+    <button class="btn ghost">新公司初始化（抓取资料、生成深度报告并开始追踪）</button></form>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}任务 #{{ j.id }}{% endblock %}
+{% block content %}
+{% set status_label = {'queued': '排队中', 'running': '运行中', 'done': '完成', 'failed': '失败', 'cancelled': '已取消', 'interrupted': '中断'} %}
+<section class="card">
+  <div class="card-head">
+    <div><h1>#{{ j.id }} {{ j.title }}</h1>
+      <div class="muted small">提交 {{ j.created_at | when }}{% if j.started_at %} · 开始 {{ j.started_at | when }}{% endif %}{% if j.finished_at %} · 结束 {{ j.finished_at | when }}{% endif %}
+        · 命令：{% for step in j.argv %}<span class="mono">stock {{ step | join(' ') }}</span>{{ '；' if not loop.last }}{% endfor %}</div>
+      {% if j.note %}<div class="small">{{ j.note }}</div>{% endif %}</div>
+    <div class="btns"><span class="badge job-{{ j.status }}" id="jobstatus">{{ status_label.get(j.status, j.status) }}</span>
+      {% if j.status in ('queued', 'running') %}<form method="post" action="/jobs/{{ j.id }}/cancel" class="inline" data-confirm="取消任务？">{{ csrf_field }}<button class="btn ghost small">取消</button></form>{% endif %}
+      <a class="btn ghost small" href="/jobs">全部任务</a></div>
+  </div>
+  {% if j.status == 'queued' %}<p class="muted small" id="queuednote">排队中：等待同组任务结束或并发名额（stock web 的任务执行器每 2 秒检查一次）。</p>{% endif %}
+  <pre class="log" id="joblog" data-url="/jobs/{{ j.id }}/log" data-offset="{{ offset }}" data-status="{{ j.status }}">{{ log }}</pre>
+</section>
+{% endblock %}

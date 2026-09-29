@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}设置 · {{ title }}{% endblock %}
+{% block content %}
+{% include "_settings_nav.html" %}
+{% if active == 'tracker' %}
+<section class="card intro">
+  <p class="small">标的追踪以深度报告的估值矩阵为基线（代码重建，不调用模型），每次运行收集新依据（分级后的事件、证伪条件升级、新文档、补充数据），
+    由修正 agent 核实并量化，结构化修正经代码校验后应用，{{ TARGET_LABEL }}由代码按新假设重算。股本、净现金单次变动超过「大幅修正」阈值的不自动采纳，需要你在标的页面确认。</p>
+</section>
+{% endif %}
+{% for section, label, fields in sections %}
+<section class="card">
+  <div class="card-head"><h2>{{ label }}</h2><span class="muted small mono">{{ section }}</span></div>
+  <form method="post" action="/settings/section/{{ section }}" class="form">{{ csrf_field }}
+    <input type="hidden" name="etag" value="{{ etag }}">
+    <div class="grid-fields">
+    {% for f in fields %}{% set key = section ~ '.' ~ f.name %}{% include "_field.html" %}{% endfor %}
+    </div>
+    <button class="btn">保存「{{ label }}」</button>
+  </form>
+</section>
+{% endfor %}
+<p class="muted small">嵌套配置（如行情源之外的字典项）请到「原始配置」修改。</p>
+{% endblock %}

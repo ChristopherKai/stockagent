@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf-token" content="{{ csrf }}">
+<title>{% block title %}stockagent{% endblock %} · 自选股研究</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body class="{{ 'red-up' if red_up else 'green-up' }}">
+{% set path = request.url.path %}
+<header class="top">
+  <a class="brand" href="/">stockagent<span>自选股研究</span></a>
+  <nav>
+    <a href="/" class="{{ 'on' if path == '/' }}">仪表盘</a>
+    <a href="/companies" class="{{ 'on' if path.startswith('/companies') or path.startswith('/c/') }}">观察清单</a>
+    <a href="/events" class="{{ 'on' if path.startswith('/events') }}">事件</a>
+    <a href="/reports" class="{{ 'on' if path.startswith('/reports') }}">报告</a>
+    <a href="/jobs" class="{{ 'on' if path.startswith('/jobs') }}">任务</a>
+    <a href="/settings/llm" class="{{ 'on' if path.startswith('/settings') }}">设置</a>
+    <a href="/status" class="{{ 'on' if path.startswith('/status') }}">状态</a>
+  </nav>
+</header>
+<main>
+  {% if request.query_params.get('ok') %}<div class="flash ok">{{ request.query_params.get('ok') }}</div>{% endif %}
+  {% if request.query_params.get('err') %}<div class="flash err">{{ request.query_params.get('err') }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+<footer class="foot">{{ DISCLAIMER }}界面只在本机访问（127.0.0.1）。</footer>
+</body>
+</html>

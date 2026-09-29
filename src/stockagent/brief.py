@@ -10,7 +10,7 @@ from pathlib import Path
 
 import markdown as md
 
-from . import monitor, notify, technical
+from . import monitor, notify, technical, tracker
 from .app import MARKET_LABEL, SOURCE_LABEL, App
 from .config import Company, Listing
 from .docs import DOC_TYPES
@@ -28,7 +28,7 @@ STOCK_BRIEF_SYSTEM = """你是买方研究员，为一位以港股为主、做�
 - 只基于给出的数据和已分级事件，不要编造数字。引用事件时标注日期与来源，如〔09-23 港交所〕。
 - 先说结论：今天这只股票最重要的变化是什么、有多重要；没有重要变化就直说"无重要新增信息"。
 - 结合价格反应（发布后涨跌、超额收益、量比、趋势）判断消息是否已被市场消化。
-- 本阶段不给买卖建议和目标价，只给出需要验证的问题，以及接下来要盯的催化剂和风险。
+- 不给买卖建议，也不要自行给出目标价（目标价由「标的追踪」按估值假设计算）；只给出需要验证的问题，以及接下来要盯的催化剂和风险。
 - 简体中文，Markdown，不超过 400 字，不要写标题行。
 
 输出结构（每项用加粗小标题开头）：
@@ -83,6 +83,7 @@ class CompanyBrief:
     triggers: list[dict] = field(default_factory=list)
     catalysts: list[dict] = field(default_factory=list)
     related: list[tuple[dict, dict | None]] = field(default_factory=list)
+    tracking: dict | None = None     # 标的追踪摘要（目标价由代码计算，只写进简报，不交给研判 LLM）
     analysis: str | None = None
     errors: list[str] = field(default_factory=list)
 
@@ -152,6 +153,7 @@ def gather(app: App, company: Company, since: str) -> CompanyBrief:
         cb.catalysts = monitor.upcoming(app, company)
         plan = app.db.plan(company.id) or {}
         cb.related = [(r, technical.snapshot(app.bars(r["secid"]))) for r in plan.get("related_tickers", []) if r.get("secid")]
+        cb.tracking = tracker.status(app, company)
         stale = app.settings.report.dossier_stale_days
         if (today_local() - datetime.strptime(cb.thesis_date, "%Y-%m-%d").date()).days >= stale:
             cb.gaps.append(f"深度报告已超过 {stale} 天：运行 `stock dossier {company.id}` 更新论点与证伪条件")
@@ -256,6 +258,16 @@ def _tracking_block(cb: CompanyBrief) -> list[str]:
     if not cb.thesis:
         return []
     out = [f"**论点跟踪**（{cb.thesis_date} 深度报告）：{cb.thesis}", ""]
+    if (t := cb.tracking) and t["enabled"]:
+        rev = t["revision"]
+        change = (f"，较上次 {rev['prev_target']:,.2f} {pct(rev['target'] / rev['prev_target'] - 1)}"
+                  if rev["prev_target"] and rev["kind"] != "baseline" else "")
+        out += [f"**{tracker.TARGET_LABEL}**：{t['live_target']:,.2f} {t['currency']}（牛 {rev['bull'] or 0:,.2f} / "
+                f"基准 {rev['base'] or 0:,.2f} / 熊 {rev['bear'] or 0:,.2f}）"
+                + (f"｜现价 {t['price']:,.2f}，空间 {pct(t['upside'])}" if t["upside"] is not None else "")
+                + f"｜最近{tracker.KIND_LABEL[rev['kind']]}（{fmt_local(rev['created_at'])}{change}）：{rev['summary']}"
+                + (f"｜论点{tracker.THESIS_STATUS[rev['thesis_status']]}" if rev.get("thesis_status") in tracker.THESIS_STATUS else ""),
+                ""]
     alert = [t for t in cb.triggers if t["status"] != "ok"]
     if alert:
         out += ["| 状态 | 证伪条件 | 依据 | 预设动作 |", "|---|---|---|---|"]

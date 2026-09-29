@@ -93,7 +93,8 @@ def check_events(app: App, company: Company) -> list[str]:
     triggers = [t for t in app.db.triggers(company.id) if t["kind"] != "price" and t["status"] != "triggered"]
     key = f"monitor_checked:{company.id}"
     since = app.db.kv_get(key) or iso(utcnow() - timedelta(days=3))
-    events = [e for e in app.db.items_since(company.id, since, min_materiality=3)]
+    # 按分级时间取「上次检查之后的新事件」：补抓或补分级的旧条目（发布时间早于上次检查）也要检查
+    events = app.db.items_triaged_since(company.id, since, min_materiality=3)
     if not triggers or not events:
         app.db.kv_set(key, iso(utcnow()))
         return []

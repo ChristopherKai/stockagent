@@ -16,7 +16,7 @@ from .config import Company, Listing, Settings, Watchlist
 from .db import DB
 from .llm import LLM
 from .sources import cninfo, eastmoney, emdata, frankfurter, google_news, hkex, ids, sec, tencent
-from .utils import days_ago, fmt_local, iso, log, make_session, normalize_title, parse_iso, pct, num, sha1, utcnow
+from .utils import days_ago, file_lock, fmt_local, iso, log, make_session, normalize_title, parse_iso, pct, num, sha1, utcnow
 
 FX_HKDCNH = "133.HKDCNH"
 FX_USDCNH = "133.USDCNH"
@@ -52,6 +52,14 @@ class App:
     @property
     def data_dir(self) -> Path:
         return self.settings.data_dir
+
+    def lock_path(self, name: str) -> Path:
+        return self.data_dir / "tmp" / "locks" / f"{name}.lock"
+
+    def lock(self, name: str):
+        """进程锁（非阻塞，yield 是否拿到）：dossier 同一时间只跑一个深度报告；pipeline 串行化 run / alert / target run；
+        web 保证只有一个调度器与任务执行器。"""
+        return file_lock(self.lock_path(name))
 
     def secid(self, listing: Listing) -> str:
         return ids.em_secid(self.db, self.session, listing)

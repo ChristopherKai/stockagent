@@ -29,7 +29,7 @@ from .config import Company
 from .llm import LLMError
 from .sources.web import search_failed
 from .tools import ToolBox, fcf_snapshot, hk_consensus, resolve_ticker, tool_log_markdown
-from .utils import CST, big_num, iso, log, num, pct, today_local, utcnow
+from .utils import CST, big_num, fmt_local, iso, log, num, pct, today_local, utcnow
 
 DISCLAIMER = "本报告由程序调用大模型与公开数据自动生成，仅供研究参考，不构成投资建议。数字以原始公告为准；未披露或未查到的内容已尽量标注。"
 
@@ -377,14 +377,31 @@ def previous_alerts(app: App, company: Company) -> str:
             + "\n".join(f"- [{label[t['status']]}] {t['description']}（依据：{t['evidence'] or '—'}）" for t in rows))
 
 
+def previous_revisions(app: App, company: Company, limit: int = 8) -> str:
+    """上一版报告以来，标的追踪按新事件做过的估值修正：新报告要重新核实这些变化是否仍然成立。"""
+    if not app.db.tracker(company.id):
+        return ""
+    base = app.db.latest_revision(company.id, kind="baseline")
+    rows = [r for r in app.db.revisions(company.id, limit=limit, since_id=base["id"] if base else 0) if r["kind"] != "baseline"]
+    if not rows:
+        return ""
+    status = {"intact": "完好", "strengthened": "加强", "weakened": "削弱", "broken": "失效"}
+    lines = ["上一版深度报告以来，标的追踪根据新事件做过以下估值修正（请核实这些变化是否仍然成立，并在估值与情景中体现）："]
+    for r in reversed(rows):
+        lines.append(f"- {fmt_local(r['created_at'], with_time=False)}｜论点{status.get(r['thesis_status'], '—')}｜{r['summary']}")
+        lines += [f"  · {c['label']}：{c['old']:.4g} → {c['new']:.4g}（{c['reason']}）" for c in r["changes"] or []]
+    return "\n".join(lines)
+
+
 def research(app: App, company: Company, key: str, title: str, questions: str, market: str) -> tuple[str, str, str, list]:
     box = ToolBox(app, company)
     system = [RESEARCH_SYSTEM.format(company=company.title, section=title,
                                      rules=AGENT_RULES.format(today=today_local(), max_steps=app.settings.agent.max_steps)),
               app.company_context(company)]
     alerts = previous_alerts(app, company)
+    revs = previous_revisions(app, company)
     user = (f"{questions}\n\n当前行情：\n{market}\n{app.fx_line()}（涉及币种换算时只用这里的汇率）\n\n"
-            + (f"{alerts}\n\n" if alerts else "")
+            + (f"{alerts}\n\n" if alerts else "") + (f"{revs}\n\n" if revs else "")
             + "先规划要查什么，再调用工具逐项查证，最后输出本部分的研究笔记。")
     try:
         res = app.llm.run_agent("research", system, user, box.specs(), box.call, max_steps=app.settings.agent.max_steps, max_tokens=12000)
@@ -629,6 +646,7 @@ def generate(app: App, company: Company, progress=print, reuse_notes: bool = Fal
 def _write(app: App, company: Company, notes: dict, tool_log: list, header: str, currency: str, progress,
            requests: list[dict]) -> dict:
     alerts = previous_alerts(app, company)
+    revs = previous_revisions(app, company)
     asked = ("=== 已请使用者补充的数据（补缺检索后仍未找到）===\n" + "\n".join(f"- {r['item']}：{r['why']}" for r in requests)
              if requests else "")
     # 程序计算的 EV / 自由现金流与港股一致预期：每次撰写都按最新行情重算，复用旧笔记时也不会缺
@@ -650,7 +668,8 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
     must = ("=== 报告必须覆盖的关键事实（写入括号中的章节）===\n" + "\n".join(f"- {f['fact']}（{f['section']}）" for f in facts)
             if facts else "")
     material = (f"公司：{company.title}\n今天：{today_local()}\n行情：{header}\n{app.fx_line()}\n\n"
-                + (f"{alerts}\n\n" if alerts else "") + notes_text + (f"\n\n{asked}" if asked else "")
+                + (f"{alerts}\n\n" if alerts else "") + (f"{revs}\n\n" if revs else "") + notes_text
+                + (f"\n\n{asked}" if asked else "")
                 + (f"\n\n{must}" if must else ""))
     # 分两段撰写；单段超出输出上限时 LLM 层会自动续写；输出不完整（例如只剩推理过程）就重写
     part1 = _write_part(app, company, [WRITER_RULES, WRITER_PART1], material, PART1_SECTIONS, "前半部分", progress, title=True)

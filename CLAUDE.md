@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`stockagent` (CLI `stock`) is a research system for a watchlist of HK / A-share / US stocks. It collects prices, announcements and news; an LLM grades each event; tool-using research agents write deep dossiers ending in machine-checkable kill criteria; and it produces daily briefs and push alerts. It is a research aid only: it places no orders and gives no buy/sell advice. README.md (Chinese) is the user manual. Prompts, CLI output, comments and reports are all Simplified Chinese, so keep new user-facing strings in Chinese.
+`stockagent` (CLI `stock`) is a research system for a watchlist of HK / A-share / US stocks. It collects prices, announcements and news; an LLM grades each event; tool-using research agents write deep dossiers ending in machine-checkable kill criteria; a tracker revises each dossier's valuation as new events arrive (target price = scenario-weighted valuation computed in code); and it produces daily briefs, push alerts and a local WebUI (`stock web`) with a built-in scheduler. It is a research aid only: it places no orders and gives no buy/sell ratings; the target price is labelled 「目标价（情景加权估值）」 with a disclaimer everywhere it appears. README.md (Chinese) is the user manual. Prompts, CLI output, comments and reports are all Simplified Chinese, so keep new user-facing strings in Chinese.
 
 ## Commands
 
@@ -17,13 +17,15 @@ uv run stock llm-test [--profile NAME]                 # probe each LLM profile 
 uv run stock status                                    # DB counts, task→model routing, push channels
 uv run stock -v run [company ...] [--no-llm]           # daily pipeline; -v (before the subcommand) = INFO logs
 uv run stock dossier <company> [--reuse-notes] [--refill]   # deep report, several minutes per company
+uv run stock target add|list|show|run|rebase|remove <company>  # tracker: code-built baseline, event-driven revisions
+uv run stock web [--port 8765] [--no-scheduler] [--open]       # WebUI on 127.0.0.1 + job runner + scheduler
 ```
 
 - There is no linter config or linter dependency. The `.ruff_cache/` shows ruff has only been run ad hoc (`uvx ruff check src tests`).
 - Run the CLI from the repo root. It reads `./config.yaml`, `./watchlist.yaml` and `./.env` (`-c` overrides the config path).
 - `company` args accept a watchlist id, name, alias or code; omit them to mean all companies.
-- Production runs from cron (README 「定时运行」): `stock run --push` twice on weekdays, `stock alert` every 20 min in market hours, and a weekly `stock dossier`.
-- **Adding a company:** add an entry to `watchlist.yaml` (listings with `market`/`code`/`benchmark`; `notes`, `watch_items`, `news_queries` become LLM context). Then run `stock fetch <id>` → `stock docs fetch <id>` → `stock triage <id>` → `stock profile <id>` → `stock dossier <id>`.
+- Production runs from the built-in scheduler inside `stock web` (config `scheduler.jobs`, cron syntax in Asia/Shanghai; README 「定时运行」 has a launchd plist): `stock run --push` twice on weekdays (includes the tracker step), `stock alert` every 20 min in market hours. System cron is the alternative; never enable both.
+- **Adding a company:** add an entry to `watchlist.yaml` (listings with `market`/`code`/`benchmark`; `notes`, `watch_items`, `news_queries` become LLM context), or use the WebUI's 观察清单 page. Then run `stock fetch <id>` → `stock docs fetch <id>` → `stock triage <id>` → `stock profile <id>` → `stock dossier <id>` → `stock target add <id>` (the WebUI's 「新公司初始化」 job runs the same chain).
 
 ## Architecture
 
@@ -37,6 +39,9 @@ uv run stock dossier <company> [--reuse-notes] [--refill]   # deep report, sever
   - per-source circuit breakers `down:<source>`: 60 min, shared by every process.
   - cached external IDs: `hkex_stock_id:`, `cninfo_org_id:`, `sec_cik:`, `em_secid:`, `us_secid:`.
   - once-a-day markers: `reports_checked:`, `monitor_checked:`.
+  - scheduler fire markers `sched_last:<schedule name>` (last minute fired, CST ISO).
+- Tracker tables: `trackers` (one row per tracked company; points at the current baseline dossier and latest revision), `revisions` (baseline / revision / review snapshots with the full model JSON, applied and rejected changes, assessed evidence, trigger-status snapshot), `tracker_refs` (primary key `(company_id, ref)`: every piece of evidence the tracker has shown to the model, so nothing is processed twice). `jobs` holds WebUI / scheduler / tracker-queued background jobs.
+- Process locks live in `data/tmp/locks/*.lock` (fcntl.flock, released when the process dies): `dossier`, `pipeline` (run / alert / target run), `web` (only one scheduler + job runner). `PRAGMA user_version` is set (currently 1); new columns on existing tables need an ALTER keyed on it.
 - `data/` is gitignored, generated output: the DB; `docs/` (originals plus extracted `.txt`); `dossiers/` (html/md/pdf plus `notes/*.json`); `reports/`; `inbox/`; `tmp/`.
 
 **Instrument keys.** The Eastmoney `secid` keys all price data:
@@ -77,17 +82,28 @@ uv run stock dossier <company> [--reuse-notes] [--refill]   # deep report, sever
   - The card's plan (`related_tickers`, `news_keywords`) widens what `fetch_news` and `fetch_market` collect.
   - monitor.py checks kill criteria on each run: price metrics in code, fundamental/event ones by LLM. Status only escalates (ok → warning → triggered).
   - Non-ok criteria are fed into the next dossier (`previous_alerts`).
-- **Also:** brief.py (daily brief, alerts); notify.py (Feishu/WeCom/Telegram, configured via `.env`); evaluate.py (`stock eval`: forward excess returns of graded events, measured from the first tradable close after publication).
+- **Tracker** (valuation.py, tracker.py; runs as step 5/6 of `stock run`, after monitor and before the brief):
+  1. Baseline (no LLM): `valuation.build_baseline` finds the dossier's `valuation_matrix` tool call that explains the most card scenario endpoints (±1.5%), skips calls whose shares disagree with `quote.market_cap / price / 1e8` by >30%, and solves each scenario's multiple so its price equals the card range midpoint. No usable matrix → `method="range"` model (drivers are prices, only scalable). Price = `tools.matrix_price` (same function as the matrix tool), clamped at 0; target = probability-weighted (`tracker.target`). fx is recomputed in code from `133.HKDCNH` / `133.USDCNH` bars; the report currency is inferred by matching the matrix fx against those rates.
+  2. Candidates: items triaged after (baseline dossier − 2 h) and published ≤ 30 days before it, materiality ≥ `tracker.min_materiality`, not yet in `tracker_refs`; trigger status escalations vs the last revision's snapshot; documents and manual data added after the dossier. No candidates → no LLM call.
+  3. Stage A: `run_agent("tracker")` with a `ToolBox(allow=...)` whitelist (web_search removed while the dossier lock is held). Context = valuation model, tracking card (thesis, kill criteria, catalysts, watch metrics, data gaps, related tickers), the dossier's valuation/scenario/insight sections, recent revisions.
+  4. Stage B: `complete("tracker")` returns changes as `{path, op: set|add|mul, operand, reason, evidence[], derivation}`; code applies them (`apply_changes`). Rejected: invalid path/op, no valid evidence code, out-of-bounds values, fact paths (`g.shares`, `g.net_cash`, `set` on drivers) whose operand is not found in cited evidence or tool results. Fact-path moves > `tracker.flag_change` are not applied but stored as `confirm: true` entries for the user (`tracker.confirm_change`, WebUI 「采纳」). Methodology issues go to `questions` → flags. No `validate=` hook on this call (one bad change must not fail the whole revision).
+  5. Materiality ≥ `tracker.redo_materiality` judged material, or thesis broken → `queue_redo` inserts a `dossier` job (cooldown `redo_cooldown_days`); `cmd_dossier` re-baselines tracked companies after saving the new dossier. `dossier.previous_revisions()` feeds revisions since the last dossier into the next one.
+- **Jobs & scheduler** (jobs.py, jobrun.py, scheduler.py, cron.py): the WebUI and scheduler may only run tasks registered in `jobs.TASKS` (fixed argv, validated company ids and flags, no shell). `JobRunner` (thread in `stock web`) launches `python -m stockagent.jobrun <id>`, which runs the CLI in-process and writes its own exit status; groups `pipeline` and `dossier` are mutually exclusive (also checked against the file locks). Free-text input (notes, manual data, uploads) is handled in the web process, never passed as argv.
+- **WebUI** (web/): FastAPI + Jinja2, server-rendered, vanilla JS/CSS, SVG chart built in Python. Pages read the DB only (no network). Config edits go through `web/yamledit.py` (ruamel round-trip, comments kept, codes written as double-quoted strings, full validation, backup, etag conflict check); `.env` edits only accept names ending `_KEY/_TOKEN/_SECRET/_WEBHOOK`.
+- **Also:** brief.py (daily brief, alerts; renders the tracker line in code, never passes target numbers to the brief LLM); notify.py (Feishu/WeCom/Telegram, configured via `.env`); evaluate.py (`stock eval`: forward excess returns of graded events, measured from the first tradable close after publication).
 
 **String contracts between modules.** Keep these prefixes if you edit the messages:
 - Tool errors start with `错误`; the Anthropic agent loop marks those results `is_error`.
 - A `web_search` result starting with `没有可用的搜索结果` counts as a search outage (`web.search_failed`), which makes a later `--reuse-notes` rerun gap-fill.
 - Failed research notes start with `FAILED_MARK`.
+- Tracker evidence codes shown to the model: events `id=<short_id>` (12 hex chars, in the user message so the mock can echo them), kill criteria `K<id>`, documents `D<id>`, manual data `M<id>`, catalysts `C<n>`, stage-A tool results `T<n>`. `tracker_refs.ref` prefixes: `item:`, `trig:<id>:<status>`, `doc:`, `man:<id>:<imported_at>`, `cat:<dossier>:<hash>`. Only the Stage B `events` array uses an `id` field (the mock expands arrays with an `id` property per hex id).
 
 ## Rules that are easy to break
 
 - **No shell or generic exec tool for agents.** The research agent reads untrusted web pages, so injected text must never be able to run commands. New capabilities go in tools.py as fixed `Tool`s. External CLIs (mcporter → Exa) are called with a fixed argv, never through a shell. `fetch_text` refuses loopback/private hosts, and `calculate` only evaluates a whitelisted subset of Python syntax (`safe_calc`).
 - **Numbers come from code or tools, not the model.** Technicals, AH premium, price reactions, EV/FCF yield (`fcf_snapshot`) and valuation maths are all computed in Python, and prompts demand cited, tool-sourced figures. `ref/价值投资新经济-投资思路蒸馏.md` is the user's valuation framework (EV, FCF yield, Negative EV, SOTP), which `fcf_yield` implements.
 - **Stay model-agnostic.** Model-specific knobs (`max_tokens`, `max_input_chars`, `tool_mode`, `json_mode`, `fallback`) belong in `config.yaml` profiles and are uncapped by default. Don't hardcode limits or tailor prompts or code to one model.
-- **One `stock dossier` process at a time.** Its 4 parallel agents already exhaust the free search sources (360 captchas last 30+ min) and the local LLM gateway's account pool. Check `pgrep -fl "bin/stock dossier"` before starting one.
+- **One `stock dossier` process at a time.** Its 4 parallel agents already exhaust the free search sources (360 captchas last 30+ min) and the local LLM gateway's account pool. `cmd_dossier` enforces this with the `dossier` file lock (a second one exits with a message); `pgrep` misses jobs started as `python -m stockagent.jobrun`, so check `stock web`'s 状态 page or the lock instead.
+- **Target prices come from code.** The tracker model never states a new price: it proposes op/operand changes with evidence codes; code validates provenance and recomputes. Keep the scenario-weighted-valuation label and disclaimer wherever a target price is shown.
+- **WebUI safety.** Bind only 127.0.0.1; keep TrustedHost, the Origin check and the CSRF dependency on every router; sanitize any LLM/web-derived markdown with `render.md_html` (nh3) and links with `safe_url`; serve stored report HTML with the sandbox CSP; pages must not call networked helpers (`ensure_bars`, `latest_quote`, US `resolve_ticker`).
 - **Tests stay offline.** conftest's autouse fixture disables mcporter/Exa and stubs `emdata.fcf_data`. Use the `app` fixture (temp dir, mock LLM), and monkeypatch any network call a new test reaches.

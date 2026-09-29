@@ -1,0 +1,20 @@
+{# 通用设置字段：f 来自 forms.fields()；key 为表单字段名 #}
+{% if f.kind == 'bool' %}
+  <label class="check"><input type="checkbox" name="{{ key }}" {{ 'checked' if f.value }}> {{ f.label }}{% if f.help %}<small>{{ f.help }}</small>{% endif %}</label>
+{% elif f.kind in ('choice', 'optchoice') %}
+  <label>{{ f.label }}<select name="{{ key }}">
+    {% if f.kind == 'optchoice' %}<option value="">（不设置）</option>{% endif %}
+    {% for o in f.options %}<option value="{{ o }}" {{ 'selected' if (f.value | string) == o }}>{{ o }}</option>{% endfor %}</select>
+    {% if f.help %}<small>{{ f.help }}</small>{% endif %}</label>
+{% elif f.kind == 'multi' %}
+  <fieldset><legend>{{ f.label }}</legend>
+    {% for o in f.options %}<label class="check inline"><input type="checkbox" name="{{ key }}" value="{{ o }}" {{ 'checked' if o in f.value }}> {{ o }}</label>{% endfor %}
+    {% if f.help %}<small>{{ f.help }}</small>{% endif %}</fieldset>
+{% elif f.kind == 'lines' %}
+  <label>{{ f.label }}<textarea name="{{ key }}" rows="{{ [3, f.value | length + 1] | max }}">{{ f.value | join('\n') }}</textarea>
+    {% if f.help %}<small>{{ f.help }}</small>{% endif %}</label>
+{% else %}
+  <label>{{ f.label }}<input name="{{ key }}" value="{{ '' if f.value is none else f.value }}"
+    {% if f.kind in ('int', 'optint') %}inputmode="numeric"{% elif f.kind in ('float', 'optfloat') %}inputmode="decimal"{% endif %}>
+    {% if f.help %}<small>{{ f.help }}</small>{% endif %}</label>
+{% endif %}

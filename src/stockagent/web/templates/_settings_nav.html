@@ -1,0 +1,9 @@
+{% set path = request.url.path %}
+<nav class="subnav">
+  <a href="/settings/llm" class="{{ 'on' if path.startswith('/settings/llm') }}">LLM 连接</a>
+  <a href="/settings/schedule" class="{{ 'on' if path.startswith('/settings/schedule') }}">日程</a>
+  <a href="/settings/tracker" class="{{ 'on' if path.startswith('/settings/tracker') }}">标的追踪</a>
+  <a href="/settings/general" class="{{ 'on' if path.startswith('/settings/general') }}">通用</a>
+  <a href="/settings/secrets" class="{{ 'on' if path.startswith('/settings/secrets') }}">密钥</a>
+  <a href="/settings/raw" class="{{ 'on' if path.startswith('/settings/raw') }}">原始配置</a>
+</nav>

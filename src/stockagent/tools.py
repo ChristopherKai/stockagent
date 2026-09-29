@@ -141,6 +141,11 @@ def implied_growth(market_value: float, fcf: float, discount_rate: float, termin
     return (lo + hi) / 2
 
 
+def matrix_price(driver: float, multiple: float, shares: float, net_cash: float = 0.0, fx: float = 1.0) -> float:
+    """敏感性矩阵的一个格点：隐含股价 =（倍数 × 驱动指标 + 净现金）÷ 股本 × 汇率。估值模型（valuation.py）用同一公式。"""
+    return (multiple * driver + net_cash) / shares * fx
+
+
 def matrix_table(driver_label: str, driver_values: list[float], multiple_label: str, multiples: list[float],
                  shares: float, net_cash: float = 0.0, fx: float = 1.0, current_price: float | None = None) -> str:
     if shares <= 0:
@@ -150,7 +155,7 @@ def matrix_table(driver_label: str, driver_values: list[float], multiple_label: 
     for d in driver_values:
         cells = []
         for m in multiples:
-            price = (m * d + net_cash) / shares * fx
+            price = matrix_price(d, m, shares, net_cash, fx)
             cell = f"{price:,.2f}"
             if current_price:
                 cell += f"（{pct(price / current_price - 1, 0)}）"
@@ -417,14 +422,15 @@ def ensure_bars(app: App, secid: str, max_age_days: int = 4, min_bars: int = 0):
 # ---------------------------------------------------------------- 工具箱
 
 class ToolBox:
-    def __init__(self, app: App, company: Company):
+    def __init__(self, app: App, company: Company, allow: list[str] | None = None):
+        """allow：工具白名单。不在其中的工具既不提供给模型，模型硬要调用时也只返回错误（specs 只是告诉模型有哪些工具）。"""
         self.app = app
         self.company = company
         self.max_chars = app.settings.agent.tool_result_chars
         self.web_providers = list(app.settings.agent.web_search)
         self.log: list[dict] = []
         self._pages: dict[int, list[tuple[int, str, str]]] = {}  # doc_id → [(页码, 原文, 简体)]
-        self.tools = {t.name: t for t in self._build()}
+        self.tools = {t.name: t for t in self._build() if allow is None or t.name in allow}
 
     def specs(self, names: list[str] | None = None) -> list[dict]:
         return [t.spec() for n, t in self.tools.items() if names is None or n in names]

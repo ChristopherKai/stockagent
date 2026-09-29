@@ -8,7 +8,9 @@ from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from . import cron
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
@@ -144,6 +146,66 @@ class ReportConfig(BaseModel):
     color_scheme: Literal["red_up", "green_up"] = "red_up"
 
 
+class TrackerConfig(BaseModel):
+    """标的追踪：按新事件修正估值假设；目标价（情景加权估值）由代码按模型计算。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    min_materiality: int = 3            # 触发修正的最低事件重要性（1–5）
+    max_events: int = 25                # 每次修正最多处理的依据条数，其余留到下次
+    max_steps: int = 8                  # 修正 agent 最多调用工具的轮数
+    web_search: bool = True             # 修正 agent 可用网页搜索（深度报告运行期间自动暂停，避免争抢搜索源）
+    target: Literal["expected", "base"] = "expected"   # 目标价口径：expected 概率加权 / base 基准情景
+    notify_min_change: float = 0.05     # 目标价变动达到该比例时推送
+    flag_change: float = 0.25           # 单项假设变动超过该比例时标注「大幅修正」
+    auto_rebaseline: bool = True        # 有新的深度报告时自动重建估值基线
+    redo_materiality: int = 5           # 重要性达到该值且修正判为实质影响的事件，自动排队重跑深度报告
+    redo_on_broken: bool = True         # 论点被判失效时自动排队重跑深度报告
+    redo_cooldown_days: int = 3         # 同一公司自动重跑深度报告的冷却天数
+
+
+class WebConfig(BaseModel):
+    """WebUI（stock web）：只监听本机 127.0.0.1。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    port: int = 8765
+    max_jobs: int = 2                   # 同时运行的后台任务数上限（深度报告另有全局互斥）
+    upload_max_mb: int = 50             # 上传文档的大小上限
+
+
+class ScheduleJob(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    task: str                           # 任务登记表中的名称（run / alert / target_run / dossier ...）
+    args: list[str] = Field(default_factory=list)  # 开关（如 --push）与公司 id
+    cron: str                           # 5 段 cron 表达式，按北京时间
+    enabled: bool = True
+
+    @field_validator("cron")
+    @classmethod
+    def _cron(cls, v: str) -> str:
+        return cron.validate(v)
+
+
+class SchedulerConfig(BaseModel):
+    """内置调度器（随 stock web 运行）。与系统 cron 二选一，不要同时启用。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    catchup_minutes: int = 120          # 电脑睡眠等原因错过的任务，醒来后在该时间窗内补跑一次
+    jobs: list[ScheduleJob] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique(self) -> "SchedulerConfig":
+        names = [j.name for j in self.jobs]
+        if dup := {n for n in names if names.count(n) > 1}:
+            raise ValueError(f"日程名称重复：{dup}")
+        return self
+
+
 class Settings(BaseModel):
     data_dir: Path = Path("data")
     llm: LLMConfig
@@ -151,6 +213,9 @@ class Settings(BaseModel):
     notify: NotifyConfig = Field(default_factory=NotifyConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    tracker: TrackerConfig = Field(default_factory=TrackerConfig)
+    web: WebConfig = Field(default_factory=WebConfig)
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
 
 
 # ---------------------------------------------------------------- 自选股
@@ -216,8 +281,8 @@ class Company(BaseModel):
     @field_validator("id")
     @classmethod
     def _id_ok(cls, v: str) -> str:
-        if not v or not v.replace("_", "").replace("-", "").isalnum():
-            raise ValueError(f"company id 只能包含字母、数字、-、_：{v}")
+        if not v or not v[0].isalnum() or not v.replace("_", "").replace("-", "").isalnum():
+            raise ValueError(f"company id 只能包含字母、数字、-、_，且以字母或数字开头：{v}")
         return v
 
     def listing(self, market: str) -> Listing | None:

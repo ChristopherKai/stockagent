@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}设置 · 日程{% endblock %}
+{% block content %}
+{% include "_settings_nav.html" %}
+<section class="card">
+  <div class="card-head"><h2>日程（内置调度器）</h2></div>
+  <p class="muted small">随 stock web 运行，按北京时间触发，把任务放进队列。cron 为 5 段：分 时 日 月 周（周 1–5 为工作日，0 或 7 为周日）。
+    电脑睡眠时不会运行；醒来后在补跑窗口内的错过时点补跑一次。与系统 crontab 二选一，不要同时启用。「日常流程」已包含标的追踪（修正估值）。</p>
+  <form method="post" class="form">{{ csrf_field }}
+    <input type="hidden" name="etag" value="{{ etag }}">
+    <input type="hidden" name="rows" value="{{ cfg.jobs | length }}">
+    <div class="row2">
+      <label class="check"><input type="checkbox" name="enabled" {{ 'checked' if cfg.enabled }}> 启用内置调度器</label>
+      <label>补跑窗口（分钟）<input name="catchup_minutes" value="{{ cfg.catchup_minutes }}" inputmode="numeric"></label>
+    </div>
+    <div class="tblwrap"><table class="tbl sched">
+      <thead><tr><th>启用</th><th>名称</th><th>任务</th><th>参数（开关与公司 id，空格分隔）</th><th>cron</th><th>下次运行</th><th>删除</th></tr></thead>
+      <tbody>
+      {% for x in runs %}{% set j = x.job %}{% set i = loop.index0 %}
+        <tr><td><input type="checkbox" name="enabled_{{ i }}" {{ 'checked' if j.enabled }}></td>
+          <td><input name="name_{{ i }}" value="{{ j.name }}" required></td>
+          <td><select name="task_{{ i }}">{% for k, t in tasks.items() %}<option value="{{ k }}" {{ 'selected' if k == j.task }}>{{ t.title }}</option>{% endfor %}</select></td>
+          <td><input name="args_{{ i }}" value="{{ j.args | join(' ') }}" placeholder="如 --push"></td>
+          <td><input name="cron_{{ i }}" value="{{ j.cron }}" class="mono" required></td>
+          <td class="small nowrap">{{ x.next.strftime('%m-%d %H:%M') if x.next else '—' }}</td>
+          <td><input type="checkbox" name="delete_{{ i }}"></td></tr>
+      {% endfor %}
+        {% set i = cfg.jobs | length %}
+        <tr class="newrow"><td><input type="checkbox" name="enabled_{{ i }}" checked></td>
+          <td><input name="name_{{ i }}" placeholder="新日程名称"></td>
+          <td><select name="task_{{ i }}">{% for k, t in tasks.items() %}<option value="{{ k }}">{{ t.title }}</option>{% endfor %}</select></td>
+          <td><input name="args_{{ i }}" placeholder="如 --push"></td>
+          <td><input name="cron_{{ i }}" class="mono" placeholder="30 8 * * 1-5"></td><td></td><td></td></tr>
+      </tbody>
+    </table></div>
+    <div class="actions"><button class="btn">保存日程</button><span class="muted small">每次保存可新增一行；保存时刻之前错过的时点不补跑。</span></div>
+  </form>
+</section>
+<section class="card">
+  <h2>等价的 crontab 写法</h2>
+  <p class="muted small">如果更想用系统 cron（此时关闭内置调度器）：</p>
+  <pre class="log">{% for x in runs if x.job.enabled %}{% set t = tasks.get(x.job.task) %}{{ x.job.cron }}  cd {{ root }} && uv run stock {{ (t.argv | join(' ')) if t and t.argv else x.job.task }} {{ x.job.args | join(' ') }} >> data/cron.log 2>&1
+{% endfor %}</pre>
+</section>
+{% endblock %}

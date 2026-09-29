@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}设置 · {{ '新建 profile' if is_new else 'profile ' ~ name }}{% endblock %}
+{% block content %}
+{% include "_settings_nav.html" %}
+<section class="card">
+  <div class="card-head"><h2>{{ '新建 profile' if is_new else 'profile：' ~ name }}</h2><a class="btn ghost small" href="/settings/llm">返回</a></div>
+  <form method="post" action="/settings/llm/profile/{{ name }}" class="form">{{ csrf_field }}
+    <input type="hidden" name="etag" value="{{ etag }}">
+    {% if is_new %}<label>profile 名<input name="new_name" required pattern="[A-Za-z0-9][A-Za-z0-9_\-]*" placeholder="如 deepseek、qwen、claude"></label>{% endif %}
+    <div class="grid-fields">
+    {% for f in fields %}
+      {% set key = 'profile.' ~ f.name %}
+      {% if f.name == 'model' %}
+        <label>{{ f.label }}<input name="{{ key }}" value="{{ f.value }}" list="model-list" required>
+          {% if not is_new %}<button type="button" class="btn tiny ghost" data-models-url="/settings/llm/profile/{{ name }}/models" data-target="model-list">获取模型列表</button>{% endif %}
+          <datalist id="model-list"></datalist><small class="models-msg"></small></label>
+      {% else %}
+        {% include "_field.html" %}
+      {% endif %}
+    {% endfor %}
+      <label>备用 profile<select name="fallback"><option value="">（无）</option>
+        {% for o in others %}<option value="{{ o }}" {{ 'selected' if p.fallback == o }}>{{ o }}</option>{% endfor %}</select>
+        <small>{{ '本模型不可用（连接失败、5xx、限流、上游拒绝）时自动改用' }}</small></label>
+    </div>
+    <fieldset><legend>API key</legend>
+      <p class="small">当前：<b>{{ key }}</b>（保存在 .env 的 <span class="mono">{{ p.api_key_env or '（先填写上面的环境变量名）' }}</span>；页面不会显示明文）</p>
+      <label>新的 key<input name="api_key" type="password" autocomplete="off" placeholder="留空 = 不修改"></label>
+      <label class="check"><input type="checkbox" name="clear_key"> 清除已保存的 key</label>
+    </fieldset>
+    <div class="actions"><button class="btn">保存</button>
+      <span class="muted small">保存会写回 config.yaml（保留注释，原文件备份到 data/backups/）；新任务立即使用新配置。</span></div>
+  </form>
+  {% if not is_new %}
+  <hr>
+  <div class="actions">
+    <form method="post" action="/settings/llm/profile/{{ name }}/test" class="inline">{{ csrf_field }}<button class="btn ghost">测试连接（文本 + JSON）</button></form>
+    <form method="post" action="/settings/llm/profile/{{ name }}/delete" class="inline" data-confirm="删除 profile {{ name }}？">{{ csrf_field }}
+      <input type="hidden" name="etag" value="{{ etag }}"><button class="btn danger">删除</button></form>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

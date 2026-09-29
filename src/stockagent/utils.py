@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import html
 import json
 import logging
+import os
 import re
 import threading
 import time
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -176,3 +180,42 @@ def to_simplified(text: str) -> str:
     """检索时把原文和关键词统一转成简体再比较。不能反过来把关键词转成繁体：
     「东岳」会被转成「東嶽」，而港股年报原文写作「東岳」，两种写法都匹配不上。"""
     return convert(text, "zh-hans")
+
+
+# ---------------------------------------------------------------- 进程锁
+
+@contextmanager
+def file_lock(path: Path):
+    """进程级互斥锁（fcntl.flock，非阻塞）：拿到锁时 yield True，已被其他进程持有时 yield False。
+    锁随进程退出自动释放，不会因为崩溃留下死锁；锁文件里记录持有者的 pid。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "a+", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        f.seek(0)
+        f.truncate()
+        f.write(str(os.getpid()))
+        f.flush()
+        try:
+            yield True
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+    finally:
+        f.close()
+
+
+def lock_holder(path: Path) -> int | None:
+    """锁被持有时返回持有者 pid（读不到则为 0），空闲时返回 None。"""
+    if not path.exists():
+        return None
+    with file_lock(path) as got:
+        if got:
+            return None
+    try:
+        return int(path.read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        return 0

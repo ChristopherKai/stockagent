@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}设置 · 原始配置{% endblock %}
+{% block content %}
+{% include "_settings_nav.html" %}
+<section class="card">
+  <div class="card-head"><h2>原始配置</h2>
+    <div class="seg"><a href="?file=config" class="{{ 'on' if file == 'config' }}">config.yaml</a><a href="?file=watchlist" class="{{ 'on' if file == 'watchlist' }}">watchlist.yaml</a></div></div>
+  <p class="muted small">{{ path }}：保存前按运行时的方式完整校验；不通过则不写入。原文件备份到 data/backups/。股票代码请加引号（如 "02577"），否则会被当成数字。</p>
+  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+  <form method="post" class="form">{{ csrf_field }}
+    <input type="hidden" name="etag" value="{{ etag }}"><input type="hidden" name="file" value="{{ file }}">
+    <textarea name="text" rows="36" class="mono code" spellcheck="false">{{ text }}</textarea>
+    <button class="btn">校验并保存</button>
+  </form>
+</section>
+{% endblock %}

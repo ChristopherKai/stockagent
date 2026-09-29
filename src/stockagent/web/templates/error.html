@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}出错了{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>{{ code }}</h1>
+  <p>{{ detail }}</p>
+  <p><a class="btn ghost" href="/">回到仪表盘</a></p>
+</section>
+{% endblock %}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -168,7 +169,78 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     started_at    TEXT, duration_s REAL,
     ok            INTEGER, error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS trackers (
+    company_id   TEXT PRIMARY KEY,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    dossier_id   INTEGER,                 -- 当前估值基线来自哪份深度报告
+    revision_id  INTEGER,                 -- 最新一条修正记录（含基线）
+    checked_at   TEXT,                    -- 上次检查时间
+    last_msg     TEXT                     -- 上次检查的结果（一句话）
+);
+
+CREATE TABLE IF NOT EXISTS revisions (
+    id              INTEGER PRIMARY KEY,
+    company_id      TEXT NOT NULL,
+    dossier_id      INTEGER,
+    created_at      TEXT NOT NULL,
+    kind            TEXT NOT NULL,        -- baseline 基线 | revision 修正 | review 已评估、维持不变
+    origin          TEXT,                 -- cli | run | web | scheduler | dossier
+    price           REAL,                 -- 当时定价上市地的最新收盘价
+    price_date      TEXT,
+    fx              REAL,
+    target          REAL,                 -- 目标价（情景加权估值，按 tracker.target 口径）
+    prev_target     REAL,
+    bull REAL, base REAL, bear REAL,
+    stance          TEXT,
+    thesis_status   TEXT,                 -- intact | strengthened | weakened | broken
+    summary         TEXT,
+    narrative_md    TEXT,
+    changes_json    TEXT NOT NULL DEFAULT '[]',   -- 已应用的假设变化（原值、新值、操作、理由、依据）
+    rejected_json   TEXT NOT NULL DEFAULT '[]',   -- 未采纳的修改及原因
+    events_json     TEXT NOT NULL DEFAULT '[]',   -- 本次看过的依据及评估
+    catalysts_json  TEXT NOT NULL DEFAULT '[]',   -- 催化剂评估（含文字快照：新报告会删除催化剂）
+    triggers_json   TEXT NOT NULL DEFAULT '{}',   -- 证伪条件状态快照 {id: status}
+    flags_json      TEXT NOT NULL DEFAULT '[]',
+    unverified_json TEXT NOT NULL DEFAULT '[]',   -- 修正说明中找不到出处的数字
+    notes_md        TEXT,                         -- 修正研究笔记
+    tool_log_json   TEXT NOT NULL DEFAULT '[]',
+    model_json      TEXT NOT NULL,                -- 修正后的估值模型快照
+    llm_model       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_revisions_company ON revisions(company_id, id);
+
+CREATE TABLE IF NOT EXISTS tracker_refs (
+    company_id   TEXT NOT NULL,
+    ref          TEXT NOT NULL,           -- item:<uid> | trig:<id>:<status> | doc:<id> | man:<id>:<imported_at> | cat:<dossier>:<hash>
+    revision_id  INTEGER,
+    impact       TEXT NOT NULL,           -- none | minor | material | unassessed | superseded | hit | miss | partial
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (company_id, ref)
+);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id           INTEGER PRIMARY KEY,
+    task         TEXT NOT NULL,
+    argv_json    TEXT NOT NULL,           -- 各步骤的子命令参数（不含 -c 配置路径）
+    title        TEXT NOT NULL,
+    company_id   TEXT,
+    status       TEXT NOT NULL DEFAULT 'queued',  -- queued | running | done | failed | cancelled | interrupted
+    source       TEXT NOT NULL,           -- web | scheduler | tracker
+    note         TEXT,
+    created_at   TEXT NOT NULL,
+    started_at   TEXT,
+    finished_at  TEXT,
+    pid          INTEGER,
+    exit_code    INTEGER,
+    log_path     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, id);
 """
+
+SCHEMA_VERSION = 1  # PRAGMA user_version；以后给已有表加列时在 DB.__init__ 里按版本号执行 ALTER
 
 TRIAGE_FIELDS = (
     "relevant", "duplicate_of", "event_type", "direction", "materiality",
@@ -180,13 +252,16 @@ class DB:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        # LLM 调用在线程池中执行并记录用量，因此允许跨线程使用，写操作由锁串行化
-        self.conn = sqlite3.connect(path, check_same_thread=False)
+        # LLM 调用在线程池中执行并记录用量，因此允许跨线程使用，写操作由锁串行化。
+        # WebUI 进程与子进程任务会同时写库：等锁最多 30 秒（默认 5 秒）
+        self.conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.lock = threading.RLock()
         with self.lock:
             self.conn.executescript(SCHEMA)
+            if self.conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+                self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self.conn.commit()
 
     def close(self) -> None:
@@ -207,6 +282,18 @@ class DB:
             r = self.conn.execute(sql, params).fetchone()
             return dict(r) if r else None
 
+    @contextmanager
+    def transaction(self):
+        """多语句写入：BEGIN IMMEDIATE 一开始就拿写锁，避免读后再写时与其他进程冲突（SQLITE_BUSY_SNAPSHOT 不会等待）。"""
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self.conn
+            except BaseException:
+                self.conn.rollback()
+                raise
+            self.conn.commit()
+
     # ------------------------------------------------------------ kv
 
     def kv_get(self, key: str) -> str | None:
@@ -215,6 +302,13 @@ class DB:
 
     def kv_set(self, key: str, value: str) -> None:
         self._exec("INSERT INTO kv(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    def kv_delete(self, key: str) -> bool:
+        return self._exec("DELETE FROM kv WHERE key=?", (key,)).rowcount > 0
+
+    def kv_prefix(self, prefix: str) -> dict[str, str]:
+        rows = self._all("SELECT key, value FROM kv WHERE substr(key, 1, ?) = ? ORDER BY key", (len(prefix), prefix))
+        return {r["key"]: r["value"] for r in rows}
 
     # ------------------------------------------------------------ items
 
@@ -253,6 +347,14 @@ class DB:
             sql += " AND relevant=1 AND (duplicate_of IS NULL OR duplicate_of='') AND materiality>=?"
             params.append(min_materiality)
         return self._all(sql + " ORDER BY published_at DESC", params)
+
+    def items_triaged_since(self, company_id: str, since: str, min_materiality: int) -> list[dict]:
+        """某个时间之后完成分级的重要事件（按分级时间而不是发布时间：补抓、补分级的条目不会漏掉）。"""
+        return self._all(
+            "SELECT * FROM items WHERE company_id=? AND triaged_at>? AND relevant=1 AND (duplicate_of IS NULL OR duplicate_of='') "
+            "AND materiality>=? ORDER BY published_at DESC",
+            (company_id, since, min_materiality),
+        )
 
     def recent_titles(self, company_id: str, since: str) -> list[dict]:
         return self._all(
@@ -439,6 +541,149 @@ class DB:
         r = self._one("SELECT plan_json FROM plans WHERE company_id=?", (company_id,))
         return json.loads(r["plan_json"]) if r else None
 
+    def dossier(self, dossier_id: int) -> dict | None:
+        r = self._one("SELECT * FROM dossiers WHERE id=?", (dossier_id,))
+        if r:
+            r["card"] = json.loads(r.pop("card_json"))
+        return r
+
+    def dossiers(self, company_id: str | None = None) -> list[dict]:
+        """报告列表（不含正文）。"""
+        sql = "SELECT id, company_id, created_at, model, html_path, pdf_path FROM dossiers"
+        return self._all(sql + (" WHERE company_id=?" if company_id else "") + " ORDER BY id DESC",
+                         (company_id,) if company_id else ())
+
+    # ------------------------------------------------------------ 标的追踪
+
+    def tracker(self, company_id: str) -> dict | None:
+        return self._one("SELECT * FROM trackers WHERE company_id=?", (company_id,))
+
+    def trackers(self, enabled_only: bool = True) -> list[dict]:
+        return self._all("SELECT * FROM trackers" + (" WHERE enabled=1" if enabled_only else "") + " ORDER BY company_id")
+
+    def set_tracker(self, company_id: str, **fields) -> None:
+        """新建或更新追踪器（只更新给出的字段）。"""
+        now = iso(utcnow())
+        with self.lock:
+            if self.conn.execute("SELECT 1 FROM trackers WHERE company_id=?", (company_id,)).fetchone() is None:
+                self.conn.execute("INSERT INTO trackers(company_id, created_at, updated_at) VALUES(?,?,?)", (company_id, now, now))
+            if fields:
+                sets = ", ".join(f"{k}=?" for k in fields)
+                self.conn.execute(f"UPDATE trackers SET {sets}, updated_at=? WHERE company_id=?", (*fields.values(), now, company_id))
+            self.conn.commit()
+
+    REVISION_JSON = ("changes", "rejected", "events", "catalysts", "triggers", "flags", "unverified", "tool_log", "model")
+
+    def add_revision(self, rev: dict, refs: list[tuple[str, str]] = (), tracker: dict | None = None) -> int:
+        """保存一条修正记录，同时关联看过的依据（ref, impact）并把追踪器指向它；在一个事务里完成。"""
+        rev = dict(rev)
+        for k in self.REVISION_JSON:
+            if k in rev:
+                rev[f"{k}_json"] = json.dumps(rev.pop(k), ensure_ascii=False)
+        rev.setdefault("created_at", iso(utcnow()))
+        cols = list(rev)
+        with self.transaction() as conn:
+            rid = conn.execute(f"INSERT INTO revisions({', '.join(cols)}) VALUES({', '.join('?' * len(cols))})",
+                               [rev[c] for c in cols]).lastrowid
+            conn.executemany("INSERT OR IGNORE INTO tracker_refs(company_id, ref, revision_id, impact, created_at) VALUES(?,?,?,?,?)",
+                             [(rev["company_id"], ref, rid, impact, rev["created_at"]) for ref, impact in refs])
+            fields = {"revision_id": rid, **(tracker or {})}
+            conn.execute(f"UPDATE trackers SET {', '.join(f'{k}=?' for k in fields)}, updated_at=? WHERE company_id=?",
+                         (*fields.values(), rev["created_at"], rev["company_id"]))
+        return rid
+
+    @classmethod
+    def _revision_row(cls, r: dict | None) -> dict | None:
+        if r:
+            for k in cls.REVISION_JSON:
+                raw = r.pop(f"{k}_json", None)
+                r[k] = json.loads(raw) if raw else None
+        return r
+
+    def revision(self, revision_id: int) -> dict | None:
+        return self._revision_row(self._one("SELECT * FROM revisions WHERE id=?", (revision_id,)))
+
+    def revisions(self, company_id: str, limit: int | None = None, since_id: int = 0) -> list[dict]:
+        """修正记录，新的在前。"""
+        sql = "SELECT * FROM revisions WHERE company_id=? AND id>=? ORDER BY id DESC" + (f" LIMIT {int(limit)}" if limit else "")
+        return [self._revision_row(r) for r in self._all(sql, (company_id, since_id))]
+
+    def latest_revision(self, company_id: str, kind: str | None = None) -> dict | None:
+        sql = "SELECT * FROM revisions WHERE company_id=?" + (" AND kind=?" if kind else "") + " ORDER BY id DESC LIMIT 1"
+        return self._revision_row(self._one(sql, (company_id, kind) if kind else (company_id,)))
+
+    def recent_revisions(self, limit: int = 20, kinds: tuple[str, ...] = ("revision", "review", "baseline")) -> list[dict]:
+        rows = self._all(f"SELECT * FROM revisions WHERE kind IN ({','.join('?' * len(kinds))}) ORDER BY id DESC LIMIT ?",
+                         (*kinds, limit))
+        return [self._revision_row(r) for r in rows]
+
+    def link_refs(self, company_id: str, refs: list[tuple[str, str]], revision_id: int | None = None) -> None:
+        now = iso(utcnow())
+        with self.lock:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO tracker_refs(company_id, ref, revision_id, impact, created_at) VALUES(?,?,?,?,?)",
+                [(company_id, ref, revision_id, impact, now) for ref, impact in refs])
+            self.conn.commit()
+
+    def refs(self, company_id: str, prefix: str = "") -> dict[str, dict]:
+        rows = self._all("SELECT * FROM tracker_refs WHERE company_id=? AND substr(ref, 1, ?)=?", (company_id, len(prefix), prefix))
+        return {r["ref"]: r for r in rows}
+
+    def pending_items(self, company_id: str, triaged_after: str, published_after: str, min_materiality: int,
+                      limit: int | None = None) -> list[dict]:
+        """尚未被追踪器处理的重要事件（按分级时间取窗口，按重要性降序、时间升序）。"""
+        sql = ("SELECT i.* FROM items i WHERE i.company_id=? AND i.triaged_at>? AND i.published_at>=? AND i.relevant=1 "
+               "AND (i.duplicate_of IS NULL OR i.duplicate_of='') AND i.materiality>=? "
+               "AND NOT EXISTS (SELECT 1 FROM tracker_refs r WHERE r.company_id=i.company_id AND r.ref='item:' || i.uid) "
+               "ORDER BY i.materiality DESC, i.published_at ASC")
+        return self._all(sql + (f" LIMIT {int(limit)}" if limit else ""), (company_id, triaged_after, published_after, min_materiality))
+
+    def documents_added_since(self, company_id: str, since: str) -> list[dict]:
+        return self._all("SELECT * FROM documents WHERE company_id=? AND added_at>? ORDER BY added_at", (company_id, since))
+
+    def manual_since(self, company_id: str, since: str) -> list[dict]:
+        """某个时间之后补充的手动数据（本公司与行业/宏观）。"""
+        return self._all("SELECT * FROM manual_data WHERE company_id IN (?, '') AND imported_at>? ORDER BY imported_at",
+                         (company_id, since))
+
+    # ------------------------------------------------------------ 后台任务（WebUI 与调度器）
+
+    def add_job(self, task: str, argv: list[list[str]], title: str, source: str, company_id: str | None = None,
+                note: str | None = None) -> int:
+        return self._exec(
+            "INSERT INTO jobs(task, argv_json, title, company_id, source, note, created_at) VALUES(?,?,?,?,?,?,?)",
+            (task, json.dumps(argv, ensure_ascii=False), title, company_id, source, note, iso(utcnow())),
+        ).lastrowid
+
+    def job(self, job_id: int) -> dict | None:
+        r = self._one("SELECT * FROM jobs WHERE id=?", (job_id,))
+        if r:
+            r["argv"] = json.loads(r.pop("argv_json"))
+        return r
+
+    def jobs(self, limit: int = 50, statuses: tuple[str, ...] | None = None) -> list[dict]:
+        sql, params = "SELECT * FROM jobs", []
+        if statuses:
+            sql += f" WHERE status IN ({','.join('?' * len(statuses))})"
+            params += list(statuses)
+        rows = self._all(sql + " ORDER BY id DESC LIMIT ?", (*params, limit))
+        for r in rows:
+            r["argv"] = json.loads(r.pop("argv_json"))
+        return rows
+
+    def update_job(self, job_id: int, **fields) -> None:
+        self._exec(f"UPDATE jobs SET {', '.join(f'{k}=?' for k in fields)} WHERE id=?", (*fields.values(), job_id))
+
+    def claim_job(self, job_id: int, pid: int, log_path: str) -> bool:
+        """把排队中的任务标为运行中（只有仍在排队时才成功，避免重复启动）。"""
+        return self._exec("UPDATE jobs SET status='running', pid=?, log_path=?, started_at=? WHERE id=? AND status='queued'",
+                          (pid, log_path, iso(utcnow()), job_id)).rowcount > 0
+
+    def recent_job(self, task: str, company_id: str, since: str) -> dict | None:
+        """某公司某类任务在 since 之后的最近一次（排队、运行或已完成；取消的不算）。"""
+        return self._one("SELECT * FROM jobs WHERE task=? AND company_id=? AND created_at>=? AND status NOT IN ('cancelled') "
+                         "ORDER BY id DESC LIMIT 1", (task, company_id, since))
+
     # ------------------------------------------------------------ 向使用者请求的数据
 
     def add_requests(self, company_id: str, dossier_id: int | None, items: list[dict]) -> list[int]:
@@ -512,4 +757,17 @@ class DB:
             "documents": self._one("SELECT COUNT(*) AS n FROM documents"),
             "manual": self._one("SELECT COUNT(*) AS n FROM manual_data"),
             "profiles": self._all("SELECT company_id, updated_at FROM profiles"),
+            "dossiers": self._one("SELECT COUNT(*) AS n FROM dossiers"),
+            "trackers": self._one("SELECT COUNT(*) AS n, SUM(enabled) AS enabled FROM trackers"),
+            "revisions": self._one("SELECT COUNT(*) AS n, SUM(kind='revision') AS changed FROM revisions"),
+            "jobs": self._one("SELECT COUNT(*) AS n, SUM(status='queued') AS queued, SUM(status='running') AS running FROM jobs"),
         }
+
+    def llm_usage_by(self, since: str) -> list[dict]:
+        """按任务与模型汇总调用次数、失败次数、tokens 与平均耗时（状态页）。"""
+        return self._all(
+            "SELECT task, model, COUNT(*) AS calls, SUM(ok=0) AS failed, SUM(input_tokens) AS input_tokens, "
+            "SUM(output_tokens) AS output_tokens, AVG(duration_s) AS avg_s FROM llm_calls WHERE started_at>=? "
+            "GROUP BY task, model ORDER BY calls DESC",
+            (since,),
+        )

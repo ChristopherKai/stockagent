@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% from "_macros.html" import thesis_badge, stance_badge, kind_badge, trigger_badge, delta %}
+{% block title %}仪表盘{% endblock %}
+{% block content %}
+{% if llm_reason %}<div class="flash err">标的追踪的模型暂不可用：{{ llm_reason }}（到「设置 → LLM」配置）</div>{% endif %}
+
+<section class="card">
+  <div class="card-head"><h2>追踪中的标的</h2><a class="btn small" href="/companies">管理观察清单</a></div>
+  {% if rows %}
+  <div class="tblwrap">
+  <table class="tbl">
+    <thead><tr><th>公司</th><th class="r">现价</th><th class="r">{{ TARGET_LABEL }}</th><th class="r">空间</th>
+      <th class="r">牛 / 基准 / 熊</th><th title="深度报告核心判断的状态">论点</th><th>最近修正</th></tr></thead>
+    <tbody>
+    {% for row in rows %}{% set s = row.s %}{% set rev = s.revision %}
+      <tr>
+        <td><a href="/c/{{ row.company.id }}"><b>{{ row.company.name }}</b></a>
+          <div class="muted small">{{ row.company.listings | map(attribute='display') | join(' / ') }}</div></td>
+        <td class="r nowrap">{{ s.price | num }}<div class="muted small">{{ s.price_date[5:] if s.price_date else '' }}</div></td>
+        <td class="r"><b>{{ s.live_target | num }}</b> <span class="muted small">{{ s.currency }}</span>
+          {% if rev.prev_target and rev.kind != 'baseline' %}<div class="small">较上次 {{ delta(rev.target, rev.prev_target) }}</div>{% endif %}</td>
+        <td class="r"><b class="{{ s.upside | dirclass }}">{{ s.upside | pct }}</b></td>
+        <td class="r small nowrap">{{ rev.bull | num }} / {{ rev.base | num }} / {{ rev.bear | num }}</td>
+        <td>{{ stance_badge(rev.stance) }} {{ thesis_badge(rev.thesis_status) }}
+          {% if s.redo %}<a class="badge warn" href="/jobs/{{ s.redo.id }}">重跑报告{{ '排队中' if s.redo.status == 'queued' else '运行中' }}</a>{% endif %}</td>
+        <td class="small">{{ kind_badge(rev.kind) }} {{ rev.created_at | when }}<div class="clip">{{ rev.summary }}</div></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">还没有追踪中的标的。在下方或「观察清单」里开始追踪：追踪以最新深度报告的估值矩阵为基线（由代码重建，不调用模型），之后每次运行按新事件修正估值假设。</p>
+  {% endif %}
+  {% if untracked %}
+  <div class="untracked">
+    <span class="muted">未追踪：</span>
+    {% for u in untracked %}
+      <form method="post" action="/c/{{ u.company.id }}/track" class="inline">{{ csrf_field }}
+        <button class="btn small ghost" title="{{ '用最新深度报告建立估值基线' if u.dossier else '还没有深度报告：先生成报告再开始追踪（数分钟）' }}">
+          + {{ u.company.name }}{% if not u.dossier %}（需先生成报告）{% endif %}</button>
+      </form>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+
+<div class="grid2">
+  <section class="card">
+    <div class="card-head"><h2>最新修正</h2></div>
+    {% for r in revisions %}
+      <a class="feed" href="/c/{{ r.company_id }}/revisions/{{ r.id }}">
+        <div>{{ kind_badge(r.kind) }} <b>{{ names.get(r.company_id, r.company_id) }}</b>
+          <span class="muted small">{{ r.created_at | when }}</span>
+          {% if r.prev_target %}<span class="small">{{ r.prev_target | num }} → <b>{{ r.target | num }}</b> {{ delta(r.target, r.prev_target) }}</span>{% endif %}
+          {{ thesis_badge(r.thesis_status, r.stance) }}</div>
+        <div class="clip small">{{ r.summary }}</div>
+      </a>
+    {% else %}
+      <p class="muted">还没有修正记录。</p>
+    {% endfor %}
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>证伪条件：苗头与已触发</h2></div>
+    {% for name, t in alerts %}
+      <div class="item">{{ trigger_badge(t.status) }} <b>{{ name }}</b> {{ t.description }}
+        {% if t.evidence %}<div class="muted small">依据：{{ t.evidence }}</div>{% endif %}</div>
+    {% else %}
+      <p class="muted">没有出现苗头或已触发的证伪条件。</p>
+    {% endfor %}
+    <h3>30 天内的催化剂</h3>
+    {% for name, x in catalysts %}
+      <div class="item small"><b>{{ x.due_date }}</b> {{ name }}：{{ x.event }}{% if x.kpi %} <span class="muted">（KPI：{{ x.kpi }}）</span>{% endif %}</div>
+    {% else %}
+      <p class="muted small">近期没有带日期的催化剂。</p>
+    {% endfor %}
+  </section>
+</div>
+
+<div class="grid2">
+  <section class="card">
+    <div class="card-head"><h2>需要你补充的数据</h2></div>
+    {% for q in requests[:8] %}
+      <div class="item small"><b>{{ names.get(q.company_id, q.company_id) }}</b>｜{{ q.item }}
+        <div class="muted">{{ q.ask }}</div>
+        <form method="post" action="/requests/{{ q.id }}/close" class="inline">{{ csrf_field }}
+          <button class="btn tiny" name="status" value="done">已补充</button>
+          <button class="btn tiny ghost" name="status" value="dismissed">忽略</button></form>
+      </div>
+    {% else %}
+      <p class="muted">没有待补充的数据请求。</p>
+    {% endfor %}
+    {% if requests | length > 8 %}<p class="muted small">另有 {{ requests | length - 8 }} 项，见各公司页面。</p>{% endif %}
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>任务与日程</h2><a class="btn small" href="/jobs">全部任务</a></div>
+    {% for j in active %}
+      <div class="item small"><span class="badge job-{{ j.status }}">{{ '运行中' if j.status == 'running' else '排队中' }}</span>
+        <a href="/jobs/{{ j.id }}">#{{ j.id }} {{ j.title }}</a></div>
+    {% endfor %}
+    {% for j in recent_jobs if j.status not in ('queued', 'running') %}
+      <div class="item small"><span class="badge job-{{ j.status }}">{{ {'done': '完成', 'failed': '失败', 'cancelled': '已取消', 'interrupted': '中断'}.get(j.status, j.status) }}</span>
+        <a href="/jobs/{{ j.id }}">#{{ j.id }} {{ j.title }}</a> <span class="muted">{{ j.finished_at | when }}</span></div>
+    {% endfor %}
+    <h3>日程{% if not app.settings.scheduler.enabled %}（已关闭）{% endif %}</h3>
+    {% for x in schedule %}
+      <div class="item small">{{ x.job.name }}：{% if x.next %}下次 {{ x.next.strftime('%m-%d %H:%M') }}{% else %}<span class="muted">未启用</span>{% endif %}
+        <span class="muted">（{{ x.job.cron }}）</span></div>
+    {% else %}
+      <p class="muted small">没有日程。到「设置 → 日程」添加。</p>
+    {% endfor %}
+  </section>
+</div>
+{% endblock %}

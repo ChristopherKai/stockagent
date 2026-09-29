@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% from "_macros.html" import thesis_badge, stance_badge, kind_badge, trigger_badge, delta, valuation_table %}
+{% block title %}{{ c.name }}{% endblock %}
+{% block content %}
+<section class="card hero">
+  <div class="card-head">
+    <div>
+      <h1>{{ c.name }} <span class="muted">{{ c.listings | map(attribute='display') | join(' / ') }}</span></h1>
+      <div class="muted small">{{ c.sector or '' }}</div>
+    </div>
+    <div class="btns">
+      {% if s and s.enabled %}
+        <form method="post" action="/c/{{ c.id }}/check" class="inline">{{ csrf_field }}<button class="btn" title="抓取、分级后按新依据修正估值">立即检查</button></form>
+        <form method="post" action="/c/{{ c.id }}/rebase" class="inline" data-confirm="用最新的深度报告重建估值基线？之后的修正从新基线开始。">{{ csrf_field }}<button class="btn ghost">重建基线</button></form>
+        <form method="post" action="/c/{{ c.id }}/untrack" class="inline">{{ csrf_field }}<button class="btn ghost">停止追踪</button></form>
+      {% else %}
+        <form method="post" action="/c/{{ c.id }}/track" class="inline">{{ csrf_field }}<button class="btn">开始追踪</button></form>
+      {% endif %}
+      <form method="post" action="/c/{{ c.id }}/dossier" class="inline" data-confirm="重新生成深度报告需要数分钟，同一时间只运行一个。继续？">{{ csrf_field }}<button class="btn ghost">重跑深度报告</button></form>
+      {% if dossier %}<a class="btn ghost" href="/c/{{ c.id }}/report">报告（当前版本）</a>{% endif %}
+      <a class="btn ghost" href="/companies/{{ c.id }}/edit">编辑</a>
+    </div>
+  </div>
+
+  {% if dossier %}<p class="thesis"><b>核心论点</b>（深度报告 #{{ dossier.id }}，{{ dossier.created_at | when(false) }}，立场{{ STANCE_LABEL.get(dossier.card.stance, '—') }}）：{{ dossier.card.thesis }}</p>{% endif %}
+  {% if s %}{% set rev = s.revision %}
+  <div class="kpis">
+    <div class="kpi"><div class="k">现价</div><div class="v">{{ s.price | num }}</div><div class="s">{{ s.currency }} · {{ s.price_date or '' }}</div></div>
+    <div class="kpi main"><div class="k">{{ TARGET_LABEL }}</div><div class="v">{{ s.live_target | num }}</div>
+      <div class="s">{{ '概率加权' if app.settings.tracker.target == 'expected' else '基准情景' }}{% if (s.live_target - s.target) | abs > 0.005 %} · 按最新汇率（上次修正时 {{ s.target | num }}）{% endif %}</div></div>
+    <div class="kpi"><div class="k">空间</div><div class="v {{ s.upside | dirclass }}">{{ s.upside | pct }}</div><div class="s">相对现价</div></div>
+    <div class="kpi"><div class="k">牛 / 基准 / 熊</div><div class="v small">{{ rev.bull | num }} / {{ rev.base | num }} / {{ rev.bear | num }}</div>
+      <div class="s">{% if s.baseline and s.baseline.id != rev.id %}基线 {{ s.baseline.target | num }} → 当前 {{ rev.target | num }} {{ delta(rev.target, s.baseline.target) }}{% else %}基线{% endif %}</div></div>
+    <div class="kpi"><div class="k">立场 / 论点</div><div class="v small">{{ stance_badge(rev.stance) }} {{ thesis_badge(rev.thesis_status) }}</div>
+      <div class="s">{{ THESIS_HELP.get(rev.thesis_status, '') }}</div></div>
+  </div>
+  {% for e in equivalents %}<div class="muted small">{{ e }}</div>{% endfor %}
+  {% if s.redo %}<div class="flash warn">深度报告重跑任务 <a href="/jobs/{{ s.redo.id }}">#{{ s.redo.id }}</a> {{ '排队中' if s.redo.status == 'queued' else '运行中' }}：{{ s.redo.note or '' }}</div>{% endif %}
+  {% if not s.enabled %}<div class="flash warn">已停止追踪：数据保留，重新开始追踪会沿用原基线（深度报告没有更新时）。</div>{% endif %}
+  {% for f in rev.flags or [] %}<div class="flash warn small">⚠ {{ f }}</div>{% endfor %}
+  {% if s.tracker.last_msg %}<div class="muted small">上次检查 {{ s.tracker.checked_at | when }}：{{ s.tracker.last_msg }}</div>{% endif %}
+  {% elif dossier %}
+  <p class="muted">尚未追踪。开始追踪后，系统以深度报告 #{{ dossier.id }}（{{ dossier.created_at | when(false) }}）的估值矩阵为基线（代码重建，不调用模型），每次运行按新事件修正估值假设并重算目标价。</p>
+  {% else %}
+  <p class="muted">还没有深度报告。开始追踪会先生成深度报告（数分钟）再建立估值基线。</p>
+  {% endif %}
+</section>
+
+{% if pending %}
+<section class="card">
+  <div class="card-head"><h2>待你确认的修改</h2></div>
+  <p class="muted small">以下修改变动较大（股本、净现金单次变动超过 {{ app.settings.tracker.flag_change | pct(0, false) }}），可能是口径变化而不是新信息，没有自动采纳。</p>
+  {% for r, i, x in pending %}
+    <div class="item">
+      <b>{{ x.label }}</b>：{{ x.old | num }} → {{ x.new | num }}　<span class="muted">（修正 <a href="/c/{{ c.id }}/revisions/{{ r.id }}">#{{ r.id }}</a>，{{ r.created_at | when }}）</span>
+      <div class="small">理由：{{ x.change.reason }}</div>
+      {% if x.change.derivation %}<div class="small muted">推导：{{ x.change.derivation }}</div>{% endif %}
+      {% if (r.id ~ ':' ~ i) in confirmed %}<span class="badge ok">已采纳</span>
+      {% else %}
+      <form method="post" action="/c/{{ c.id }}/confirm/{{ r.id }}/{{ i }}" class="inline" data-confirm="采纳这条修改并重算目标价？">{{ csrf_field }}
+        <button class="btn small">采纳</button></form>
+      {% endif %}
+    </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+<section class="card">
+  <div class="card-head"><h2>走势与估值修正</h2>
+    <div class="seg">{% for k, label in [('90', '90 天'), ('180', '180 天'), ('365', '1 年'), ('all', '全部')] %}
+      <a href="?range={{ k }}" class="{{ 'on' if span == k }}">{{ label }}</a>{% endfor %}</div></div>
+  {{ chart }}
+  <div class="legend small"><span class="lg close"></span>收盘价 <span class="lg target"></span>{{ TARGET_LABEL }} <span class="lg band"></span>牛熊区间
+    <span class="lg dot ev-pos"></span>利好事件 <span class="lg dot ev-neg"></span>利空事件 <span class="lg dot ev-neu"></span>其他事件 <span class="lg rev"></span>修正（点击跳到下方记录）</div>
+</section>
+
+{% if model %}
+<section class="card">
+  <div class="card-head"><h2>当前估值模型</h2>{% if s.baseline %}<span class="muted small">与基线（深度报告 #{{ s.baseline.dossier_id }}）对比</span>{% endif %}</div>
+  {{ valuation_table(model, compare, TARGET_LABEL, s.live_target, s.currency, app.settings.tracker.target) }}
+</section>
+{% endif %}
+
+<div class="grid2 wide-left">
+  <section class="card">
+    <div class="card-head"><h2>时间线</h2><span class="muted small">事件（重要性≥2）、估值修正与深度报告</span></div>
+    <div class="timeline">
+    {% set ns = namespace(day='') %}
+    {% for x in timeline %}
+      {% set day = x.at | when(false) %}
+      {% if day != ns.day %}<div class="tl-day"><span>{{ day }}</span></div>{% set ns.day = day %}{% endif %}
+      {% if x.type == 'event' %}{% set e = x.e %}
+        <article class="tl ev" id="ev-{{ e.uid[:12] }}">
+          <div class="tl-rail"><span class="tl-dot {{ {'positive': 'ev-pos', 'negative': 'ev-neg'}.get(e.direction, 'ev-neu') }}"></span></div>
+          <div class="tl-body">
+            <div class="tl-meta">
+              <span class="tl-time">{{ (e.published_at | when)[6:] }}</span>
+              <span class="stars" title="重要性 {{ e.materiality }}">{{ '★' * (e.materiality or 0) }}</span>
+              <span class="tag dir-{{ e.direction }}">{{ DIRECTIONS.get(e.direction, '—') }}</span>
+              <span class="tag">{{ EVENT_TYPES.get(e.event_type, '—') }}</span>
+            </div>
+            <div class="tl-title">{{ e.summary_zh or e.title }}</div>
+            {% if e.expectation %}<div class="tl-note">预期：{{ e.expectation }}</div>{% endif %}
+            <div class="tl-src">{{ SOURCE_LABEL.get(e.source, e.source) }}{% if e.source_name and e.kind == 'news' %} · {{ e.source_name }}{% endif %}
+              {% if e.url | safe_url %} · <a href="{{ e.url | safe_url }}" target="_blank" rel="noopener noreferrer">原文 ↗</a>{% endif %}
+              {% if x.ref %} · {% if x.ref.revision_id %}<a href="/c/{{ c.id }}/revisions/{{ x.ref.revision_id }}">已纳入修正 #{{ x.ref.revision_id }}</a>{% endif %}（{{ IMPACT_LABEL.get(x.ref.impact, x.ref.impact) }}）{% endif %}</div>
+          </div>
+        </article>
+      {% elif x.type == 'revision' %}{% set r = x.r %}
+        <article class="tl rev" id="rev-{{ r.id }}">
+          <div class="tl-rail"><span class="tl-dot diamond"></span></div>
+          <div class="tl-body tl-card">
+            <div class="tl-meta">
+              <span class="tl-time">{{ (r.created_at | when)[6:] }}</span>
+              {{ kind_badge(r.kind) }} <a href="/c/{{ c.id }}/revisions/{{ r.id }}" class="tl-id">#{{ r.id }}</a>
+              {{ stance_badge(r.stance) }} {{ thesis_badge(r.thesis_status) }}
+            </div>
+            <div class="tl-target"><span class="k">{{ TARGET_LABEL }}</span>
+              {% if r.prev_target and r.kind != 'baseline' %}<span class="old">{{ r.prev_target | num }}</span><span class="arrow">→</span>{% endif %}
+              <span class="new">{{ r.target | num }}</span>
+              {% if r.kind != 'baseline' %}<span class="pct">{{ delta(r.target, r.prev_target) }}</span>{% endif %}</div>
+            <div class="tl-title">{{ r.summary }}</div>
+            {% if r.changes %}<ul class="tl-changes">
+            {% for ch in r.changes %}
+              <li><span class="lbl">{{ ch.label }}</span> {{ ch.old | num }} → <b>{{ ch.new | num }}</b>
+                <span class="why">{{ ch.reason }}{% if ch.source != '模型' %}；{{ ch.source }}{% endif %}</span>
+                {% for fl in ch.flags or [] %}<span class="badge warn">{{ fl }}</span>{% endfor %}</li>
+            {% endfor %}</ul>{% endif %}
+            {% set npend = (r.rejected or []) | selectattr('confirm') | list | length %}
+            {% if npend %}<div class="small"><span class="badge warn">{{ npend }} 项待你确认</span></div>{% endif %}
+          </div>
+        </article>
+      {% else %}{% set d = x.d %}
+        <article class="tl dos">
+          <div class="tl-rail"><span class="tl-dot square"></span></div>
+          <div class="tl-body">
+            <div class="tl-meta"><span class="tl-time">{{ (d.created_at | when)[6:] }}</span></div>
+            <div class="tl-title">深度报告 #{{ d.id }} <a href="/c/{{ c.id }}/report?did={{ d.id }}" class="small">查看 →</a></div>
+            <div class="tl-src">{{ d.model or '' }}</div>
+          </div>
+        </article>
+      {% endif %}
+    {% else %}
+      <p class="muted">这段时间没有事件或修正。</p>
+    {% endfor %}
+    </div>
+  </section>
+
+  <div>
+    <section class="card">
+      <h2>证伪条件</h2>
+      {% for t in triggers %}
+        <div class="item small">{{ trigger_badge(t.status) }} {{ t.description }}
+          {% if t.evidence and t.status != 'ok' %}<div class="muted">依据：{{ t.evidence }}</div>{% endif %}</div>
+      {% else %}<p class="muted small">没有证伪条件（生成深度报告后才有）。</p>{% endfor %}
+    </section>
+    <section class="card">
+      <h2>催化剂</h2>
+      {% for x in catalysts %}
+        <div class="item small"><b>{{ x.when or '时间未定' }}</b> {{ x.event }}{% if x.kpi %} <span class="muted">（KPI：{{ x.kpi }}）</span>{% endif %}
+          {% if x.assessed %}<span class="badge {{ 'ok' if x.assessed.status == 'hit' else 'warn' }}">{{ IMPACT_LABEL.get(x.assessed.status, x.assessed.status) }}</span>
+            <div class="muted">{{ x.assessed.note }}</div>{% endif %}</div>
+      {% else %}<p class="muted small">没有催化剂。</p>{% endfor %}
+    </section>
+    <section class="card">
+      <h2>需要你补充的数据</h2>
+      {% for q in requests %}
+        <div class="item small"><b>#{{ q.id }} {{ q.item }}</b><div class="muted">{{ q.ask }}</div>
+          <form method="post" action="/requests/{{ q.id }}/close" class="inline">{{ csrf_field }}
+            <button class="btn tiny" name="status" value="done">已补充</button>
+            <button class="btn tiny ghost" name="status" value="dismissed">忽略</button></form></div>
+      {% else %}<p class="muted small">没有待补充的数据。</p>{% endfor %}
+    </section>
+    {% if plan.news_keywords or plan.related_tickers %}
+    <section class="card">
+      <h2>跟踪计划</h2>
+      {% if plan.news_keywords %}<div class="small">新闻跟踪词：{{ plan.news_keywords | join('、') }}</div>{% endif %}
+      {% if plan.related_tickers %}<div class="small">产业链标的：{% for r in plan.related_tickers %}{{ r.name }}（{{ r.relation }}）{{ '、' if not loop.last }}{% endfor %}</div>{% endif %}
+    </section>
+    {% endif %}
+    <section class="card">
+      <h2>补充信息</h2>
+      <p class="muted small">补充的消息会参与分级；数据和文档会作为下一次修正的新依据。</p>
+      <details><summary>录入一条消息</summary>
+        <form method="post" action="/c/{{ c.id }}/note" class="form">{{ csrf_field }}
+          <label>标题<input name="title" required maxlength="300" placeholder="如：渠道调研：1.6T 订单排到明年二季度"></label>
+          <label>详情<textarea name="detail" rows="2"></textarea></label>
+          <label>链接<input name="url" type="url" placeholder="https://…（可空）"></label>
+          <button class="btn small">录入</button></form></details>
+      <details><summary>补充一个数据</summary>
+        <form method="post" action="/c/{{ c.id }}/data" class="form">{{ csrf_field }}
+          <div class="row2"><label>指标<input name="metric" required placeholder="如 R32价格"></label>
+            <label>期间<input name="period" required placeholder="如 2026-09"></label></div>
+          <div class="row2"><label>数值<input name="value" required inputmode="decimal"></label>
+            <label>单位<input name="unit" placeholder="如 元/吨"></label></div>
+          <label>备注 / 来源<input name="note"></label>
+          <label class="check"><input type="checkbox" name="scope" value="industry"> 行业 / 宏观指标（不属于本公司）</label>
+          <button class="btn small">保存</button></form></details>
+      <details><summary>上传文档</summary>
+        <form method="post" action="/c/{{ c.id }}/upload" class="form" enctype="multipart/form-data">{{ csrf_field }}
+          <label>文件<input type="file" name="file" required accept="{{ supported | join(',') }}"></label>
+          <div class="row2"><label>类型<select name="doc_type">{% for k, v in doc_types.items() %}<option value="{{ k }}" {{ 'selected' if k == 'other' }}>{{ v }}</option>{% endfor %}</select></label>
+            <label>期间<input name="period" placeholder="如 2026H1（可空，按文件名推断）"></label></div>
+          <label>标题<input name="title" placeholder="可空，默认用文件名"></label>
+          <p class="muted small">业绩公告等请选「其他」：选年报 / 中期报告会让系统以为该期定期报告已有，不再自动下载正式报告。</p>
+          <button class="btn small">上传</button></form></details>
+    </section>
+  </div>
+</div>
+{% endblock %}

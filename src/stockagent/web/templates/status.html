@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}状态{% endblock %}
+{% block content %}
+<div class="grid2">
+  <section class="card">
+    <h2>数据</h2>
+    <div class="kv"><span>配置文件</span><span class="mono small">{{ config_path }}</span></div>
+    <div class="kv"><span>数据库</span><span class="mono small">{{ app.db.path }}</span></div>
+    <div class="kv"><span>信息条目</span><span>{{ stats['items']['n'] }}（已分级 {{ stats['items']['triaged'] or 0 }}）</span></div>
+    <div class="kv"><span>行情序列 / 文档 / 手动数据</span><span>{{ stats['bars'] | length }} / {{ stats['documents']['n'] }} / {{ stats['manual']['n'] }}</span></div>
+    <div class="kv"><span>深度报告 / 画像</span><span>{{ stats['dossiers']['n'] }} / {{ stats['profiles'] | length }}</span></div>
+    <div class="kv"><span>追踪 / 修正记录</span><span>{{ stats['trackers']['enabled'] or 0 }} 家追踪中 / {{ stats['revisions']['n'] }} 条（其中修正 {{ stats['revisions']['changed'] or 0 }}）</span></div>
+    <div class="kv"><span>任务</span><span>排队 {{ stats['jobs']['queued'] or 0 }} / 运行 {{ stats['jobs']['running'] or 0 }} / 共 {{ stats['jobs']['n'] }}</span></div>
+    <h3>各来源最新信息</h3>
+    {% for r in stats['items_by_source'] %}<div class="kv small"><span>{{ SOURCE_LABEL.get(r.source, r.source) }}</span><span>{{ r.n }} 条，最新 {{ r.latest | when }}</span></div>{% endfor %}
+  </section>
+  <section class="card">
+    <h2>运行状态</h2>
+    {% for name, label in [('dossier', '深度报告'), ('pipeline', '日常流程 / 盘中提醒 / 标的追踪'), ('web', 'stock web 调度器与任务执行器')] %}
+      <div class="kv"><span>{{ label }}</span><span>{% if locks[name] is not none %}<span class="badge warn">运行中（进程 {{ locks[name] }}）</span>{% else %}<span class="muted">空闲</span>{% endif %}</span></div>
+    {% endfor %}
+    <h3>数据源熔断</h3>
+    <p class="muted small">连接被拒或被限流的数据源会暂停 60 分钟（所有进程共享）。</p>
+    {% for b in breakers %}
+      <div class="kv small"><span>{{ b.source }}</span><span>{{ '暂停中' if b.active else '已恢复' }}（{{ b.at | when }}）
+        {% if b.active %}<form method="post" action="/status/breaker/{{ b.source }}/reset" class="inline">{{ csrf_field }}<button class="btn tiny ghost">复位</button></form>{% endif %}</span></div>
+    {% else %}<p class="muted small">没有熔断记录。</p>{% endfor %}
+    <h3>推送</h3>
+    <div class="kv"><span>渠道</span><span>{{ channels | join('、') or '未配置' }}</span></div>
+    {% for m in missing %}<div class="flash warn small">{{ m }}</div>{% endfor %}
+    <form method="post" action="/status/push-test" class="inline">{{ csrf_field }}<button class="btn small ghost">发送测试推送</button></form>
+  </section>
+</div>
+<section class="card">
+  <h2>模型路由</h2>
+  <div class="tblwrap"><table class="tbl"><thead><tr><th>任务</th><th>模型</th><th>状态</th></tr></thead><tbody>
+    {% for t, (desc, reason) in tasks.items() %}<tr><td class="mono">{{ t }}</td><td class="small">{{ desc }}</td>
+      <td>{% if reason %}<span class="badge bad">不可用</span> <span class="small muted">{{ reason }}</span>{% else %}<span class="badge ok">可用</span>{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>
+  <h3>近 7 日调用</h3>
+  <div class="tblwrap"><table class="tbl"><thead><tr><th>任务</th><th>模型</th><th class="r">调用</th><th class="r">失败</th><th class="r">输入 tokens</th><th class="r">输出 tokens</th><th class="r">平均耗时</th></tr></thead><tbody>
+    {% for u in usage %}<tr><td class="mono small">{{ u.task }}</td><td class="small">{{ u.model }}</td><td class="r">{{ u.calls }}</td>
+      <td class="r {{ 'bad' if u.failed }}">{{ u.failed or 0 }}</td><td class="r">{{ '{:,}'.format(u.input_tokens or 0) }}</td>
+      <td class="r">{{ '{:,}'.format(u.output_tokens or 0) }}</td><td class="r">{{ u.avg_s | num(1) }} 秒</td></tr>
+    {% else %}<tr><td colspan="7" class="muted">近 7 天没有模型调用。</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endblock %}

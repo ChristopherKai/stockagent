@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% from "_macros.html" import thesis_badge, kind_badge, delta %}
+{% block title %}{{ c.name }} · 深度报告（当前版本）{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="card-head">
+    <div><h1>{{ c.name }} · 深度报告 #{{ d.id }}</h1>
+      <div class="muted small">{{ d.created_at | when }} · 模型 {{ d.model or '—' }}
+        {% if d.html_path %} · <a href="/files/dossiers/{{ d.html_path.split('/')[-1] }}" target="_blank">原始 HTML</a>{% endif %}
+        {% if d.pdf_path %} · <a href="/files/dossiers/{{ d.pdf_path.split('/')[-1] }}" target="_blank">PDF</a>{% endif %}</div></div>
+    <a class="btn ghost" href="/c/{{ c.id }}">返回标的页面</a>
+  </div>
+  {% set changed = revisions | selectattr('kind', 'equalto', 'revision') | list %}
+  {% if baseline %}
+  <div class="banner">
+    本报告之后有 <b>{{ changed | length }}</b> 次估值修正：{{ TARGET_LABEL }} 基线 <b>{{ baseline.target | num }}</b>
+    {% if revisions %} → 当前 <b>{{ revisions[0].target | num }}</b> {{ delta(revisions[0].target, baseline.target) }}{% endif %}
+    {% if s and s.revision.dossier_id == d.id %}（按最新汇率 {{ s.live_target | num }} {{ s.currency }}）{% endif %}。
+    原报告正文保持不变，下面先列出修正记录。
+  </div>
+  {% for r in revisions if r.kind != 'baseline' %}
+    <div class="item small">{{ kind_badge(r.kind) }} <a href="/c/{{ c.id }}/revisions/{{ r.id }}">#{{ r.id }}</a> {{ r.created_at | when }}
+      {{ r.prev_target | num }} → <b>{{ r.target | num }}</b> {{ delta(r.target, r.prev_target) }} {{ thesis_badge(r.thesis_status, r.stance) }}：{{ r.summary }}
+      {% for ch in r.changes or [] %}<div class="muted">· {{ ch.label }}：{{ ch.old | num }} → {{ ch.new | num }}（{{ ch.reason }}）</div>{% endfor %}</div>
+  {% endfor %}
+  {% else %}
+  <p class="muted small">这份报告还没有作为追踪基线（在标的页面开始追踪后，估值修正会列在这里）。</p>
+  {% endif %}
+</section>
+<section class="card">
+  <div class="md report">{{ d.report_md | md }}</div>
+</section>
+<section class="card">
+  <h2>跟踪卡</h2>
+  <p><b>核心判断：</b>{{ d.card.thesis }}（{{ STANCE_LABEL.get(d.card.stance, d.card.stance) }}）</p>
+  {% if d.card.scenarios %}
+  <div class="tblwrap"><table class="tbl"><thead><tr><th>情景</th><th>价格区间</th><th class="r">概率</th><th>驱动</th></tr></thead><tbody>
+    {% for x in d.card.scenarios %}<tr><td>{{ SCENARIO_LABEL.get(x.name, x.name) }}</td><td class="nowrap">{{ x.price_low | num }} – {{ x.price_high | num }}</td>
+      <td class="r">{{ x.probability | pct(0, false) }}</td><td class="small">{{ x.drivers }}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+</section>
+{% endblock %}

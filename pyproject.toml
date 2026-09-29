@@ -18,13 +18,22 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "markdown>=3.6",
     "zhconv>=1.4.3",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.54.0",
+    "jinja2>=3.1.6",
+    "python-multipart>=0.0.32",
+    "ruamel-yaml>=0.19.1",
+    "nh3>=0.3.7",
 ]
 
 [project.scripts]
 stock = "stockagent.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.0",
+]
 
 [build-system]
 requires = ["hatchling"]

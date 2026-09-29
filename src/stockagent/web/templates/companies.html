@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}观察清单{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="card-head"><h2>观察清单</h2><a class="btn" href="/companies/new">+ 新增公司</a></div>
+  <form method="post" action="/companies/track" id="bulk">{{ csrf_field }}</form>
+  <div class="tblwrap">
+  <table class="tbl">
+    <thead><tr><th><input type="checkbox" data-select-all="ids" title="全选"></th><th>公司</th><th>上市地</th><th>行业</th>
+      <th>深度报告</th><th>画像</th><th class="r">文档</th><th class="r">7 日事件</th><th class="r">待补充</th><th>追踪</th><th></th></tr></thead>
+    <tbody>
+    {% for row in rows %}{% set c = row.company %}
+      <tr>
+        <td><input type="checkbox" name="ids" value="{{ c.id }}" form="bulk"></td>
+        <td><a href="/c/{{ c.id }}"><b>{{ c.name }}</b></a><div class="muted small">{{ c.id }}</div></td>
+        <td class="small">{{ c.listings | map(attribute='display') | join(' / ') }}</td>
+        <td class="small clip">{{ c.sector or '' }}</td>
+        <td class="small">{% if row.dossier %}<a href="/c/{{ c.id }}/report">{{ row.dossier.created_at | when(false) }}</a>{% else %}<span class="muted">无</span>{% endif %}</td>
+        <td class="small">{{ row.profile.updated_at | when(false) if row.profile else '—' }}</td>
+        <td class="r">{{ row.docs }}</td>
+        <td class="r">{{ row.events }}</td>
+        <td class="r">{{ row.requests or '' }}</td>
+        <td>{% if row.tracker and row.tracker.enabled %}<span class="badge ok">追踪中</span>{% elif row.tracker %}<span class="badge muted">已停止</span>{% else %}<span class="muted small">未追踪</span>{% endif %}</td>
+        <td class="nowrap"><a class="btn tiny ghost" href="/companies/{{ c.id }}/edit">编辑</a>
+          <button class="btn tiny danger" form="del-{{ c.id }}">删除</button></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div class="actions">
+    <button class="btn" form="bulk" name="action" value="track">勾选的开始追踪</button>
+    <button class="btn ghost" form="bulk" name="action" value="untrack">勾选的停止追踪</button>
+    <span class="muted small">开始追踪：有深度报告的立即用代码建立估值基线；没有报告的提交任务先生成报告（每家数分钟，同一时间只跑一个）。</span>
+  </div>
+  {% for row in rows %}
+    <form id="del-{{ row.company.id }}" method="post" action="/companies/{{ row.company.id }}/delete"
+          data-confirm="从观察清单移除「{{ row.company.name }}」？数据库里的历史数据会保留。">{{ csrf_field }}
+      <input type="hidden" name="etag" value="{{ etag }}"></form>
+  {% endfor %}
+</section>
+{% endblock %}
