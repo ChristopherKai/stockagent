@@ -95,6 +95,7 @@ uv run stock track         # 查看论点、证伪条件状态、催化剂、跟
 | `sotp` / `ddm` | 分部加总估值（上市子公司、多业务）；股息贴现 |
 | `company_events` | 已分级的新闻与公告 |
 | `manual_data` | 使用者手动补充的数据 |
+| `ima_search` / `ima_read` | 在你订阅的 ima 知识库里按标题检索券商研报、调研纪要、付费新闻截图；读取原文时 PDF/Word 入库为本公司资料（之后用 `search_filings` 按页引用），图片返回 OCR 文字。只有配置了 ima 才提供（见下方「ima 知识库」） |
 | `web_search` / `fetch_url` | 网页搜索（见下方「网页搜索」）；网页与 PDF 全文抓取。头条文章走移动端接口取正文；脚本渲染的网站（富途、雪球）、拒绝程序访问或正文太短的页面改用 Exa 读取；禁止访问本机和内网地址 |
 
 规则写在提示词里：
@@ -263,7 +264,7 @@ WebUI「任务」页和内置日程能运行的任务如下（与命令行一一
 
 ## 手动补充数据
 
-- **文档**（年报、研报、调研纪要、笔记）：放进 `data/inbox/<公司>/`，下次运行时自动入库，研究 agent 可以检索。也可以运行 `stock docs add 公司 文件`。
+- **文档**（年报、研报、调研纪要、笔记）：放进 `data/inbox/<公司>/`，下次运行时自动入库，研究 agent 可以检索。也可以运行 `stock docs add 公司 文件`。图片（png/jpg/webp）用本机 tesseract 识别文字后入库（`brew install tesseract tesseract-lang`）。
 - **指标**（行业价格、渠道数据等）：`stock data add dongyue R32价格 2026-09 45000 --unit 元/吨`，行业指标的公司名写 `-`；也可以用 CSV 导入：`stock data import x.csv`。
 - **消息**：`stock note innolight "渠道：1.6T 订单排到明年二季度"`，会和新闻一起参与分级。
 
@@ -283,6 +284,7 @@ WebUI「任务」页和内置日程能运行的任务如下（与命令行一一
 | 卖方研报、评级与盈利预测（A 股） | 东方财富研报库 |
 | A 股估值历史（PE/PB） | 东方财富数据中心 |
 | 港股南向资金持股 | 东方财富数据中心（沪港通、深港通合计） |
+| 券商研报、调研纪要、付费新闻（可选） | 你订阅的腾讯 ima 知识库（见下方「ima 知识库」） |
 | 网页搜索（行业价格、政策、港股卖方观点等） | 付费 API（博查 / Tavily / Serper，填了 key 才用）优先；免费的 360 搜索、头条搜索、Google 新闻轮流使用，百度、Bing、DuckDuckGo 备用 |
 
 ### 网页搜索
@@ -293,6 +295,20 @@ WebUI「任务」页和内置日程能运行的任务如下（与命令行一一
 - Google 新闻结果的链接会自动解析成原文地址；头条文章通过移动端接口取正文。
 - **Exa**：`.env` 里有 `EXA_API_KEY` 时直接调用 Exa 接口；没有 key 但本机装了 [agent-reach](https://github.com/Panniantong/Agent-Reach) 并配置了 mcporter 的 exa 服务时，经 mcporter 调用 Exa 的免费 MCP——免费额度有限，实测跑完约 3 份报告（约 150 次检索）后返回 HTTP 429，之后自动暂停 1 小时、改用免费搜索源。两种方式都排在所有搜索源之前。Exa 返回带正文摘要的结果，能找到行业价格（生意社、隆众、百川的公开页面）、券商研报摘要、LightCounting/TrendForce 等行业资料；Exa 的网页读取还用来打开富途、雪球这类脚本渲染的页面。程序经 mcporter 调用 Exa，命令和参数固定，不经过 shell。
 - **也可以配置付费搜索 API**：在 `.env` 填 `BOCHA_API_KEY`（博查，中文内容覆盖好）、`TAVILY_API_KEY` 或 `SERPER_API_KEY`（Google 结果）之一，程序会优先使用，免费源只作备用。这三个接口按官方文档实现，尚未用真实 key 实测；填好后可以先跑一份报告，看附录「研究过程与出处」里的搜索源。
+
+### ima 知识库
+
+如果你在 [ima](https://ima.qq.com) 里订阅了研报、纪要类的共享知识库，可以把它接进来：
+1. 在 https://ima.qq.com/agent-interface 获取 Client ID 与 API Key，填进 `.env` 的 `IMA_CLIENT_ID`、`IMA_API_KEY`。
+2. `stock ima list` 查看能访问的知识库，把名称写进 `config.yaml` 的 `sources.ima.knowledge_bases`。
+3. `stock ima search 英诺赛科` 试一下检索；`stock ima fetch` 只跑 ima 这一步。
+
+接进来后：
+- **每次 `stock run`**：按每家公司的名称、代码（2577.HK 这种写法、A 股 6 位代码、美股代码）、英文名检索标题，新出现的条目作为「ima知识库」来源的消息参与分级，来源名是研报机构或媒体（高盛、彭博社……）。研报等 PDF 原文下载后入库为本公司资料（摘要开头写明资料编号，深度报告和标的追踪都能按页引用）；新闻截图用 tesseract OCR，识别出的文字作为摘要。
+- **研究 agent**（深度报告、标的追踪）多了 `ima_search` / `ima_read`，提示词要求卖方观点、目标价、管理层交流优先从这里找。
+- **日期**：ima 的条目不带发布时间。程序取标题里的日期（20260929-高盛-…、260310-GS-…），其次是截图 OCR 文字里的日期，再没有就用首次见到的时间。某家公司第一次检索时只收录标题带日期的近期内容，其余只记为已见过，不会把旧内容当新消息。
+- **ima 接口的限制**（实测，官方文档没写）：连续约 50 次/分钟会被限流（程序按 1.2 秒间隔调用）；**目录浏览和取原文各有每日次数上限**（各约几十到一百次，超出后当天返回「资料获取次数已达上限」）。所以程序只用检索（不受每日上限限制）来发现新条目，原文按 `max_downloads_per_day`（默认 25，agent 的 `ima_read` 也计入）下载；额度用完时只收录标题，摘要里注明，第二天 agent 可以用 `ima_read` 补读。部分文件 ima 本身就不提供原文（笔记、录音、Excel，以及一些共享文件），只能参考标题。
+- **检索只匹配标题**，每个词最多返回约 100 条、不按时间排序。某个检索词命中达到上限时，运行结果会提示「最新条目可能被截掉」；这时可以在 watchlist 给公司加更具体的英文名或别名。盘中 `stock alert` 默认不检索 ima（`in_alert: true` 可开启）。
 
 ## 常用命令
 
@@ -309,6 +325,7 @@ WebUI「任务」页和内置日程能运行的任务如下（与命令行一一
 | `stock profile [公司] [--force]` | 重新生成公司画像 |
 | `stock events [公司] --days 3 --min 3` | 查看已分级事件 |
 | `stock docs fetch/add/list`、`stock data add/import/list`、`stock note` | 资料与手动数据 |
+| `stock ima list/search/fetch` | ima 知识库：可访问的知识库、按标题检索、只检索新条目 |
 | `stock llm-test [--profile 名称]`、`stock status` | 检查配置 |
 
 ## 定时运行

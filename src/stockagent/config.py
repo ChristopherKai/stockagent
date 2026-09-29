@@ -90,6 +90,19 @@ class LLMConfig(BaseModel):
 
 # ---------------------------------------------------------------- 其他配置
 
+class ImaConfig(BaseModel):
+    """腾讯 ima 知识库（需要 .env 的 IMA_CLIENT_ID 与 IMA_API_KEY）。"""
+
+    enabled: bool = True
+    knowledge_bases: list[str] = Field(default_factory=list)  # 知识库名称或 ID
+    queries_per_company: int = 4  # 每家公司每次用几个检索词（公司名、代码、英文名），结果取并集
+    download: bool = True         # 下载新条目原文：PDF/Word 入库为资料，图片 OCR
+    ocr: bool = True              # 图片（新闻截图）用本地 tesseract 识别文字
+    max_download_mb: int = 40
+    max_downloads_per_day: int = 25  # 每天最多取几次原文（ima 对取原文有未公开的每日上限，实测约几十次；agent 的 ima_read 也计入）
+    in_alert: bool = False        # 盘中 stock alert 是否也检索（默认只在 stock run / fetch 时）
+
+
 class SourcesConfig(BaseModel):
     announcements_lookback_days: int = 30
     news_lookback_days: int = 7
@@ -105,6 +118,7 @@ class SourcesConfig(BaseModel):
     blocked_news_sources: list[str] = Field(default_factory=list)
     blocked_title_patterns: list[str] = Field(default_factory=list)
     auto_download_reports: bool = True
+    ima: ImaConfig = Field(default_factory=ImaConfig)
     sec_user_agent: str | None = None
     sec_forms: list[str] = Field(
         default_factory=lambda: [

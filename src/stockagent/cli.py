@@ -9,11 +9,11 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 from . import app as appmod
-from . import brief, docs, dossier, evaluate, monitor, notify, profile, tracker, triage
+from . import brief, docs, dossier, evaluate, imafeed, monitor, notify, profile, tracker, triage
 from .app import SOURCE_LABEL, App
 from .config import ConfigError
 from .llm import LLMError
@@ -174,7 +174,7 @@ def cmd_alert(args) -> None:
             print(PIPELINE_BUSY)
             return
         companies = app.watchlist.select(args.company)
-        _print(appmod.fetch(app, companies, market=False))
+        _print(appmod.fetch(app, companies, market=False, ima=app.settings.sources.ima.in_alert))
         _print(triage.run(app, companies))
         _print(monitor.run(app, companies))
         _print(brief.alerts(app, do_push=not args.no_push))
@@ -476,6 +476,36 @@ def cmd_llm_test(args) -> None:
     print("任务路由：" + "；".join(f"{t} → {app.llm.describe(t)}" for t in LLM_TASKS))
 
 
+def cmd_ima(args) -> None:
+    app = _load(args)
+    from .sources import ima
+
+    if ima.credentials() is None:
+        sys.exit(f"未配置 ima 凭证：在 .env 填写 {ima.ENV_CLIENT_ID} 与 {ima.ENV_API_KEY}（https://ima.qq.com/agent-interface 获取）")
+    try:
+        if args.action == "list":
+            wanted = set(app.settings.sources.ima.knowledge_bases)
+            for kb in ima.knowledge_bases(app.session):
+                mark = "✓" if wanted & {kb["id"], kb["name"]} else " "
+                print(f"  {mark} {kb['name']}｜{kb['type']}｜{kb['role']}｜{kb['count']:,} 条")
+            print("  （✓ 为 config.yaml sources.ima.knowledge_bases 中已配置的知识库）")
+        elif args.action == "search":
+            if not args.query:
+                sys.exit("用法：stock ima search 关键词（只匹配标题）")
+            for kb in imafeed.knowledge_bases(app):
+                hits = [x for x in ima.search(app.session, kb["id"], args.query) if x["media_type"] != ima.FOLDER]
+                hits.sort(key=lambda x: ima.parse_date(x["title"]) or date.min, reverse=True)
+                print(f"「{kb['name']}」{len(hits)} 条：")
+                for x in hits[: args.limit]:
+                    print(f"  {ima.parse_date(x['title']) or '日期不详'}｜{ima.MEDIA_TYPES.get(x['media_type'], x['media_type'])}｜{x['title']}")
+        else:
+            if not imafeed.enabled(app):
+                sys.exit("ima 未启用：检查 config.yaml sources.ima（enabled、knowledge_bases）")
+            _print(imafeed.fetch(app, app.watchlist.select(args.query and [args.query])))
+    except ima.ImaError as e:
+        sys.exit(str(e))
+
+
 def cmd_status(args) -> None:
     app = _load(args)
     s = app.db.stats()
@@ -489,6 +519,8 @@ def cmd_status(args) -> None:
         print(f"LLM {t}：{app.llm.describe(t)}" + (f"（不可用：{reason}）" if reason else ""))
     chans = notify.channels(app.settings)
     print("推送渠道：" + ("、".join(chans) if chans else "未配置"))
+    kbs = app.settings.sources.ima.knowledge_bases
+    print("ima 知识库：" + ("、".join(kbs) if imafeed.enabled(app) else "未启用（需要 .env 的 IMA_CLIENT_ID / IMA_API_KEY 与 sources.ima.knowledge_bases）"))
 
 
 # ---------------------------------------------------------------- 解析
@@ -566,7 +598,7 @@ def build_parser() -> argparse.ArgumentParser:
     dp = sub.add_parser("docs", help="文档：fetch 自动下载定期报告 / add 手动添加 / list 查看")
     dsub = dp.add_subparsers(dest="docs_cmd", required=True)
     with_company(dsub.add_parser("fetch", help="下载最新年报和中期报告"))
-    sp = dsub.add_parser("add", help="手动添加文档（PDF/DOCX/TXT/MD/HTML）")
+    sp = dsub.add_parser("add", help="手动添加文档（PDF/DOCX/TXT/MD/HTML；图片用 tesseract 识别文字）")
     sp.add_argument("company")
     sp.add_argument("file")
     sp.add_argument("--type", choices=list(docs.DOC_TYPES), help="不填则按文件名推断")
@@ -611,6 +643,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_llm_test)
 
     sub.add_parser("status", help="查看数据与配置状态").set_defaults(func=cmd_status)
+
+    sp = sub.add_parser("ima", help="ima 知识库：list 可访问的知识库 / search 按标题检索 / fetch 只检索 ima 新条目")
+    sp.add_argument("action", choices=["list", "search", "fetch"])
+    sp.add_argument("query", nargs="?", help="search 的关键词；fetch 时可指定一家公司")
+    sp.add_argument("--limit", type=int, default=30)
+    sp.set_defaults(func=cmd_ima)
 
     sp = sub.add_parser("web", help="WebUI（只监听 127.0.0.1）：事件与估值修正时间线、观察清单、追踪、模型与日程配置；内置调度器")
     sp.add_argument("--port", type=int, help="端口（默认 config.yaml 的 web.port，8765）")

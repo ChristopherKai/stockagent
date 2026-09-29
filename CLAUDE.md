@@ -40,6 +40,7 @@ uv run stock web [--port 8765] [--no-scheduler] [--open]       # WebUI on 127.0.
   - cached external IDs: `hkex_stock_id:`, `cninfo_org_id:`, `sec_cik:`, `em_secid:`, `us_secid:`.
   - once-a-day markers: `reports_checked:`, `monitor_checked:`.
   - scheduler fire markers `sched_last:<schedule name>` (last minute fired, CST ISO).
+  - ima: `ima_kb:<configured name>` (resolved `{id, name}`), `fetched:ima:<kb_id>:<company>` (first-search marker), `ima_downloads` (today's original-file budget `{date, n, exhausted}`).
 - Tracker tables: `trackers` (one row per tracked company; points at the current baseline dossier and latest revision), `revisions` (baseline / revision / review snapshots with the full model JSON, applied and rejected changes, assessed evidence, trigger-status snapshot), `tracker_refs` (primary key `(company_id, ref)`: every piece of evidence the tracker has shown to the model, so nothing is processed twice). `jobs` holds WebUI / scheduler / tracker-queued background jobs.
 - Process locks live in `data/tmp/locks/*.lock` (fcntl.flock, released when the process dies): `dossier`, `pipeline` (run / alert / target run), `web` (only one scheduler + job runner). `PRAGMA user_version` is set (currently 1); new columns on existing tables need an ALTER keyed on it.
 - `data/` is gitignored, generated output: the DB; `docs/` (originals plus extracted `.txt`); `dossiers/` (html/md/pdf plus `notes/*.json`); `reports/`; `inbox/`; `tmp/`.
@@ -55,6 +56,8 @@ uv run stock web [--port 8765] [--no-scheduler] [--open]       # WebUI on 127.0.
 - Documents are copied to `data/docs/<company>/`, deduped by SHA-256, and text-extracted with a `[第N页]` marker per page. `tools.split_pages`, `search_filings` and the citation format depend on those markers.
 - Filing search converts both query and text to Simplified Chinese (`utils.to_simplified`). Never convert the other way.
 - `docs.fetch_reports` only downloads documents in HKEX/cninfo's annual and interim *report* categories, skipping any `(doc_type, period)` that already exists. When adding something like a results announcement by hand, give it `--type other`; typing it `interim_report` would stop the real report from ever downloading.
+- Images (png/jpg/webp) are OCR'd by local tesseract (`docs.ocr_image`, fixed argv, `chi_sim+eng`).
+- **ima knowledge base** (`sources/ima.py` HTTP client, `imafeed.py`): official OpenAPI with `IMA_CLIENT_ID`/`IMA_API_KEY` from `.env`. Undocumented limits found in real use: ~50 calls/min → `200001` (HTTP 403); `get_knowledge_list` and `get_media_info` each have a **daily** cap (tens to ~100) → `220021`; `220030` = that file has no original. So the feed never browses folders: per company it searches titles (`queries()`: name, `2577.HK`-style code, A code, US ticker, latin names; search is title-substring, ≤~100 hits, unordered, no AND), re-checks with `Matcher`, dedupes via the `ima_seen` table (`(media_id, company_id)`), dates from the title (else OCR text, else first-seen; a company's first search only takes dated items). New entries become `items` (kind `news`, source `ima`, `source_name` = broker/media); PDFs are stored as `research`/`transcript` docs (source `ima`) under the daily `max_downloads_per_day` budget. Tracker skips source-`ima` docs as evidence (the item already names the doc). `stock alert` skips ima unless `sources.ima.in_alert`.
 - Users add material via `data/inbox/<company>/` (imported by `stock run`), `stock docs add`, `stock data add` and `stock note`.
 
 **LLM layer** (llm.py).
@@ -96,6 +99,7 @@ uv run stock web [--port 8765] [--no-scheduler] [--open]       # WebUI on 127.0.
 - Tool errors start with `错误`; the Anthropic agent loop marks those results `is_error`.
 - A `web_search` result starting with `没有可用的搜索结果` counts as a search outage (`web.search_failed`), which makes a later `--reuse-notes` rerun gap-fill.
 - Failed research notes start with `FAILED_MARK`.
+- ima item snippets start with `[原文已入库：资料 #<doc id>]` when the original was stored; `ima_search` refs are `I<n>` (per ToolBox).
 - Tracker evidence codes shown to the model: events `id=<short_id>` (12 hex chars, in the user message so the mock can echo them), kill criteria `K<id>`, documents `D<id>`, manual data `M<id>`, catalysts `C<n>`, stage-A tool results `T<n>`. `tracker_refs.ref` prefixes: `item:`, `trig:<id>:<status>`, `doc:`, `man:<id>:<imported_at>`, `cat:<dossier>:<hash>`. Only the Stage B `events` array uses an `id` field (the mock expands arrays with an `id` property per hex id).
 
 ## Rules that are easy to break

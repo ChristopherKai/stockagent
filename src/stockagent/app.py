@@ -23,7 +23,7 @@ FX_USDCNH = "133.USDCNH"
 MARKET_LABEL = {"HK": "港股", "A": "A股", "US": "美股"}
 SOURCE_LABEL = {
     "hkex": "港交所", "cninfo": "巨潮", "sec": "SEC", "eastmoney": "东方财富",
-    "google_news": "Google新闻", "manual": "手动",
+    "google_news": "Google新闻", "ima": "ima知识库", "manual": "手动",
 }
 
 
@@ -181,7 +181,7 @@ def _guard(label: str, fn, *args) -> list[str]:
 
 
 def fetch(app: App, companies: list[Company], *, prices: bool = True, filings: bool = True,
-          news: bool = True, market: bool = True) -> list[str]:
+          news: bool = True, market: bool = True, ima: bool = True) -> list[str]:
     msgs: list[str] = []
     for c in companies:
         for l in c.listings:
@@ -191,6 +191,10 @@ def fetch(app: App, companies: list[Company], *, prices: bool = True, filings: b
                 msgs += _guard(f"{c.name} {l.display} 公告", fetch_filings, app, c, l)
         if news:
             msgs += _guard(f"{c.name} 新闻", fetch_news, app, c)
+    if news and ima:
+        from . import imafeed  # imafeed 依赖本模块
+
+        msgs += _guard("ima 知识库", imafeed.fetch, app, companies)
     if market and prices:
         msgs += _guard("市场行情", fetch_market, app, companies)
     return msgs

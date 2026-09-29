@@ -370,3 +370,19 @@ def test_locks_and_run_step_order(tapp, monkeypatch, capsys, project):
     with tapp.lock("dossier"):
         with pytest.raises(SystemExit, match="已有深度报告在生成"):
             cli.main(["-c", str(project / "config.yaml"), "dossier", "dongyue"])
+
+
+def test_ima_documents_are_not_separate_evidence(tapp, tmp_path):
+    """ima 原文入库时对应的事件已写明资料编号，不再作为「新入库资料」重复出现；手动添加的资料照常。"""
+    from stockagent.docs import store_document
+
+    c = tapp.watchlist.get("dongyue")
+    save_dossier(tapp, created_at=iso(utcnow() - timedelta(days=1)))
+    tracker.add(tapp, c)
+    for name, source in (("ima.txt", "ima"), ("manual.txt", "manual")):
+        f = tmp_path / name
+        f.write_text(f"{source} 研报正文", encoding="utf-8")
+        store_document(tapp.db, tapp.data_dir, "dongyue", f, doc_type="research", period=None, title=name, source=source)
+    ev, _ = tracker.collect(tapp, c, tapp.db.latest_dossier("dongyue"), tapp.db.latest_revision("dongyue"))
+    assert [e.text.split("《")[1].split("》")[0] for e in ev] == ["manual.txt"]
+    assert {"ima_search", "ima_read"} <= set(tracker.TOOLS)

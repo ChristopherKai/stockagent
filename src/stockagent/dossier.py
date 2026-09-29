@@ -23,7 +23,7 @@ import markdown as md
 from pydantic import BaseModel, field_validator, model_validator
 from requests import RequestException
 
-from . import verify
+from . import imafeed, verify
 from .app import MARKET_LABEL, App
 from .config import Company
 from .llm import LLMError
@@ -398,6 +398,8 @@ def research(app: App, company: Company, key: str, title: str, questions: str, m
     system = [RESEARCH_SYSTEM.format(company=company.title, section=title,
                                      rules=AGENT_RULES.format(today=today_local(), max_steps=app.settings.agent.max_steps)),
               app.company_context(company)]
+    if imafeed.enabled(app):
+        system.append(imafeed.AGENT_HINT)
     alerts = previous_alerts(app, company)
     revs = previous_revisions(app, company)
     user = (f"{questions}\n\n当前行情：\n{market}\n{app.fx_line()}（涉及币种换算时只用这里的汇率）\n\n"
@@ -457,6 +459,8 @@ def fill_gaps(app: App, company: Company, notes: dict, market: str, progress) ->
     steps = app.settings.agent.max_steps + 6
     system = [FILL_SYSTEM.format(company=company.title, rules=AGENT_RULES.format(today=today_local(), max_steps=steps)),
               app.company_context(company)]
+    if imafeed.enabled(app):
+        system.append(imafeed.AGENT_HINT)
     user = ("需要补齐的关键数据：\n"
             + "\n".join(f"{i}. {g['name']}——为什么关键：{g['why']}；建议检索：{'；'.join(g['queries'])}；可能来源：{'、'.join(g['sources'])}"
                         for i, g in enumerate(gaps, 1))

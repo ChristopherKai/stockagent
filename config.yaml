@@ -110,6 +110,18 @@ sources:
   blocked_news_sources: [TradingView]
   blocked_title_patterns: []        # 正则，匹配到的新闻标题直接丢弃
   auto_download_reports: true       # 自动下载最新年报/中期报告（A+H 公司优先巨潮简体全文）
+  # 腾讯 ima 知识库（.env 填 IMA_CLIENT_ID / IMA_API_KEY；stock ima list 查看可访问的知识库）。
+  # 每次抓取按公司名、代码、英文名检索标题，新出现的条目进入分级：研报等 PDF 原文入库为资料，新闻截图用本地 tesseract OCR。
+  # 研究 agent 另有 ima_search / ima_read 工具。目录浏览接口有每日次数上限，所以只用检索。
+  ima:
+    enabled: true
+    knowledge_bases: [【爱分享】的财经资讯]
+    queries_per_company: 4          # 每家公司每次几个检索词（每个词最多返回约 100 条，取并集）
+    download: true                  # 下载新条目原文
+    ocr: true
+    max_download_mb: 40
+    max_downloads_per_day: 25       # ima 对取原文有未公开的每日上限（实测约几十次），agent 的 ima_read 也计入
+    in_alert: false                 # 盘中 stock alert 是否也检索（默认只在 stock run 时）
   sec_user_agent: null              # 跟踪美股时必填，格式 "姓名 邮箱"（SEC 要求）
 
 # ------------------------------------------------------------------ 研究 agent（深度报告）

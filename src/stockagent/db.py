@@ -104,6 +104,15 @@ CREATE TABLE IF NOT EXISTS kv (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ima_seen (         -- ima 知识库中已处理过的条目（按公司检索到的；收录与否都记）
+    media_id    TEXT NOT NULL,
+    company_id  TEXT NOT NULL,
+    kb_id       TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    seen_at     TEXT NOT NULL,
+    PRIMARY KEY (media_id, company_id)
+);
+
 CREATE TABLE IF NOT EXISTS dossiers (
     id            INTEGER PRIMARY KEY,
     company_id    TEXT NOT NULL,
@@ -409,6 +418,19 @@ class DB:
     def quote(self, secid: str) -> dict | None:
         r = self._one("SELECT * FROM quotes WHERE secid=?", (secid,))
         return {**json.loads(r["data_json"]), "taken_at": r["taken_at"]} if r else None
+
+    # ------------------------------------------------------------ ima 知识库
+
+    def ima_seen_ids(self, company_id: str, media_ids: list[str]) -> set[str]:
+        if not media_ids:
+            return set()
+        rows = self._all(f"SELECT media_id FROM ima_seen WHERE company_id=? AND media_id IN ({','.join('?' * len(media_ids))})",
+                         (company_id, *media_ids))
+        return {r["media_id"] for r in rows}
+
+    def ima_mark_seen(self, media_id: str, company_id: str, kb_id: str, title: str) -> None:
+        self._exec("INSERT OR IGNORE INTO ima_seen(media_id, company_id, kb_id, title, seen_at) VALUES(?, ?, ?, ?, ?)",
+                   (media_id, company_id, kb_id, title, iso(utcnow())))
 
     # ------------------------------------------------------------ 文档
 

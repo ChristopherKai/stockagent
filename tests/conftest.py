@@ -47,6 +47,11 @@ def _no_external_search(monkeypatch):
     from stockagent.sources import emdata
 
     monkeypatch.setattr(emdata, "fcf_data", lambda *a, **k: None)  # 报表数据需要联网；需要的测试自行替换
+    from stockagent.sources import ima
+
+    monkeypatch.delenv(ima.ENV_CLIENT_ID, raising=False)  # 本机 .env 里的 ima 凭证不带进测试；需要的测试自行设置
+    monkeypatch.delenv(ima.ENV_API_KEY, raising=False)
+    monkeypatch.setattr(ima, "MIN_INTERVAL", 0)
 
 
 @pytest.fixture

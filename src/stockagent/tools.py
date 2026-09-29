@@ -16,11 +16,11 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Callable
 
-from . import technical
+from . import imafeed, technical
 from .app import FX_HKDCNH, PRICE_SOURCES, SOURCE_LABEL, App, _try, klines
 from .config import Company, Listing
 from .docs import DOC_TYPES, read_document_text
-from .sources import eastmoney, emdata, tencent, web
+from .sources import eastmoney, emdata, ima, tencent, web
 from .triage import DIRECTIONS, event_label
 from .utils import big_num, fmt_local, iso, num, pct, to_simplified, utcnow
 
@@ -430,6 +430,7 @@ class ToolBox:
         self.web_providers = list(app.settings.agent.web_search)
         self.log: list[dict] = []
         self._pages: dict[int, list[tuple[int, str, str]]] = {}  # doc_id → [(页码, 原文, 简体)]
+        self._ima: dict[str, dict] = {}  # ima_search 结果编号 → 条目
         self.tools = {t.name: t for t in self._build() if allow is None or t.name in allow}
 
     def specs(self, names: list[str] | None = None) -> list[dict]:
@@ -457,6 +458,24 @@ class ToolBox:
     # ------------------------------------------------------------ 工具实现
 
     def _build(self) -> list[Tool]:
+        return self._base_tools() + (self._ima_tools() if imafeed.enabled(self.app) else [])
+
+    def _ima_tools(self) -> list[Tool]:
+        return [
+            Tool("ima_search",
+                 "在使用者订阅的 ima 知识库中检索：外资与内资券商研报（高盛、摩根士丹利、中金等）、调研与电话会纪要、彭博/路透等付费新闻截图。"
+                 "只按标题匹配：用公司名、代码（如 2577.HK、0100.HK、300308）、机构名或主题词；多个词用空格分隔时先搜第一个词、再按其余词筛选"
+                 "（如「中际旭创 高盛」）。返回编号、日期、类型、标题，按日期倒序；用 ima_read 读取原文。",
+                 _obj({"query": {"type": "string"}, "max_results": {"type": "integer"}}, ["query"]),
+                 self.ima_search),
+            Tool("ima_read",
+                 "读取 ima_search 结果中的一条（编号如 I3）：PDF/Word 入库为本公司资料，返回资料编号与开头内容，之后用 search_filings / read_filing "
+                 "按页检索和引用；图片返回 OCR 文字（可能有错字）。笔记、录音、Excel 读不到原文。",
+                 _obj({"ref": {"type": "string", "description": "ima_search 返回的编号，如 I3"}}, ["ref"]),
+                 self.ima_read),
+        ]
+
+    def _base_tools(self) -> list[Tool]:
         return [
             Tool("calculate",
                  "计算器（Python 语法）：+ - * / ** %、括号、abs/round/min/max/sum/sqrt/log/exp 等函数、列表，支持多行简单赋值，"
@@ -857,6 +876,39 @@ class ToolBox:
 
     def fetch_url(self, url: str, max_chars: int = 4000) -> str:
         return web.fetch_text(self.app.session, url, max(500, min(int(max_chars), self.max_chars)))
+
+    def ima_search(self, query: str, max_results: int = 20) -> str:
+        terms = [to_simplified(t).lower() for t in query.split() if t]
+        if not terms:
+            return "错误：query 为空"
+        hits, seen = [], set()
+        for kb in imafeed.knowledge_bases(self.app):
+            for x in ima.search(self.app.session, kb["id"], query.split()[0]):
+                key = re.sub(r"\W+", "", x["title"])
+                if x["media_type"] == ima.FOLDER or key in seen or not all(t in to_simplified(x["title"]).lower() for t in terms[1:]):
+                    continue
+                seen.add(key)
+                hits.append({**x, "date": ima.parse_date(x["title"])})
+        if not hits:
+            return f"ima 知识库中没有标题包含「{query}」的条目（只按标题匹配，可换公司简称、代码或英文名再试）"
+        hits.sort(key=lambda x: x["date"] or date.min, reverse=True)
+        lines = []
+        for x in hits[: max(1, min(int(max_results), 50))]:
+            ref = f"I{len(self._ima) + 1}"
+            self._ima[ref] = x
+            lines.append(f"{ref}｜{x['date'] or '日期不详'}｜{ima.MEDIA_TYPES.get(x['media_type'], x['media_type'])}｜{x['title']}")
+        return f"共 {len(hits)} 条（显示 {len(lines)} 条，按日期倒序）：\n" + "\n".join(lines)
+
+    def ima_read(self, ref: str) -> str:
+        x = self._ima.get(ref.strip().upper())
+        if x is None:
+            return f"错误：没有编号 {ref}，先用 ima_search 检索"
+        doc, text = imafeed.read_entry(self.app, self.company, x)
+        if doc is None:
+            return f"图片 OCR 文字（{x['title']}，可能有错字）：\n{text.strip()}"
+        self._pages.pop(doc["id"], None)
+        return (f"已入库为本公司资料 #{doc['id']}《{doc['title']}》（{doc['pages'] or '-'} 页，{doc['chars']:,} 字）。"
+                f"用 search_filings（doc_id={doc['id']}）检索、read_filing 读取指定页。开头内容：\n{text[:2500]}")
 
 
 def tool_log_markdown(log: list[dict], limit: int = 60) -> str:

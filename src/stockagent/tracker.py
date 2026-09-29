@@ -19,7 +19,7 @@ from datetime import timedelta
 
 from pydantic import BaseModel, field_validator
 
-from . import technical, verify
+from . import imafeed, technical, verify
 from .app import SOURCE_LABEL, App
 from .config import Company
 from .docs import DOC_TYPES
@@ -50,7 +50,7 @@ DISCLAIMER = "目标价（情景加权估值）由程序按估值假设计算，
 
 # 修正 agent 可用的工具（ToolBox 白名单）；web_search 由 tracker.web_search 控制，深度报告运行期间自动去掉
 TOOLS = ["calculate", "company_events", "web_search", "fetch_url", "list_filings", "search_filings", "read_filing",
-         "market_data", "financials", "fcf_yield", "broker_research", "manual_data", "valuation_matrix"]
+         "market_data", "financials", "fcf_yield", "broker_research", "manual_data", "valuation_matrix", "ima_search", "ima_read"]
 # 修正时附给 agent 的报告章节（论证逻辑），按顺序截取
 REPORT_SECTIONS = ["核心洞见", "关键经营变量", "估值：框架与可比", "12 个月情景", "证伪条件"]
 SECTION_CHARS = 3000
@@ -310,7 +310,7 @@ def collect(app: App, company: Company, dossier: dict, last: dict | None) -> tup
     since = dossier["created_at"]
     for doc in app.db.documents_added_since(company.id, since):
         ref = f"doc:{doc['id']}"
-        if ref not in linked:
+        if ref not in linked and doc["source"] != imafeed.SOURCE:  # ima 原文已随对应事件出现（摘要里写了资料编号）
             label = f"{DOC_TYPES.get(doc['doc_type'], doc['doc_type'])} {doc['period'] or ''}《{doc['title']}》"
             out.append(Evidence(ref, f"D{doc['id']}", "doc",
                                 f"D{doc['id']}｜新入库资料 #{doc['id']}：{label}（{doc['chars'] or 0:,} 字，可用 search_filings / read_filing 读取）",
@@ -412,6 +412,8 @@ def _research(app: App, company: Company, context: str, evidence: list[Evidence]
     box = ToolBox(app, company, allow=allow)
     steps = app.settings.tracker.max_steps
     system = [RESEARCH_SYSTEM.format(company=company.title, today=today_local(), max_steps=steps)]
+    if "ima_search" in box.tools:
+        system.append(imafeed.AGENT_HINT)
     user = (context + "\n\n=== 新依据（编号供引用）===\n" + "\n".join(f"- {e.text}" for e in evidence)
             + (f"\n\n（{why}）" if why else "") + (f"\n（{note}）" if note else "")
             + "\n\n请逐条核实与量化，输出修正研究笔记。")

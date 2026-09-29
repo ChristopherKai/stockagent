@@ -6,6 +6,7 @@ import csv
 import io
 import re
 import shutil
+import subprocess
 from datetime import timedelta
 from pathlib import Path
 
@@ -23,7 +24,9 @@ DOC_TYPES = {
     "note": "笔记",
     "other": "其他",
 }
-SUPPORTED = {".pdf", ".docx", ".txt", ".md", ".html", ".htm"}
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+SUPPORTED = {".pdf", ".docx", ".txt", ".md", ".html", ".htm", *IMAGE_SUFFIXES}
+OCR_LANGS = "chi_sim+eng"
 
 # 顺序有意义："2026年半年度报告"同时含"半年"和"年度报告"，应判为中期报告
 _TYPE_RULES = [
@@ -72,9 +75,22 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def ocr_image(path: Path) -> str:
+    """本地 tesseract 识别图片文字（固定参数调用，不经 shell）。"""
+    exe = shutil.which("tesseract")
+    if not exe:
+        raise RuntimeError("未安装 tesseract，无法识别图片文字（brew install tesseract tesseract-lang）")
+    p = subprocess.run([exe, str(path), "-", "-l", OCR_LANGS], capture_output=True, timeout=180)
+    if p.returncode != 0:
+        raise RuntimeError(f"tesseract 识别失败：{p.stderr.decode('utf-8', 'replace')[:200]}")
+    return p.stdout.decode("utf-8", "replace")
+
+
 def extract_text(path: Path) -> tuple[str, int | None]:
-    """返回 (文本, 页数)。PDF 每页前插入 [第N页] 标记，方便模型引用出处。"""
+    """返回 (文本, 页数)。PDF 每页前插入 [第N页] 标记，方便模型引用出处；图片用 OCR。"""
     suffix = path.suffix.lower()
+    if suffix in IMAGE_SUFFIXES:
+        return ocr_image(path), None
     if suffix == ".pdf":
         import pymupdf
 
