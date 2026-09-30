@@ -42,13 +42,32 @@ templates.env.globals.update(
 
 
 class AppHolder:
-    """当前的 App（配置、观察清单、数据库、模型）。保存配置后 reload：复用数据库连接，重建 LLM（清掉客户端缓存）。"""
+    """当前的 App（配置、观察清单、数据库、模型）。保存配置后 reload：复用数据库连接，重建 LLM（清掉客户端缓存）。
+    后台任务（如「新增公司」）改了 watchlist.yaml 时，下次取 app 自动重新加载。"""
 
     def __init__(self, config_path: str | Path):
         self.config_path = Path(config_path).resolve()
         self.root = self.config_path.parent
         self._lock = threading.RLock()
-        self.app = App.load(self.config_path)
+        self._app = App.load(self.config_path)
+        self._wl_mtime = self._watchlist_mtime()
+
+    def _watchlist_mtime(self) -> int | None:
+        try:
+            return self.watchlist_path.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    @property
+    def app(self) -> App:
+        mtime = self._watchlist_mtime()
+        if mtime != self._wl_mtime:
+            try:
+                self.reload()
+            except Exception as e:  # noqa: BLE001 - 文件改坏了就继续用旧的，页面照常工作
+                log.warning("watchlist.yaml 已修改但无法加载，继续使用旧的观察清单：%s", e)
+            self._wl_mtime = mtime
+        return self._app
 
     @property
     def watchlist_path(self) -> Path:
@@ -60,14 +79,15 @@ class AppHolder:
 
     @property
     def backup_dir(self) -> Path:
-        return self.app.data_dir / "backups"
+        return self._app.data_dir / "backups"
 
     def reload(self) -> None:
         with self._lock:
             settings, watchlist, root = config.load(self.config_path)
-            old = self.app
+            old = self._app
             db = old.db if settings.data_dir == old.settings.data_dir else DB(settings.data_dir / "stock.db")
-            self.app = App(settings, watchlist, root, db, LLM(settings.llm, db))
+            self._app = App(settings, watchlist, root, db, LLM(settings.llm, db))
+            self._wl_mtime = self._watchlist_mtime()
 
 
 def page(request: Request, template: str, status_code: int = 200, **ctx) -> HTMLResponse:

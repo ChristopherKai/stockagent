@@ -191,3 +191,7 @@ details.tool summary { color: var(--fg); }
 pre.log { background: var(--code); border-radius: 8px; padding: 10px 12px; font-size: 12.5px; line-height: 1.5; white-space: pre-wrap;
   overflow-wrap: anywhere; max-height: 70vh; overflow-y: auto; margin: 8px 0 0; }
 hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
+.quick-add { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0 14px; }
+.quick-add input[name=code] { width: 16em; }
+.quick-add select, .quick-add input { width: auto; }
+@media (max-width: 700px) { .quick-add input[name=code] { flex: 1 1 10em; width: auto; } }

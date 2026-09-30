@@ -10,7 +10,7 @@
       <div>
         <label>任务<select name="task" required data-task-select>
           {% for cat in TASK_CATEGORIES %}<optgroup label="{{ cat }}">
-            {% for k, t in tasks.items() if t.category == cat %}
+            {% for k, t in tasks.items() if t.category == cat and not t.listing %}
               <option value="{{ k }}" data-desc="{{ t.desc }}" data-flags="{{ t.flags | join(' ') }}" data-companies="{{ t.companies }}"
                       data-profile="{{ 1 if t.profile else 0 }}">{{ t.title }}</option>
             {% endfor %}</optgroup>{% endfor %}

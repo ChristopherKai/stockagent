@@ -12,8 +12,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
 
+import requests
+
 from . import app as appmod
-from . import brief, docs, dossier, evaluate, imafeed, monitor, notify, profile, tracker, triage
+from . import brief, docs, dossier, evaluate, imafeed, jobs, monitor, newco, notify, profile, tracker, triage
 from .app import SOURCE_LABEL, App
 from .config import ConfigError
 from .llm import LLMError
@@ -476,6 +478,24 @@ def cmd_llm_test(args) -> None:
     print("任务路由：" + "；".join(f"{t} → {app.llm.describe(t)}" for t in LLM_TASKS))
 
 
+def cmd_add(args) -> None:
+    app = _load(args)
+    try:
+        data = newco.build(app, args.market, args.code)
+    except (ValueError, requests.RequestException) as e:
+        sys.exit(f"新增失败：{e}")
+    print("查到：" + newco.describe(data))
+    if args.dry_run:
+        return
+    newco.save(app, data)
+    print(f"已加入观察清单：{data['name']}（id {data['id']}）")
+    if args.onboard:
+        steps = jobs.TASKS["onboard"].steps
+        for i, step in enumerate(steps, 1):
+            print(f"\n== 初始化 {i}/{len(steps)}：stock {' '.join(step)} {data['id']}", flush=True)
+            main(["-c", args.config, *(["-v"] if args.verbose else []), *step, data["id"]])
+
+
 def cmd_ima(args) -> None:
     app = _load(args)
     from .sources import ima
@@ -643,6 +663,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_llm_test)
 
     sub.add_parser("status", help="查看数据与配置状态").set_defaults(func=cmd_status)
+
+    sp = sub.add_parser("add", help="按市场与代码新增公司：自动查名称、英文名、行业、其他上市地（A+H、港股+美股），写入观察清单")
+    sp.add_argument("market", help="HK / A / US")
+    sp.add_argument("code", help="如 2577、300308、XPEV")
+    sp.add_argument("--onboard", action="store_true", help="接着初始化：抓取 → 下载年报 → 分级 → 画像 → 深度报告 → 开始追踪")
+    sp.add_argument("--dry-run", action="store_true", help="只查询，不写入观察清单")
+    sp.set_defaults(func=cmd_add)
 
     sp = sub.add_parser("ima", help="ima 知识库：list 可访问的知识库 / search 按标题检索 / fetch 只检索 ima 新条目")
     sp.add_argument("action", choices=["list", "search", "fetch"])

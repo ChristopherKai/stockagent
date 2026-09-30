@@ -242,3 +242,55 @@ def southbound_summary(series: list[dict]) -> dict | None:
             out[f"chg_shares_{n}"] = last["shares"] - prev["shares"]
             out[f"chg_ratio_{n}"] = (last["ratio"] or 0) - (prev["ratio"] or 0)
     return out
+
+
+# ---------------------------------------------------------------- 公司概况（新增公司时自动填写）
+
+PROFILE_REPORTS = {"A": "RPT_F10_BASIC_ORGINFO", "HK": "RPT_HKF10_INFO_ORGPROFILE", "US": "RPT_USF10_INFO_ORGPROFILE"}
+US_EXCHANGES = {"O": "NASDAQ", "N": "NYSE", "A": "AMEX"}  # 东方财富美股 SECUCODE 后缀；其他后缀（如 .F 场外）不算上市地
+
+
+def _profile_listing(market: str, secucode_: str) -> tuple[str, str | None] | None:
+    """SECUCODE → (代码, 交易所)；美股场外等不支持的返回 None。"""
+    code, _, suffix = secucode_.rpartition(".")
+    if market == "HK":
+        return code, None
+    if market == "A":  # 只认 6 位数字：未上市的 CDR 等在这里是占位代码（如小米的 A17348）
+        return (code, suffix) if suffix in ("SH", "SZ", "BJ") and len(code) == 6 and code.isdigit() else None
+    return (code, US_EXCHANGES[suffix]) if suffix in US_EXCHANGES else None
+
+
+def company_profile(session: requests.Session, market: str, code: str) -> dict | None:
+    """按市场与代码查公司概况：{name, name_en, industry, business, listings: [(市场, 代码, 交易所)]}。
+    同一家公司在 A 股、港股、美股的 ORG_CODE 相同，据此找出其他上市地（A+H、港股+美股）。"""
+    if market == "US":
+        flt = f'(SECURITY_CODE="{code}")'
+    else:
+        l = Listing(market=market, code=code)
+        flt = f'(SECURITY_CODE="{l.code}")' if market == "A" else f'(SECUCODE="{l.code}.HK")'
+    rows = [r for r in _rows(session, DC, reportName=PROFILE_REPORTS[market], columns="ALL", filter=flt, pageSize=10)
+            if _profile_listing(market, r.get("SECUCODE") or "")]
+    if not rows:
+        return None
+    row = rows[0]
+    profiles = {market: row}
+    listings = [(market, *_profile_listing(market, row["SECUCODE"]))]
+    for other in ("A", "HK", "US"):
+        if other == market or not row.get("ORG_CODE"):
+            continue
+        found = [r for r in _rows(session, DC, reportName=PROFILE_REPORTS[other], columns="ALL",
+                                  filter=f'(ORG_CODE="{row["ORG_CODE"]}")', pageSize=10)
+                 if _profile_listing(other, r.get("SECUCODE") or "")]
+        if found:
+            profiles[other] = found[0]
+            listings.append((other, *_profile_listing(other, found[0]["SECUCODE"])))
+    order = [m for m in ("A", "HK", "US") if m in profiles]  # 名称优先取 A 股简称
+    first = lambda *keys: next((str(profiles[m][k]).strip() for m in order for k in keys if profiles[m].get(k)), None)
+    return {
+        "name": first("SECURITY_NAME_ABBR"),
+        "names": [str(profiles[m]["SECURITY_NAME_ABBR"]).strip() for m in order if profiles[m].get("SECURITY_NAME_ABBR")],
+        "name_en": first("ORG_NAME_EN", "ORG_EN_ABBR"),
+        "industry": first("BOARD_NAME_LEVEL", "EM2016", "INDUSTRY_TYPE", "BELONG_INDUSTRY"),
+        "business": first("MAIN_BUSINESS", "ORG_PROFILE"),
+        "listings": sorted(listings, key=lambda x: ("A", "HK", "US").index(x[0])),
+    }

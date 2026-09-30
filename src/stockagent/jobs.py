@@ -33,6 +33,7 @@ class Task:
     steps: tuple[tuple[str, ...], ...] = ()  # 组合任务：依次执行的子命令（每步都带上公司参数）
     category: str = "常用"              # WebUI 分组
     desc: str = ""                     # WebUI 上的一句话说明
+    listing: bool = False              # 接受 市场 + 代码（新增公司；在观察清单页提交，不出现在任务页和日程里）
 
 
 TASKS: dict[str, Task] = {t.key: t for t in [
@@ -56,6 +57,8 @@ TASKS: dict[str, Task] = {t.key: t for t in [
     Task("onboard", "新公司初始化", (), (), "many", "dossier", category="追踪管理",
          steps=(("fetch",), ("docs", "fetch"), ("triage",), ("profile",), ("dossier",), ("target", "add")),
          desc="依次运行：抓取 → 下载年报 → 分级 → 画像 → 深度报告 → 开始追踪"),
+    Task("add_company", "新增公司并初始化", ("add",), (), "none", "dossier", category="追踪管理", listing=True,
+         desc="按市场与代码查公司资料写入观察清单，再依次抓取 → 下载年报 → 分级 → 画像 → 深度报告 → 开始追踪"),
     Task("llm_test", "测试模型连接", ("llm-test",), (), "none", profile=True, category="维护", desc="逐个测试文本与 JSON 输出"),
     Task("eval", "事后检验", ("eval",), (), "any", category="维护", desc="统计已分级事件发布后的超额收益，检验分级有没有预测力"),
 ]}
@@ -70,11 +73,24 @@ class JobError(ValueError):
 
 
 def build(watchlist, profiles, task: str, companies: list[str] | None = None, flags: list[str] | None = None,
-          profile: str | None = None, verbose: bool = False) -> tuple[list[list[str]], str, str | None]:
+          profile: str | None = None, verbose: bool = False, listing: tuple[str, str] | None = None,
+          ) -> tuple[list[list[str]], str, str | None]:
     """校验并生成任务的步骤 argv（不含 -c 配置路径）；返回 (步骤, 标题, 公司 id)。"""
     t = TASKS.get(task)
     if t is None:
         raise JobError(f"不支持的任务：{task}")
+    if t.listing:
+        from .newco import normalize
+
+        if listing is None:
+            raise JobError(f"{t.title} 需要市场与代码")
+        try:
+            market, code = normalize(*listing)
+        except ValueError as e:
+            raise JobError(str(e)) from e
+        return [[*(["-v"] if verbose else []), *t.argv, market, code, "--onboard"]], f"{t.title}：{market} {code}", None
+    if listing is not None:
+        raise JobError(f"{t.title} 不接受市场与代码")
     ids: list[str] = []
     for key in companies or []:
         c = watchlist.get(key)
@@ -104,8 +120,9 @@ def build(watchlist, profiles, task: str, companies: list[str] | None = None, fl
 
 
 def submit(app, task: str, companies: list[str] | None = None, flags: list[str] | None = None,
-           profile: str | None = None, source: str = "web", note: str | None = None, verbose: bool = False) -> int:
-    steps, title, cid = build(app.watchlist, app.settings.llm.profiles, task, companies, flags, profile, verbose)
+           profile: str | None = None, source: str = "web", note: str | None = None, verbose: bool = False,
+           listing: tuple[str, str] | None = None) -> int:
+    steps, title, cid = build(app.watchlist, app.settings.llm.profiles, task, companies, flags, profile, verbose, listing)
     return app.db.add_job(task, steps, title, source, company_id=cid, note=note)
 
 

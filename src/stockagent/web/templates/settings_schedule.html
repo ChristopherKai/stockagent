@@ -19,7 +19,7 @@
       {% for x in runs %}{% set j = x.job %}{% set i = loop.index0 %}
         <tr><td><input type="checkbox" name="enabled_{{ i }}" {{ 'checked' if j.enabled }}></td>
           <td><input name="name_{{ i }}" value="{{ j.name }}" required></td>
-          <td><select name="task_{{ i }}">{% for k, t in tasks.items() %}<option value="{{ k }}" {{ 'selected' if k == j.task }}>{{ t.title }}</option>{% endfor %}</select></td>
+          <td><select name="task_{{ i }}">{% for k, t in tasks.items() if not t.listing %}<option value="{{ k }}" {{ 'selected' if k == j.task }}>{{ t.title }}</option>{% endfor %}</select></td>
           <td><input name="args_{{ i }}" value="{{ j.args | join(' ') }}" placeholder="如 --push"></td>
           <td><input name="cron_{{ i }}" value="{{ j.cron }}" class="mono" required></td>
           <td class="small nowrap">{{ x.next.strftime('%m-%d %H:%M') if x.next else '—' }}</td>
@@ -28,7 +28,7 @@
         {% set i = cfg.jobs | length %}
         <tr class="newrow"><td><input type="checkbox" name="enabled_{{ i }}" checked></td>
           <td><input name="name_{{ i }}" placeholder="新日程名称"></td>
-          <td><select name="task_{{ i }}">{% for k, t in tasks.items() %}<option value="{{ k }}">{{ t.title }}</option>{% endfor %}</select></td>
+          <td><select name="task_{{ i }}">{% for k, t in tasks.items() if not t.listing %}<option value="{{ k }}">{{ t.title }}</option>{% endfor %}</select></td>
           <td><input name="args_{{ i }}" placeholder="如 --push"></td>
           <td><input name="cron_{{ i }}" class="mono" placeholder="30 8 * * 1-5"></td><td></td><td></td></tr>
       </tbody>

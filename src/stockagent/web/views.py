@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from .. import app as appmod
-from .. import docs, jobs, monitor, notify, scheduler, tracker
+from .. import docs, jobs, monitor, newco, notify, scheduler, tracker
 from ..config import Company
 from ..docs import DOC_TYPES, SUPPORTED
 from ..utils import iso, lock_holder, parse_iso, utcnow
@@ -187,6 +187,24 @@ async def company_delete(request: Request, cid: str):
     except yamledit.EditError as e:
         return back("/companies", err=str(e))
     return back("/companies", ok=f"已从观察清单移除 {c.name}（数据库里的历史数据保留，重新添加同一 id 即可恢复）")
+
+
+@router.post("/companies/quick")
+async def companies_quick(request: Request):
+    """只填市场与代码：提交后台任务，查公司资料写入观察清单，再跑完整的初始化（页面进程不联网）。"""
+    app = holder(request).app
+    form = await request.form()
+    try:
+        market, code = newco.normalize(form.get("market") or "", form.get("code") or "")
+    except ValueError as e:
+        return back("/companies", err=str(e))
+    if c := newco.existing(app, market, code):
+        return back("/companies", err=f"{market} {code} 已在观察清单中：{c.name}")
+    try:
+        jid = jobs.submit(app, "add_company", listing=(market, code), source="web")
+    except jobs.JobError as e:
+        return back("/companies", err=str(e))
+    return back(f"/jobs/{jid}", ok=f"已提交：查询 {market} {code} 的公司资料并加入观察清单，随后自动初始化（深度报告每家数分钟）")
 
 
 @router.post("/companies/track")
