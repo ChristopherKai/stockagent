@@ -19,6 +19,7 @@ uv run stock -v run [company ...] [--no-llm]           # daily pipeline; -v (bef
 uv run stock dossier <company> [--reuse-notes] [--refill]   # deep report, several minutes per company
 uv run stock target add|list|show|run|rebase|remove <company>  # tracker: code-built baseline, event-driven revisions
 uv run stock web [--port 8765] [--no-scheduler] [--open]       # WebUI on 127.0.0.1 + job runner + scheduler
+uv run stock screen refresh|run|show|promote|themes|eval        # screener: HK Connect + A-share universe → candidates
 ```
 
 - There is no linter config or linter dependency. The `.ruff_cache/` shows ruff has only been run ad hoc (`uvx ruff check src tests`).
@@ -90,6 +91,14 @@ uv run stock web [--port 8765] [--no-scheduler] [--open]       # WebUI on 127.0.
   5. Materiality ≥ `tracker.redo_materiality` judged material, or thesis broken → `queue_redo` inserts a `dossier` job (cooldown `redo_cooldown_days`); `cmd_dossier` re-baselines tracked companies after saving the new dossier. `dossier.previous_revisions()` feeds revisions since the last dossier into the next one.
 - **Jobs & scheduler** (jobs.py, jobrun.py, scheduler.py, cron.py): the WebUI and scheduler may only run tasks registered in `jobs.TASKS` (fixed argv, validated company ids and flags, no shell). `JobRunner` (thread in `stock web`) launches `python -m stockagent.jobrun <id>`, which runs the CLI in-process and writes its own exit status; groups `pipeline` and `dossier` are mutually exclusive (also checked against the file locks). Free-text input (notes, manual data, uploads) is handled in the web process, never passed as argv.
 - **WebUI** (web/): FastAPI + Jinja2, server-rendered, vanilla JS/CSS, SVG chart built in Python. Pages read the DB only (no network). Config edits go through `web/yamledit.py` (ruamel round-trip, comments kept, codes written as double-quoted strings, full validation, backup, etag conflict check); `.env` edits only accept names ending `_KEY/_TOKEN/_SECRET/_WEBHOOK`.
+- **Screener** (`screen/`, `stock screen`, WebUI 选股): depends on the core; the core never imports it. Own tables (`screen_*`, created by `screen.store.ensure`), own `screen` lock and job group.
+  - L0 `universe.py`: 港股通 list + A-share valuation snapshot + statements, all via `sources/emscreen.py` bulk datacenter queries (never push2 `clist`: it rate-limits hard and then breaks single quotes too). `emscreen.rows_all` requires a unique sort key; unsorted datacenter paging drops and duplicates rows. A-share statements are cached per report period in `screen_bulk`.
+  - Statement shapes come from `emdata.hk_fcf_from_rows` / `a_fcf_from_rows` (same as `fcf_data`); metrics from `fcf.metrics` (shared with the `fcf_yield` tool). `fcf.capex_checked` replaces near-zero HK capex with net investing outflow and flags it.
+  - `events.py`: HKEX whole-market daily titles + cninfo keyword search + A-share forecasts, classified by regex `RULES` (no LLM); negatives veto. Watermarks `screen:events:<source>` in kv.
+  - `buckets.py`: L1 filters, the five buckets (floor / quality / theme → long pool; event / revision → event pool), rough odds, trap flags, tiers per pool: A 高胜率+高赔率, B 高胜率, C 高赔率, D 观察, X 快筛淘汰 (`tier_for`). Odds are for ranking only.
+  - `calendar.py`: forward catalysts from cached bulk data (announced / pattern-predicted dividends, A-share report appointments and HK statutory deadlines, A-share lock-up expiries as risk flags, dated catalysts from existing dossiers). Model-predicted catalysts never count toward tiers.
+  - Liquidity (`run.liquidity`): 20-day median turnover (fallbacks: turnover × mcap, volume × close with A-share lots of 100), zero-volume days, capacity estimate.
+  - `quick.py`: one `complete("screen")` per candidate; it can only downgrade to X, never upgrade (the model invents catalysts). `themes.py`: `themes.yaml` + `run_agent("screen_theme")` with `ToolBox(app, None, allow=...)`; suggestions are validated against the universe and written to `themes.yaml` only when the user accepts. `promote.py` writes watchlist entries (A+H both listings). `evaluate.py`: forward excess returns from `price_date`.
 - **Also:** brief.py (daily brief, alerts; renders the tracker line in code, never passes target numbers to the brief LLM); notify.py (Feishu/WeCom/Telegram, configured via `.env`); evaluate.py (`stock eval`: forward excess returns of graded events, measured from the first tradable close after publication).
 
 **String contracts between modules.** Keep these prefixes if you edit the messages:

@@ -82,3 +82,29 @@ def reports(session: requests.Session, listing: Listing, org_id: str, start: dat
             continue
         out.append(x)
     return sorted(out, key=lambda x: x["published_at"], reverse=True)
+
+
+def search(session: requests.Session, keyword: str, start: datetime, end: datetime, max_pages: int = 10,
+           delay: float = 0.4) -> list[dict]:
+    """全市场按标题关键词检索公告（选股器的事件扫描用），返回带代码与简称的公告列表。"""
+    out = []
+    se_date = f"{start.astimezone(CST):%Y-%m-%d}~{end.astimezone(CST):%Y-%m-%d}"
+    for page in range(1, max_pages + 1):
+        data = {"pageNum": page, "pageSize": 30, "column": "szse", "tabName": "fulltext", "plate": "", "stock": "",
+                "searchkey": keyword, "secid": "", "category": "", "trade": "", "seDate": se_date, "sortName": "",
+                "sortType": "", "isHLtitle": "false"}
+        r = session.post(f"{BASE}/new/hisAnnouncement/query", data=data, timeout=30)
+        r.raise_for_status()
+        body = r.json() or {}
+        for x in body.get("announcements") or []:
+            out.append({
+                "source_id": str(x["announcementId"]),
+                "code": x.get("secCode"), "name": clean_text(x.get("secName")),
+                "title": clean_text(x.get("announcementTitle")),
+                "url": STATIC + x["adjunctUrl"] if x.get("adjunctUrl") else None,
+                "published_at": datetime.fromtimestamp(x["announcementTime"] / 1000, tz=timezone.utc),
+            })
+        if not body.get("hasMore"):
+            break
+        time.sleep(delay)
+    return out

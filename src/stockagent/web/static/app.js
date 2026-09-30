@@ -9,6 +9,9 @@
     if (msg && !window.confirm(msg)) e.preventDefault();
   }, true);
 
+  // 选择后立即提交：<select data-autosubmit>
+  document.querySelectorAll("select[data-autosubmit]").forEach((s) => s.addEventListener("change", () => s.form.submit()));
+
   // 全选：<input type="checkbox" data-select-all="name">
   document.querySelectorAll("[data-select-all]").forEach((box) => {
     box.addEventListener("change", () => {

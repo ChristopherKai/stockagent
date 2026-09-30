@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}选股 · 事后检验{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="card-head"><h2>选股器事后检验</h2><a class="btn tiny ghost" href="/screen">返回选股</a></div>
+  <p class="muted small">候选入选当日收盘起算、N 个交易日后的超额收益（港股对恒生指数、A 股对沪深 300）；胜率＝超额收益为正的比例。
+    每只股票在每个池里只计第一次入选。页面只用库里已有的日线；要补齐行情请在命令行运行 <code>stock screen eval</code>。样本少时结论不可靠。</p>
+  <pre class="small">{{ text }}</pre>
+</section>
+{% endblock %}

@@ -164,6 +164,52 @@ class TrackerConfig(BaseModel):
     redo_cooldown_days: int = 3         # 同一公司自动重跑深度报告的冷却天数
 
 
+class ScreenConfig(BaseModel):
+    """选股器（stock screen）：全市场初筛 → 代码打分 → 模型快筛 → 人工点选送深研。输出是研究候选，不是买卖建议。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    markets: list[Literal["HK", "A"]] = ["HK", "A"]   # 港股只看港股通标的
+    request_delay: float = 0.3             # 批量请求间隔（秒）；数据中心接口，与单公司查询共用熔断
+    refresh_days: int = 6                  # 报表缓存多少天后重新抓取（已披露很久的报告期只抓一次）
+    # ---- L1 硬过滤
+    min_mcap: dict[Literal["HK", "A"], float] = {"HK": 2e9, "A": 3e9}          # 总市值下限（港元 / 人民币）
+    min_avg_amount: dict[Literal["HK", "A"], float] = {"HK": 1e7, "A": 3e7}    # 20 日成交额中位数下限
+    participation: float = 0.1             # 估算可容纳资金：成交额中位数 × 该参与率 × 5 个交易日
+    min_listing_days: int = 365
+    exclude_st: bool = True
+    # FCF 口径不适用的行业（名称包含即排除出现金地板桶；银行、保险另按机构类型排除）
+    fcf_exclude_industries: list[str] = ["银行", "保险", "证券", "多元金融", "房地产开发", "信托"]
+    # ---- 桶 1 现金地板：入选门槛与粗算赔率的假设（都在页面上写明）
+    min_fcf_yield: float = 0.08            # 保守 FCF Yield（TTM 与 3 年平均取低）达到即入选
+    min_net_cash_ratio: float = 0.5        # 或净现金 ≥ 市值 × 该比例
+    fair_fcf_yield: float = 0.08           # 合理估值：保守 FCF ÷ 该收益率 + 净现金
+    bear_fcf_yield: float = 0.2            # 地板的盈利部分：最差一期 FCF ÷ 该收益率
+    cash_haircut: float = 0.3              # 地板的现金部分：净现金打折（现金可能滞留子公司、不分配）；净负债全额扣减
+    min_downside: float = 0.15             # 下行至少按该幅度计（地板高于现价时也有市场风险），避免赔率失真
+    # ---- 桶 5 质量红利（高胜率）：稳定现金牛
+    quality_min_dividend_yield: float = 0.04   # 近 12 个月股息率下限（且须被 FCF 覆盖）
+    quality_min_div_years: int = 3             # 连续派息年数下限
+    quality_fcf_stability: float = 0.4         # 近 3 个年度最差 FCF ≥ 3 年平均 × 该比例
+    quality_min_fcf_yield: float = 0.05        # 保守 FCF Yield 下限
+    # ---- 桶 4 预期修正
+    min_profit_growth: float = 30.0        # 最新一期归母净利同比（%）
+    min_revenue_growth: float = 10.0
+    forecast_days: int = 45                # A 股业绩预告回看天数
+    # ---- 桶 2 事件催化
+    event_days: int = 30                   # 事件池回看天数
+    event_lookback_days: int = 14          # 首次抓取全市场公告回看天数
+    # ---- 分层（赔率 = (合理价值 − 现价) ÷ (现价 − 地板)）：A 高胜率 + 高赔率 / B 高胜率 / C 高赔率 / D 观察
+    odds_a: float = 3.0                    # A 类：赔率 ≥ 该值、下行 ≤ max_downside_a、有催化剂、无严重风险标记
+    max_downside_a: float = 0.2
+    odds_win: float = 1.0                  # B 类（高胜率）：质量红利入选或「催化剂 + 下行 ≤ max_downside_a」，且赔率 ≥ 该值
+    odds_b: float = 3.0                    # C 类（高赔率）：赔率 ≥ 该值，胜率证据不足
+    event_odds_a: float = 2.0              # 事件池 A 类的赔率门槛
+    top_n: int = 40                        # 每个桶进入候选的数量（按代码评分）
+    quick_top_n: int = 15                  # 每个池送模型快筛的数量
+    themes_file: str = "themes.yaml"       # 产业链主题（桶 3），相对 config.yaml 所在目录
+
+
 class WebConfig(BaseModel):
     """WebUI（stock web）：只监听本机 127.0.0.1。"""
 
@@ -214,6 +260,7 @@ class Settings(BaseModel):
     report: ReportConfig = Field(default_factory=ReportConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
+    screen: ScreenConfig = Field(default_factory=ScreenConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
 

@@ -79,6 +79,7 @@ def financials(session: requests.Session, listing: Listing, periods: int = 8) ->
 
 # 自由现金流与 EV 所需的报表科目。港股报表是「科目名 + 金额」的长表，A 股是宽表。
 HK_OCF, HK_CAPEX = "经营业务现金净额", ("购建固定资产", "购建无形资产及其他资产")
+HK_INV = "投资业务现金净额"  # 资本开支科目缺失或归类异常时的估算依据（见 fcf.metrics）
 HK_CASH, HK_DEBT = ("现金及等价物", "短期存款", "中长期存款"), ("短期贷款", "长期贷款", "融资租赁负债(流动)", "融资租赁负债(非流动)")
 HK_INVEST, HK_RESTRICTED = ("短期投资",), "受限制存款及现金"  # 受限制现金多为应付票据等的保证金，不计入 EV 的现金
 A_CASH, A_INVEST = {"MONETARYFUNDS": "货币资金"}, {"TRADE_FINASSET": "交易性金融资产", "TRADE_FINASSET_NOTFVTPL": "交易性金融资产"}
@@ -96,34 +97,43 @@ def fcf_data(session: requests.Session, listing: Listing) -> dict | None:
                    pageNumber=1, pageSize=20, sortTypes=-1, sortColumns="REPORT_DATE")
         bs = _rows(session, DC, reportName="RPT_F10_FINANCE_GBALANCE", columns="ALL", filter=code,
                    pageNumber=1, pageSize=1, sortTypes=-1, sortColumns="REPORT_DATE")
-        if not cf or not bs:
-            return None
-        flows = [{"date": r["REPORT_DATE"][:10], "annual": r["REPORT_DATE"][5:10] == "12-31",
-                  "ocf": to_float(r.get("NETCASH_OPERATE")), "capex": abs(to_float(r.get("CONSTRUCT_LONG_ASSET")) or 0)}
-                 for r in cf]
-        b = bs[0]
-        debt_items = {label: v for k, label in A_DEBT.items() if (v := to_float(b.get(k)))}
-        cash_items = {label: v for k, label in A_CASH.items() if (v := to_float(b.get(k)))}
-        balance = {"date": b["REPORT_DATE"][:10], "cash": sum(cash_items.values()), "cash_items": cash_items,
-                   "invest": sum(to_float(b.get(k)) or 0 for k in A_INVEST), "debt": sum(debt_items.values()),
-                   "debt_items": debt_items, "minority": to_float(b.get("MINORITY_EQUITY")) or 0,
-                   "liabilities": to_float(b.get("TOTAL_LIABILITIES")), "restricted": 0.0}
-        return {"flows": flows, "balance": balance}
+        return a_fcf_from_rows(cf, bs[0]) if cf and bs else None
     if listing.market != "HK":
         return None
     cf = _rows(session, DC, reportName="RPT_HKF10_FN_CASHFLOW_PC", columns="ALL", filter=code,
                pageNumber=1, pageSize=500, sortTypes=-1, sortColumns="REPORT_DATE")
     bs = _rows(session, DC, reportName="RPT_HKF10_FN_BALANCE_PC", columns="ALL", filter=code,
                pageNumber=1, pageSize=200, sortTypes=-1, sortColumns="REPORT_DATE")
+    return hk_fcf_from_rows(cf, bs) if cf and bs else None
+
+
+def a_fcf_from_rows(cf: list[dict], b: dict) -> dict:
+    """A 股：现金流量表各期（宽表）+ 最新一期资产负债表 → fcf_data 形状。"""
+    flows = [{"date": r["REPORT_DATE"][:10], "annual": r["REPORT_DATE"][5:10] == "12-31",
+              "ocf": to_float(r.get("NETCASH_OPERATE")), "capex": abs(to_float(r.get("CONSTRUCT_LONG_ASSET")) or 0)}
+             for r in cf]
+    debt_items = {label: v for k, label in A_DEBT.items() if (v := to_float(b.get(k)))}
+    cash_items = {label: v for k, label in A_CASH.items() if (v := to_float(b.get(k)))}
+    balance = {"date": b["REPORT_DATE"][:10], "cash": sum(cash_items.values()), "cash_items": cash_items,
+               "invest": sum(to_float(b.get(k)) or 0 for k in A_INVEST), "debt": sum(debt_items.values()),
+               "debt_items": debt_items, "minority": to_float(b.get("MINORITY_EQUITY")) or 0,
+               "liabilities": to_float(b.get("TOTAL_LIABILITIES")), "restricted": 0.0}
+    return {"flows": sorted(flows, key=lambda x: x["date"], reverse=True), "balance": balance}
+
+
+def hk_fcf_from_rows(cf: list[dict], bs: list[dict]) -> dict | None:
+    """港股：现金流量表与资产负债表的「科目名 + 金额」长表 → fcf_data 形状（资产负债表取最新一期）。"""
     if not cf or not bs:
         return None
     periods: dict[str, dict] = {}
     for r in cf:
         d = periods.setdefault(r["REPORT_DATE"][:10], {"date": r["REPORT_DATE"][:10], "annual": r.get("DATE_TYPE_CODE") == "001",
-                                                       "ocf": None, "capex": 0.0})
+                                                       "ocf": None, "capex": 0.0, "inv": None})
         amount = to_float(r.get("AMOUNT"))
         if r.get("STD_ITEM_NAME") == HK_OCF:
             d["ocf"] = amount
+        elif r.get("STD_ITEM_NAME") == HK_INV:
+            d["inv"] = amount
         elif r.get("STD_ITEM_NAME") in HK_CAPEX and amount:
             d["capex"] += abs(amount)
     latest = max(r["REPORT_DATE"][:10] for r in bs)

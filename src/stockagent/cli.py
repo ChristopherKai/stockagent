@@ -17,10 +17,11 @@ from . import brief, docs, dossier, evaluate, monitor, notify, profile, tracker,
 from .app import SOURCE_LABEL, App
 from .config import ConfigError
 from .llm import LLMError
-from .utils import fmt_local, iso, lock_holder, today_local, utcnow
+from .utils import fmt_local, iso, lock_holder, pct, today_local, utcnow
 from .valuation import TARGET_LABEL, describe, fmt
 
-LLM_TASKS = ("triage", "stock_brief", "market_brief", "profile", "research", "dossier", "monitor", "tracker")
+LLM_TASKS = ("triage", "stock_brief", "market_brief", "profile", "research", "dossier", "monitor", "tracker", "screen",
+             "screen_theme")
 
 
 def _print(msgs: list[str]) -> None:
@@ -350,6 +351,155 @@ def _target_show(app: App, c, limit: int) -> None:
     print(f"\n{tracker.DISCLAIMER}")
 
 
+SCREEN_BUSY = "选股器已在运行（另一个 stock screen 进程持有锁，PID {pid}）"
+
+
+def cmd_screen(args) -> None:
+    from .screen import evaluate as sc_eval
+    from .screen import promote as sc_promote
+    from .screen import run as sc_run
+    from .screen import store as sc_store
+    from .screen import themes as sc_themes
+    from .screen import universe as sc_universe
+
+    app = _load(args)
+    sub = args.screen_cmd
+    markets = [args.market] if getattr(args, "market", None) else None
+    if sub in ("refresh", "run") or (sub == "themes" and args.suggest is not None):
+        with app.lock("screen") as ok:
+            if not ok:
+                sys.exit(SCREEN_BUSY.format(pid=lock_holder(app.lock_path("screen")) or "?"))
+            if sub == "refresh":
+                _print(sc_universe.refresh(app, markets, force=args.force, progress=print))
+                from .screen import calendar as sc_calendar
+                from .screen import events as sc_events
+                _print(sc_events.scan(app, markets, progress=print))
+                _print(sc_calendar.refresh(app, markets, force=args.force, progress=print))
+            elif sub == "run":
+                pools = ("long",) if args.long_only else ("event",) if args.event_only else ("long", "event")
+                if not args.no_llm and (reason := app.llm.unavailable_reason("screen")):
+                    print(f"模型不可用（{reason}），只做代码筛选")
+                    args.no_llm = True
+                res = sc_run.run(app, pools, markets, use_llm=not args.no_llm, refresh=not args.no_refresh, progress=print)
+                _print(res.msgs)
+                for pool, rid in res.runs.items():
+                    _screen_show(app, rid, tiers=("A", "B", "C"), limit=args.limit)
+                if args.push:
+                    _screen_push(app, res.runs)
+            else:
+                _print(sc_themes.suggest(app, args.suggest or None, progress=print))
+        return
+    if sub == "show":
+        pools = [args.pool] if args.pool else ["long", "event"]
+        for pool in pools:
+            r = sc_store.runs(app.db, pool, 1) if args.run is None else [x for x in sc_store.runs(app.db, None, 200) if x["id"] == args.run]
+            if not r:
+                print(f"{pool}：还没有运行记录（stock screen run）")
+                continue
+            _screen_show(app, r[0]["id"], tiers=None if args.all else tuple(args.tier.split(",")), limit=args.limit)
+    elif sub == "promote":
+        for key in args.keys:
+            try:
+                cid, msg = sc_promote.promote(app, key)
+            except sc_promote.PromoteError as e:
+                print(f"✗ {e}")
+                continue
+            print(msg)
+            print(f"  下一步：stock fetch {cid} && stock docs fetch {cid} && stock triage {cid} && stock profile {cid} "
+                  f"&& stock dossier {cid} && stock target add {cid}（或在 WebUI 提交「新公司初始化」）")
+    elif sub == "eval":
+        rows = sc_eval.collect(app, days=args.days)
+        print("选股器事后检验：入选当日收盘起算的超额收益（港股对恒生指数、A 股对沪深 300）；样本少时结论不可靠。")
+        print(sc_eval.summarize(rows))
+    elif sub == "themes":
+        if args.accept:
+            print(sc_themes.accept(app, args.accept))
+            return
+        if args.dismiss:
+            print("已忽略" if sc_store.set_theme_idea(app.db, args.dismiss, "dismissed") else "没有这条建议")
+            return
+        t = sc_themes.load(app)
+        mem, missing = sc_themes.memberships(app, t)
+        print(f"主题文件：{sc_themes.path(app)}（{len(t.themes)} 个主题）")
+        names = {u["secid"]: f"{u['name']}({u['market']}:{u['code']})" for u in sc_store.universe(app.db)}
+        for th in t.themes:
+            print(f"- {th.name}（{th.id}）")
+            for n in th.nodes:
+                ok = [names[s] for s, ms in mem.items() for m in ms if m["theme_id"] == th.id and m["node"] == n.name]
+                print(f"    {n.name}{'［瓶颈］' if n.bottleneck else ''}：{'、'.join(ok) or '（无股票池内标的）'}")
+        if missing:
+            print("不在股票池的代码：" + "；".join(missing))
+        ideas = sc_store.theme_ideas(app.db)
+        if ideas:
+            print("主题 agent 的待处理建议（stock screen themes --accept ID / --dismiss ID）：")
+            for i in ideas:
+                print(f"  #{i['id']} {i['theme']} / {i['node']}：{i['name']}（{i['market']}:{i['code']}）{i['reason'][:120]}")
+
+
+def _screen_line(h: dict) -> str:
+    from .screen.buckets import BUCKET_LABEL
+    from .screen.quick import VERDICT_LABEL
+
+    m = h["metrics"]
+    fm = m.get("floor") or {}
+    parts = [f"{h['tier']} {h['name']} {h['market']}:{h['code']}", f"现价 {h['price']:.4g} {h['currency']}",
+             "[" + "、".join(BUCKET_LABEL.get(b, b) for b in h["buckets"].split(",")) + f"] 分 {h['score']:.0f}"]
+    if fm:
+        parts.append(f"保守 FCF Yield {pct(fm.get('yield_cons'), sign=False)} · 净现金/市值 {pct(fm.get('net_cash_ratio'), sign=False)}"
+                     + (" · Negative EV" if fm.get("negative_ev") else ""))
+    div = m.get("dividend") or {}
+    if fm.get("dividend_yield") or div.get("years"):
+        parts.append(f"股息率 {pct(fm.get('dividend_yield'), sign=False)}（连续派息 {div.get('years') or 0} 年）")
+    if h.get("odds") is not None:
+        parts.append(f"粗算赔率 {h['odds']:.1f}（上行 {pct(h['upside'])} / 下行 {pct(-h['downside'])}）")
+    rev = m.get("revision") or {}
+    if "revision" in h["buckets"]:
+        parts.append(f"净利同比 {rev.get('profit_yoy') or 0:.0f}% · 收入同比 {rev.get('revenue_yoy') or 0:.0f}%")
+    liq = m.get("liquidity")
+    if liq:
+        parts.append(f"20 日成交额中位数 {liq['median'] / 1e8:.2f} 亿")
+    line = " · ".join(parts)
+    if m.get("catalysts"):
+        line += "\n      ✦ 催化剂：" + "；".join(m["catalysts"][:4])
+    risks = [f["text"] for f in h["flags"] if f["severity"] in ("high", "mid")]
+    if risks:
+        line += "\n      ⚠ " + "；".join(risks[:3])
+    notes = [f["text"] for f in h["flags"] if f["severity"] == "info"]
+    if notes:
+        line += "\n      ℹ " + "；".join(notes[:2])
+    if h.get("quick"):
+        q = h["quick"]
+        line += f"\n      快筛：{VERDICT_LABEL.get(q['verdict'], q['verdict'])} — {q['summary']}"
+    return line
+
+
+def _screen_show(app: App, run_id: int, tiers: tuple[str, ...] | None = ("A", "B"), limit: int = 30) -> None:
+    from .screen import store as sc_store
+    from .screen.buckets import POOL_LABEL
+
+    run = next(r for r in sc_store.runs(app.db, None, 500) if r["id"] == run_id)
+    hits = [h for h in sc_store.hits(app.db, run_id) if tiers is None or h["tier"] in tiers]
+    print(f"\n{POOL_LABEL[run['pool']]} · 运行 #{run_id}（{fmt_local(run['started_at'])}）· 显示 {min(len(hits), limit)}/{len(hits)} 家"
+          + ("" if tiers is None else f"（{'、'.join(tiers)} 类）"))
+    for h in hits[:limit]:
+        print("  " + _screen_line(h))
+    print(f"  （粗算赔率只用于排序：合理价值 = 保守 FCF ÷ {app.settings.screen.fair_fcf_yield:.0%} + 净现金；研究候选，不是买卖建议）")
+
+
+def _screen_push(app: App, runs: dict[str, int]) -> None:
+    from .screen import store as sc_store
+    from .screen.buckets import POOL_LABEL
+
+    lines = []
+    for pool, rid in runs.items():
+        top = [h for h in sc_store.hits(app.db, rid) if h["tier"] in ("A", "B")][:8]
+        if top:
+            lines.append(f"{POOL_LABEL[pool]}：" + "；".join(f"{h['tier']} {h['name']}({h['code']})" for h in top))
+    if lines:
+        _print(notify.push(app.settings, f"【选股器 A / B 类候选】{today_local():%Y-%m-%d}",
+                           "\n".join(lines) + f"\n（{tracker.DISCLAIMER}）") or ["未配置推送渠道"])
+
+
 def cmd_web(args) -> None:
     from .web.server import serve  # noqa: PLC0415 - 只有 stock web 需要 FastAPI
 
@@ -611,6 +761,35 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_llm_test)
 
     sub.add_parser("status", help="查看数据与配置状态").set_defaults(func=cmd_status)
+
+    scp = sub.add_parser("screen", help="选股器：港股通与 A 股全市场初筛 → 代码打分 → 模型快筛；点选送深研（研究候选，不是买卖建议）")
+    ssub = scp.add_subparsers(dest="screen_cmd", required=True)
+    sp = ssub.add_parser("refresh", help="刷新股票池、报表数据与全市场公告事件")
+    sp.add_argument("--market", choices=["HK", "A"])
+    sp.add_argument("--force", action="store_true", help="忽略缓存，重新抓取报表")
+    sp = ssub.add_parser("run", help="运行选股（默认先刷新数据；两个池：长线池与事件池）")
+    sp.add_argument("--market", choices=["HK", "A"])
+    sp.add_argument("--long-only", action="store_true", help="只跑长线池")
+    sp.add_argument("--event-only", action="store_true", help="只跑事件池")
+    sp.add_argument("--no-llm", action="store_true", help="不调用模型快筛，只用代码分层")
+    sp.add_argument("--no-refresh", action="store_true", help="不刷新数据，用库里已有的股票池与事件")
+    sp.add_argument("--push", action="store_true", help="推送 A、B 类候选")
+    sp.add_argument("--limit", type=int, default=20)
+    sp = ssub.add_parser("show", help="查看最近一次的候选")
+    sp.add_argument("--pool", choices=["long", "event"])
+    sp.add_argument("--tier", default="A,B,C", help="显示的分层，逗号分隔（默认 A,B,C；A 高胜率+高赔率、B 高胜率、C 高赔率、D 观察、X 快筛淘汰）")
+    sp.add_argument("--all", action="store_true", help="显示全部分层（含快筛淘汰）")
+    sp.add_argument("--run", type=int, help="运行编号")
+    sp.add_argument("--limit", type=int, default=40)
+    sp = ssub.add_parser("promote", help="送深研：把候选加入观察清单（之后运行新公司初始化）")
+    sp.add_argument("keys", nargs="+", help="代码，如 00700、HK:00700、600519")
+    sp = ssub.add_parser("eval", help="事后检验：候选入选后的超额收益与胜率（按池、分层、策略桶）")
+    sp.add_argument("--days", type=int, default=400)
+    sp = ssub.add_parser("themes", help="产业链主题（themes.yaml）与主题 agent 的建议")
+    sp.add_argument("--suggest", nargs="*", metavar="THEME_ID", help="运行主题 agent（可指定主题 id，不填表示全部）")
+    sp.add_argument("--accept", type=int, metavar="ID", help="采纳一条建议（写入 themes.yaml）")
+    sp.add_argument("--dismiss", type=int, metavar="ID", help="忽略一条建议")
+    scp.set_defaults(func=cmd_screen)
 
     sp = sub.add_parser("web", help="WebUI（只监听 127.0.0.1）：事件与估值修正时间线、观察清单、追踪、模型与日程配置；内置调度器")
     sp.add_argument("--port", type=int, help="端口（默认 config.yaml 的 web.port，8765）")

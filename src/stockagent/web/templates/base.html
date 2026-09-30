@@ -15,6 +15,7 @@
   <nav>
     <a href="/" class="{{ 'on' if path == '/' }}">仪表盘</a>
     <a href="/companies" class="{{ 'on' if path.startswith('/companies') or path.startswith('/c/') }}">观察清单</a>
+    <a href="/screen" class="{{ 'on' if path.startswith('/screen') }}">选股</a>
     <a href="/events" class="{{ 'on' if path.startswith('/events') }}">事件</a>
     <a href="/reports" class="{{ 'on' if path.startswith('/reports') }}">报告</a>
     <a href="/jobs" class="{{ 'on' if path.startswith('/jobs') }}">任务</a>

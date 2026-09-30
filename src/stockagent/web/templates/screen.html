@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}选股{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="card-head"><h2>选股器</h2>
+    <div class="nowrap">
+      {% for p, label in POOL_LABEL.items() %}<a class="btn tiny {{ '' if p == pool else 'ghost' }}" href="/screen?pool={{ p }}">{{ label }}</a> {% endfor %}
+      <a class="btn tiny ghost" href="/screen/eval">事后检验</a>
+    </div>
+  </div>
+  <p class="muted small">港股通 + A 股全市场：代码按五个策略桶打分（现金地板、质量红利、产业链瓶颈 → 长线池；事件催化、预期修正 → 事件池），模型快筛只能淘汰、不能升级。
+    <b>A 类 高胜率 + 高赔率</b>＝粗算赔率 ≥ {{ cfg.odds_a }}（事件池 {{ cfg.event_odds_a }}）、下行 ≤ {{ cfg.max_downside_a | pct(0, false) }}、有催化剂、无严重风险标记；
+    <b>B 类 高胜率</b>＝质量红利（稳定现金牛）或「有催化剂 + 下行 ≤ {{ cfg.max_downside_a | pct(0, false) }}」，赔率 ≥ {{ cfg.odds_win }}；
+    <b>C 类 高赔率</b>＝赔率 ≥ {{ cfg.odds_b }} 但胜率证据不足；<b>D 类</b> 观察。
+    粗算赔率＝(合理价值 − 现价) ÷ (现价 − 地板)，合理价值＝保守 FCF ÷ {{ cfg.fair_fcf_yield | pct(0, false) }} + 净现金，地板＝最差一期 FCF ÷ {{ cfg.bear_fcf_yield | pct(0, false) }} + 净现金 × {{ (1 - cfg.cash_haircut) | pct(0, false) }}，下行至少按 {{ cfg.min_downside | pct(0, false) }} 计；只用于排序，深研后以深度报告的情景估值为准。
+    催化剂＝近期正面公告 + 前瞻日历（已公告或按规律推算的派息、业绩趋势向上时的披露窗口、深度报告核实过的催化剂）；〔推算〕表示按往年规律推算。</p>
+  <div class="actions">
+    <form method="post" action="/screen/run" class="inline">{{ csrf_field }}<input type="hidden" name="pool" value="{{ pool }}">
+      <button class="btn" {{ 'disabled' if busy }}>运行{{ POOL_LABEL[pool] }}</button>
+      <label class="check small"><input type="checkbox" name="no_llm" value="1"> 不调用模型</label></form>
+    {% if busy %}<span class="muted small">选股任务 #{{ busy.id }} {{ '运行中' if busy.status == 'running' else '排队中' }}</span>{% endif %}
+    {% if cur %}<span class="muted small">当前：运行 #{{ cur.id }}（{{ cur.started_at | when }}），评估 {{ cur.stats.evaluated or '—' }} 只，
+      候选 {{ cur.stats.candidates or 0 }} 家{% if cur.stats.illiquid %}，流动性不足剔除 {{ cur.stats.illiquid }}{% endif %}{% if cur.stats.quick %}，模型快筛 {{ cur.stats.quick }} 家{% endif %}</span>{% endif %}
+  </div>
+  {% if runs | length > 1 %}<form method="get" action="/screen" class="inline small">
+    <input type="hidden" name="pool" value="{{ pool }}"><select name="run" data-autosubmit>
+    {% for r in runs %}<option value="{{ r.id }}" {{ 'selected' if cur and r.id == cur.id }}>#{{ r.id }} {{ r.started_at | when }}（{{ {'done': '完成', 'failed': '失败', 'running': '运行中'}.get(r.status, r.status) }}）</option>{% endfor %}
+    </select></form>{% endif %}
+  <p class="small">显示：
+    {% for key, label in [('AB', 'A、B 类'), ('ABC', 'A、B、C 类'), ('ABCD', 'A–D 类'), ('all', '全部（含快筛淘汰）')] %}
+      <a href="/screen?pool={{ pool }}{% if cur %}&run={{ cur.id }}{% endif %}&show={{ key }}" class="{{ 'on' if show == key }}">{{ label }}</a>{{ ' · ' if not loop.last }}
+    {% endfor %}
+    <span class="muted">（A {{ counts.A }} · B {{ counts.B }} · C {{ counts.C }} · D {{ counts.D }} · 淘汰 {{ counts.X }}）</span></p>
+</section>
+
+{% if not cur %}
+<section class="card"><p class="muted">{{ POOL_LABEL[pool] }}还没有运行记录。点「运行」或在命令行执行 <code>stock screen run</code>（首次会下载全市场报表，约几分钟）。</p></section>
+{% endif %}
+
+{% for tier, rows in groups if rows %}
+<section class="card">
+  <div class="card-head"><h2>{{ TIER_LABEL[tier] }}（{{ rows | length }}）</h2></div>
+  <div class="tblwrap"><table class="tbl">
+    <thead><tr><th>标的</th><th>策略桶</th><th class="r">分</th><th class="r">现价</th><th class="r">保守 FCF Yield</th><th class="r">净现金 / 市值</th>
+      <th class="r">粗算赔率</th><th>催化剂与风险</th><th>快筛</th><th></th></tr></thead>
+    <tbody>
+    {% for h in rows %}{% set fm = h.metrics.floor or {} %}{% set key = h.market ~ ':' ~ h.code %}
+      <tr>
+        <td><b>{{ h.name }}</b><div class="muted small">{{ key }} · {{ h.industry or '' }}</div>
+          {% set liq = h.metrics.liquidity %}{% if liq %}<div class="muted small" title="20 日成交额中位数（{{ liq.basis }}）；可容纳资金≈中位数 × {{ cfg.participation | pct(0, false) }} × 5 天">成交额中位数 {{ (liq.median / 1e8) | num(2) }} 亿 · 可容纳 {{ (liq.capacity / 1e8) | num(2) }} 亿</div>{% endif %}
+          {% set div = h.metrics.dividend or {} %}{% if div.years %}<div class="muted small">连续派息 {{ div.years }} 年{% if fm.get("dividend_yield") %} · 股息率 {{ fm.get("dividend_yield") | pct(1, false) }}{% endif %}</div>{% endif %}</td>
+        <td class="small">{% for b in h.buckets.split(',') %}<span class="tag">{{ BUCKET_LABEL.get(b, b) }}</span> {% endfor %}
+          {% for t in h.metrics.themes or [] %}<div class="muted">{{ t.theme }} / {{ t.node }}{{ '（瓶颈）' if t.bottleneck }}</div>{% endfor %}</td>
+        <td class="r" title="各桶得分：{% for k, v in (h.metrics.scores or {}).items() %}{{ BUCKET_LABEL.get(k, k) }} {{ v | num(0) }}{{ '；' if not loop.last }}{% endfor %}（分数只决定排序和每桶取前 N 名，分层看胜率与赔率条件）">{{ h.score | num(0) }}</td>
+        <td class="r nowrap">{{ h.price | num(3) }} <span class="muted small">{{ h.currency }}</span></td>
+        <td class="r">{{ fm.get("yield_cons") | pct(1, false) }}{% if fm.get("negative_ev") %}<div class="badge ok">Negative EV</div>{% elif fm.get("ev_small") %}<div class="badge">EV≈0</div>{% endif %}</td>
+        <td class="r">{{ fm.get("net_cash_ratio") | pct(0, false) }}</td>
+        <td class="r nowrap">{% if h.odds is not none %}<b>{{ h.odds | num(1) }}</b><div class="muted small">上行 {{ h.upside | pct(0) }} / 下行 {{ (0 - h.downside) | pct(0) }}</div>{% else %}—{% endif %}</td>
+        <td class="small">
+          {% for c in h.metrics.catalysts or [] %}<div class="up">✦ {{ c }}</div>{% endfor %}
+          {% if 'revision' in h.buckets %}{% set rv = h.metrics.revision %}<div>净利同比 {{ rv.profit_yoy | num(0) }}% · 收入同比 {{ rv.revenue_yoy | num(0) }}%{% if rv.gross_margin_delta is not none %} · 毛利率 {{ '%+.1f' | format(rv.gross_margin_delta) }}pp{% endif %}</div>{% endif %}
+          {% for f in h.flags if f.severity != 'info' %}<div class="{{ 'down' if f.severity == 'high' else 'muted' }}">⚠ {{ f.text }}</div>{% endfor %}
+          {% for f in h.flags if f.severity == 'info' %}<div class="muted">ℹ {{ f.text }}</div>{% endfor %}
+          {% if h.metrics.calendar %}<details><summary>前瞻日历 {{ h.metrics.calendar | length }} 项</summary>
+            {% for x in h.metrics.calendar %}<div>{{ x.date }} {{ x.text }}{{ '（推算）' if not x.confirmed }}</div>{% endfor %}</details>{% endif %}
+          {% if h.events %}<details><summary>公告 {{ h.events | length }} 条</summary>
+            {% for e in h.events[:12] %}<div>{{ e.published_at[:10] }} <span class="tag {{ 'dir-' ~ e.direction }}">{{ EVENT_LABEL.get(e.kind, e.kind) }}</span>
+              {% if e.url | safe_url %}<a href="{{ e.url | safe_url }}" target="_blank" rel="noopener noreferrer">{{ e.title[:60] }}</a>{% else %}{{ e.title[:60] }}{% endif %}</div>{% endfor %}
+          </details>{% endif %}
+        </td>
+        <td class="small">{% if h.quick %}{% set q = h.quick %}
+          <span class="badge {{ {'deep_dive': 'ok', 'watch': 'warn', 'reject': 'bad'}.get(q.verdict, '') }}">{{ VERDICT_LABEL.get(q.verdict, q.verdict) }}</span>
+          <div class="clip">{{ q.summary }}</div>
+          <details><summary>详情</summary>
+            {% if q.why_cheap %}<p><b>为什么便宜：</b>{{ q.why_cheap }}</p>{% endif %}
+            {% if q.trap_risks %}<p><b>陷阱风险：</b></p><ul>{% for x in q.trap_risks %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
+            {% if q.catalysts %}<p><b>模型列出的催化剂（仅供参考，不参与分层）：</b></p><ul>{% for x in q.catalysts %}<li>{{ x.event }}{% if x.timing %}（{{ x.timing }}）{% endif %}{% if x.evidence %} — {{ x.evidence }}{% endif %}</li>{% endfor %}</ul>{% endif %}
+            {% if q.questions %}<p><b>深研要核实：</b></p><ul>{% for x in q.questions %}<li>{{ x }}</li>{% endfor %}</ul>{% endif %}
+          </details>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="nowrap">
+          {% if key in watch %}<a class="btn tiny ghost" href="/c/{{ watch[key] }}">已在观察清单</a>
+          {% else %}<form method="post" action="/screen/promote/{{ h.id }}" class="inline"
+                data-confirm="把 {{ h.name }} 加入观察清单并提交「新公司初始化」（含深度报告，约数分钟）？">{{ csrf_field }}
+            <button class="btn tiny">送深研</button></form>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endfor %}
+
+<section class="card" id="ideas">
+  <div class="card-head"><h2>产业链主题 · 主题 agent 的建议</h2>
+    <form method="post" action="/screen/themes" class="inline">{{ csrf_field }}<button class="btn tiny ghost">运行主题 agent</button></form></div>
+  <p class="muted small">主题与节点由你在 {{ cfg.themes_file }} 中维护（桶 3）。主题 agent 用网页搜索与行情 / 财务工具找瓶颈环节的公司，代码核对股票池后列在这里，采纳后才写入主题文件。</p>
+  {% if ideas %}<div class="tblwrap"><table class="tbl">
+    <thead><tr><th>主题 / 节点</th><th>公司</th><th>理由</th><th></th></tr></thead>
+    <tbody>{% for i in ideas %}
+      <tr><td class="small">{{ i.theme }}<div class="muted">{{ i.node }}</div></td>
+        <td><b>{{ i.name }}</b><div class="muted small">{{ i.market }}:{{ i.code }}</div></td>
+        <td class="small">{{ i.reason }}</td>
+        <td class="nowrap"><form method="post" action="/screen/ideas/{{ i.id }}/accept" class="inline">{{ csrf_field }}<button class="btn tiny">采纳</button></form>
+          <form method="post" action="/screen/ideas/{{ i.id }}/dismiss" class="inline">{{ csrf_field }}<button class="btn tiny ghost">忽略</button></form></td></tr>
+    {% endfor %}</tbody></table></div>
+  {% else %}<p class="muted small">暂无待处理的建议。</p>{% endif %}
+</section>
+{% endblock %}
