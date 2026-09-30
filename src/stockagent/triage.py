@@ -138,7 +138,7 @@ def short_id(uid: str) -> str:
 
 
 def _describe(item: dict, i: int) -> str:
-    kind = {"announcement": "公告", "news": "新闻", "manual": "手动录入"}.get(item["kind"], item["kind"])
+    kind = {"announcement": "公告", "news": "新闻", "data": "数据异动", "manual": "手动录入"}.get(item["kind"], item["kind"])
     src = SOURCE_LABEL.get(item["source"], item["source"])
     media = item.get("source_name") or ""
     head = f"[{i}] id={short_id(item['uid'])} | {kind} · {src}{' · ' + media if media and media != src else ''} | {fmt_local(item['published_at'])}"

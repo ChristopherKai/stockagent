@@ -23,7 +23,10 @@ LABELS: dict[str, tuple[str, str]] = {
     "sources.blocked_news_sources": ("屏蔽的新闻来源", "每行一个"),
     "sources.blocked_title_patterns": ("屏蔽的标题（正则）", "每行一个"),
     "sources.auto_download_reports": ("自动下载年报 / 中期报告", ""),
-    "sources.sec_user_agent": ("SEC User-Agent", "跟踪美股时必填：姓名 邮箱"),
+    "sources.sec_user_agent": ("SEC User-Agent", "跟踪美股时必填：姓名 邮箱（美股公告与 XBRL 报表都要用）"),
+    "sources.ccass": ("记录港股 CCASS 持股", "每天一份中央结算系统持股快照（港交所，T+1 可查）"),
+    "sources.ccass_alert_pct": ("CCASS 异动阈值（百分点）", "某参与者持股变化占已发行股份的比例达到它时，生成一条数据异动进入分级"),
+    "sources.ccass_keep": ("CCASS 快照保存前几名参与者", ""),
     "sources.sec_forms": ("抓取的 SEC 文件类型", "每行一个"),
     # 简报
     "report.lookback_hours": ("简报事件窗口（小时）", ""),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -15,15 +15,16 @@ from . import config, technical
 from .config import Company, Listing, Settings, Watchlist
 from .db import DB
 from .llm import LLM
-from .sources import cninfo, eastmoney, emdata, frankfurter, google_news, hkex, ids, sec, tencent
-from .utils import days_ago, file_lock, fmt_local, iso, log, make_session, normalize_title, parse_iso, pct, num, sha1, utcnow
+from .sources import ccass, cninfo, eastmoney, emdata, frankfurter, google_news, hkex, ids, sec, tencent
+from .utils import (days_ago, file_lock, fmt_local, iso, log, make_session, normalize_title, parse_iso, pct, num, sha1,
+                    to_simplified, today_local, utcnow)
 
 FX_HKDCNH = "133.HKDCNH"
 FX_USDCNH = "133.USDCNH"
 MARKET_LABEL = {"HK": "港股", "A": "A股", "US": "美股"}
 SOURCE_LABEL = {
     "hkex": "港交所", "cninfo": "巨潮", "sec": "SEC", "eastmoney": "东方财富",
-    "google_news": "Google新闻", "ima": "ima知识库", "manual": "手动",
+    "google_news": "Google新闻", "ima": "ima知识库", "ccass": "港交所CCASS", "manual": "手动",
 }
 
 
@@ -197,6 +198,11 @@ def fetch(app: App, companies: list[Company], *, prices: bool = True, filings: b
         msgs += _guard("ima 知识库", imafeed.fetch, app, companies)
     if market and prices:
         msgs += _guard("市场行情", fetch_market, app, companies)
+        if app.settings.sources.ccass:  # 日终数据，每天一次；盘中 alert（market=False）不查
+            for c in companies:
+                for l in c.listings:
+                    if l.market == "HK":
+                        msgs += _guard(f"{c.name} {l.display} CCASS", fetch_ccass, app, c, l)
     return msgs
 
 
@@ -295,6 +301,54 @@ def fetch_filings(app: App, company: Company, listing: Listing) -> list[str]:
     )
     app.db.kv_set(key, iso(end))
     return [f"{listing.display} 公告 {len(rows)} 条（新增 {new}）"]
+
+
+def ccass_snapshot(app: App, code: str, day) -> dict | None:
+    """库里有 day 当日或之前 3 天内的快照就用，否则向港交所查询并保存。"""
+    have = app.db.ccass(code, day.isoformat())
+    if have and (day - date.fromisoformat(have["date"])).days <= 3:
+        return have
+    snap = _try(app, "hkex_ccass", ccass.holdings, app.session, code, day)
+    if snap and snap.get("date"):
+        app.db.save_ccass(code, snap, app.settings.sources.ccass_keep)
+        return app.db.ccass(code, snap["date"])
+    return None
+
+
+def ccass_move_text(moves: list[dict]) -> str:
+    return "；".join(f"{to_simplified(m['name'])} {m['delta'] / 1e4:+,.0f} 万股（{m['pct']:+.2f} 个百分点，现占 {m['after_pct']:.2f}%）"
+                    for m in moves)
+
+
+def fetch_ccass(app: App, company: Company, listing: Listing) -> list[str]:
+    """记录前一交易日的 CCASS 持股；与上一份快照相比有参与者持股变化 ≥ ccass_alert_pct 时，生成一条数据异动进入分级。
+    第一次只存快照不比较。"""
+    key = f"ccass_checked:{listing.key}"
+    today = today_local()
+    if app.db.kv_get(key) == today.isoformat():
+        return []
+    code = listing.code.zfill(5)
+    prev = app.db.ccass(code)
+    snap = _try(app, "hkex_ccass", ccass.holdings, app.session, code, today - timedelta(days=1))
+    if snap is None:
+        return [] if "hkex_ccass" in app.down else [f"✗ {listing.display} 没有 CCASS 持股数据"]
+    app.db.kv_set(key, today.isoformat())
+    if prev and prev["date"] >= snap["date"]:
+        return []
+    app.db.save_ccass(code, snap, app.settings.sources.ccass_keep)
+    if not prev:
+        return [f"{listing.display} CCASS 持股快照 {snap['date']}（首次记录，之后逐日比较）"]
+    moves = ccass.changes(prev, app.db.ccass(code, snap["date"]), app.settings.sources.ccass_alert_pct)
+    if not moves:
+        return [f"{listing.display} CCASS {prev['date']} → {snap['date']} 无大额变动"]
+    period = f"{prev['date'][5:]}→{snap['date'][5:]}"
+    x = {"source_id": f"{code}:{snap['date']}",
+         "title": f"CCASS 持股变动（{period}）：" + "、".join(f"{to_simplified(m['name'])} {m['pct']:+.2f}%" for m in moves[:3]),
+         "snippet": (f"港交所中央结算系统持股，{prev['date']} 至 {snap['date']}，占已发行股份的变化：{ccass_move_text(moves)}。"
+                     "一增一减、数量相近时多为参与者之间转仓（换托管行、配售交收、质押），不一定是买卖；单边大增或大减更值得注意。"),
+         "url": ccass.URL, "published_at": utcnow()}
+    app.db.add_item(_item(company, listing, "data", "ccass", x, "CCASS 持股"))
+    return [f"{listing.display} CCASS 持股变动 {len(moves)} 个参与者（{period}）"]
 
 
 def _blocked(x: dict, blocked_sources: list[str], patterns: list[re.Pattern]) -> bool:
