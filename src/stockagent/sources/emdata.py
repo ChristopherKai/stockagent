@@ -304,3 +304,162 @@ def company_profile(session: requests.Session, market: str, code: str) -> dict |
         "business": first("MAIN_BUSINESS", "ORG_PROFILE"),
         "listings": sorted(listings, key=lambda x: ("A", "HK", "US").index(x[0])),
     }
+
+
+# ---------------------------------------------------------------- 三张报表（完整科目）
+
+STATEMENT_KINDS = {"income": "利润表", "balance": "资产负债表", "cashflow": "现金流量表"}
+A_STATEMENT_REPORTS = {"income": "RPT_F10_FINANCE_GINCOME", "balance": "RPT_F10_FINANCE_GBALANCE", "cashflow": "RPT_F10_FINANCE_GCASHFLOW"}
+HK_STATEMENT_REPORTS = {"income": "RPT_HKF10_FN_INCOME_PC", "balance": "RPT_HKF10_FN_BALANCE_PC", "cashflow": "RPT_HKF10_FN_CASHFLOW_PC"}
+# A 股宽表（一般工商业格式）中要展示的科目，按报表顺序；银行、保险、券商的科目不同，这里取不到时如实返回
+A_STATEMENT_ITEMS = {
+    "income": [
+        ("TOTAL_OPERATE_INCOME", "营业总收入"), ("OPERATE_INCOME", "营业收入"), ("TOTAL_OPERATE_COST", "营业总成本"),
+        ("OPERATE_COST", "营业成本"), ("OPERATE_TAX_ADD", "税金及附加"), ("SALE_EXPENSE", "销售费用"),
+        ("MANAGE_EXPENSE", "管理费用"), ("RESEARCH_EXPENSE", "研发费用"), ("FINANCE_EXPENSE", "财务费用"),
+        ("FE_INTEREST_EXPENSE", "其中：利息费用"), ("FE_INTEREST_INCOME", "其中：利息收入"), ("OTHER_INCOME", "其他收益"),
+        ("INVEST_INCOME", "投资收益"), ("INVEST_JOINT_INCOME", "其中：对联营合营企业的投资收益"),
+        ("FAIRVALUE_CHANGE_INCOME", "公允价值变动收益"), ("CREDIT_IMPAIRMENT_INCOME", "信用减值损失"),
+        ("ASSET_IMPAIRMENT_INCOME", "资产减值损失"), ("ASSET_DISPOSAL_INCOME", "资产处置收益"), ("OPERATE_PROFIT", "营业利润"),
+        ("NONBUSINESS_INCOME", "营业外收入"), ("NONBUSINESS_EXPENSE", "营业外支出"), ("TOTAL_PROFIT", "利润总额"),
+        ("INCOME_TAX", "所得税费用"), ("NETPROFIT", "净利润"), ("PARENT_NETPROFIT", "归属于母公司股东的净利润"),
+        ("MINORITY_INTEREST", "少数股东损益"), ("DEDUCT_PARENT_NETPROFIT", "扣除非经常性损益后的归母净利润"),
+        ("BASIC_EPS", "基本每股收益"), ("DILUTED_EPS", "稀释每股收益"),
+    ],
+    "balance": [
+        ("MONETARYFUNDS", "货币资金"), ("TRADE_FINASSET", "交易性金融资产"), ("TRADE_FINASSET_NOTFVTPL", "交易性金融资产"),
+        ("NOTE_RECE", "应收票据"), ("ACCOUNTS_RECE", "应收账款"), ("FINANCE_RECE", "应收款项融资"), ("PREPAYMENT", "预付款项"),
+        ("TOTAL_OTHER_RECE", "其他应收款合计"), ("INVENTORY", "存货"), ("CONTRACT_ASSET", "合同资产"),
+        ("OTHER_CURRENT_ASSET", "其他流动资产"), ("TOTAL_CURRENT_ASSETS", "流动资产合计"), ("LONG_EQUITY_INVEST", "长期股权投资"),
+        ("OTHER_NONCURRENT_FINASSET", "其他非流动金融资产"), ("FIXED_ASSET", "固定资产"), ("CIP", "在建工程"),
+        ("USERIGHT_ASSET", "使用权资产"), ("INTANGIBLE_ASSET", "无形资产"), ("DEVELOP_EXPENSE", "开发支出"), ("GOODWILL", "商誉"),
+        ("DEFER_TAX_ASSET", "递延所得税资产"), ("OTHER_NONCURRENT_ASSET", "其他非流动资产"),
+        ("TOTAL_NONCURRENT_ASSETS", "非流动资产合计"), ("TOTAL_ASSETS", "资产总计"), ("SHORT_LOAN", "短期借款"),
+        ("NOTE_PAYABLE", "应付票据"), ("ACCOUNTS_PAYABLE", "应付账款"), ("ADVANCE_RECEIVABLES", "预收款项"),
+        ("CONTRACT_LIAB", "合同负债"), ("STAFF_SALARY_PAYABLE", "应付职工薪酬"), ("TAX_PAYABLE", "应交税费"),
+        ("TOTAL_OTHER_PAYABLE", "其他应付款合计"), ("NONCURRENT_LIAB_1YEAR", "一年内到期的非流动负债"),
+        ("TOTAL_CURRENT_LIAB", "流动负债合计"), ("LONG_LOAN", "长期借款"), ("BOND_PAYABLE", "应付债券"), ("LEASE_LIAB", "租赁负债"),
+        ("LONG_PAYABLE", "长期应付款"), ("TOTAL_NONCURRENT_LIAB", "非流动负债合计"), ("TOTAL_LIABILITIES", "负债合计"),
+        ("SHARE_CAPITAL", "股本"), ("CAPITAL_RESERVE", "资本公积"), ("TREASURY_SHARES", "库存股"),
+        ("UNASSIGN_RPOFIT", "未分配利润"), ("TOTAL_PARENT_EQUITY", "归属于母公司股东权益合计"), ("MINORITY_EQUITY", "少数股东权益"),
+        ("TOTAL_EQUITY", "股东权益合计"),
+    ],
+    "cashflow": [
+        ("SALES_SERVICES", "销售商品、提供劳务收到的现金"), ("RECEIVE_TAX_REFUND", "收到的税费返还"),
+        ("BUY_SERVICES", "购买商品、接受劳务支付的现金"), ("PAY_STAFF_CASH", "支付给职工的现金"), ("PAY_ALL_TAX", "支付的各项税费"),
+        ("NETCASH_OPERATE", "经营活动产生的现金流量净额"), ("RECEIVE_INVEST_INCOME", "取得投资收益收到的现金"),
+        ("DISPOSAL_LONG_ASSET", "处置长期资产收回的现金"), ("CONSTRUCT_LONG_ASSET", "购建长期资产支付的现金"),
+        ("INVEST_PAY_CASH", "投资支付的现金"), ("NETCASH_INVEST", "投资活动产生的现金流量净额"),
+        ("ACCEPT_INVEST_CASH", "吸收投资收到的现金"), ("RECEIVE_LOAN_CASH", "取得借款收到的现金"),
+        ("PAY_DEBT_CASH", "偿还债务支付的现金"), ("ASSIGN_DIVIDEND_PORFIT", "分配股利、利润或偿付利息支付的现金"),
+        ("NETCASH_FINANCE", "筹资活动产生的现金流量净额"), ("CCE_ADD", "现金及现金等价物净增加额"),
+        ("END_CCE", "期末现金及现金等价物余额"), ("FA_IR_DEPR", "固定资产折旧"), ("IA_AMORTIZE", "无形资产摊销"),
+        ("USERIGHT_ASSET_AMORTIZE", "使用权资产折旧"), ("INVENTORY_REDUCE", "存货的减少"),
+        ("OPERATE_RECE_REDUCE", "经营性应收项目的减少"), ("OPERATE_PAYABLE_ADD", "经营性应付项目的增加"),
+    ],
+}
+HK_SKIP_ITEMS = {"非运算项目"}  # 数据商的轧差项，不是报表科目
+
+
+def _months(start: str | None, end: str) -> int | None:
+    if not start:
+        return None
+    s, e = date.fromisoformat(start[:10]), date.fromisoformat(end[:10])
+    return max(1, round(((e - s).days + 1) / 30.44))
+
+
+def _period_label(end: str, months: int | None, instant: bool) -> str:
+    if instant or not months:
+        return end
+    return f"{end}（{'全年' if months >= 12 else f'{months}个月'}）"
+
+
+def a_statement_from_rows(kind: str, rows: list[dict]) -> dict:
+    """A 股宽表 → {"periods": [{"date", "label"}], "rows": [(科目, [各期金额])]}。利润表与现金流量表为年初至今累计。"""
+    rows = sorted(rows, key=lambda r: r["REPORT_DATE"], reverse=True)
+    periods = [{"date": r["REPORT_DATE"][:10],
+                "label": _period_label(r["REPORT_DATE"][:10], None if kind == "balance" else int(r["REPORT_DATE"][5:7]), kind == "balance")}
+               for r in rows]
+    out, seen = [], set()
+    for key, label in A_STATEMENT_ITEMS[kind]:
+        values = [to_float(r.get(key)) for r in rows]
+        if label in seen or not any(values):
+            continue
+        seen.add(label)
+        out.append((label, values))
+    return {"periods": periods, "rows": out}
+
+
+def hk_statement_from_rows(kind: str, rows: list[dict], periods: int) -> dict:
+    """港股「科目名 + 金额」长表 → 同上形状，科目按数据商的标准科目编号排序。"""
+    by_date: dict[str, dict] = {}
+    for r in rows:
+        d = by_date.setdefault(r["REPORT_DATE"][:10], {"start": r.get("START_DATE"), "items": {}})
+        if r.get("STD_ITEM_NAME") and r["STD_ITEM_NAME"] not in HK_SKIP_ITEMS:
+            d["items"][r["STD_ITEM_NAME"]] = (r.get("STD_ITEM_CODE") or "", to_float(r.get("AMOUNT")))
+    dates = sorted(by_date, reverse=True)[:periods]
+    names: dict[str, str] = {}
+    for d in dates:
+        for name, (code, _) in by_date[d]["items"].items():
+            names.setdefault(name, code)
+    out = []
+    for name in sorted(names, key=lambda n: names[n]):
+        values = [by_date[d]["items"].get(name, ("", None))[1] for d in dates]
+        if any(values):
+            out.append((name, values))
+    return {"periods": [{"date": d, "label": _period_label(d, _months(by_date[d]["start"], d), kind == "balance")} for d in dates],
+            "rows": out}
+
+
+def statement(session: requests.Session, listing: Listing, kind: str, periods: int = 6, annual_only: bool = False) -> dict | None:
+    """完整报表（金额单位：元，报告币种）。annual_only 只取年报。港股的币种由调用方用 financials 推断。"""
+    code = f'(SECUCODE="{secucode(listing)}")'
+    if listing.market == "A":
+        flt = code + ('(REPORT_TYPE="年报")' if annual_only else "")
+        rows = _rows(session, DC, reportName=A_STATEMENT_REPORTS[kind], columns="ALL", filter=flt,
+                     pageNumber=1, pageSize=periods, sortTypes=-1, sortColumns="REPORT_DATE")
+        return a_statement_from_rows(kind, rows) if rows else None
+    if listing.market != "HK":
+        return None
+    flt = code + ('(DATE_TYPE_CODE="001")' if annual_only else "")
+    rows = _rows(session, DC, reportName=HK_STATEMENT_REPORTS[kind], columns="ALL", filter=flt,
+                 pageNumber=1, pageSize=500, sortTypes=-1, sortColumns="REPORT_DATE")
+    return hk_statement_from_rows(kind, rows, periods) if rows else None
+
+
+# ---------------------------------------------------------------- 股东
+
+def a_holders(session: requests.Session, a_code: str, free: bool = False, periods: int = 2) -> list[dict]:
+    """A 股十大股东（free=True 为十大流通股东），最近 periods 个报告期，按期倒序、名次正序。"""
+    report = "RPT_F10_EH_FREEHOLDERS" if free else "RPT_F10_EH_HOLDERS"
+    rows = _rows(session, DC, reportName=report, columns="ALL", filter=f'(SECURITY_CODE="{a_code}")',
+                 pageNumber=1, pageSize=10 * periods, sortTypes="-1,1", sortColumns="END_DATE,HOLDER_RANK")
+    return [{"date": (r.get("END_DATE") or "")[:10], "rank": r.get("HOLDER_RANK"), "name": r.get("HOLDER_NAME"),
+             "shares": to_float(r.get("HOLD_NUM")),
+             "ratio": to_float(r.get("FREE_HOLDNUM_RATIO") if free else r.get("HOLD_NUM_RATIO")),
+             "change": r.get("HOLD_NUM_CHANGE") or "", "type": r.get("HOLDER_NEWTYPE") or r.get("HOLDER_TYPE") or "",
+             "share_type": r.get("SHARES_TYPE") or ""} for r in rows]
+
+
+def a_holder_counts(session: requests.Session, a_code: str, periods: int = 8) -> list[dict]:
+    """A 股股东户数与户均持股，按期倒序。"""
+    rows = _rows(session, DC, reportName="RPT_F10_EH_HOLDERNUM", columns="ALL", filter=f'(SECURITY_CODE="{a_code}")',
+                 pageNumber=1, pageSize=periods, sortTypes=-1, sortColumns="END_DATE")
+    return [{"date": (r.get("END_DATE") or "")[:10], "holders": to_float(r.get("HOLDER_TOTAL_NUM")),
+             "change_pct": to_float(r.get("TOTAL_NUM_RATIO")), "avg_shares": to_float(r.get("AVG_FREE_SHARES")),
+             "focus": r.get("HOLD_FOCUS") or "", "top10_ratio": to_float(r.get("HOLD_RATIO_TOTAL"))} for r in rows]
+
+
+def hk_holders(session: requests.Session, hk_code: str) -> list[dict]:
+    """港股主要股东与董事的权益披露（数据商按公司最新的定期报告整理），取最新报告期，按持股比例倒序。"""
+    rows = _rows(session, DC, reportName="RPT_HKF10_EQUITYCHG_HOLDER", columns="ALL",
+                 filter=f'(SECUCODE="{Listing(market="HK", code=hk_code).code}.HK")',
+                 pageNumber=1, pageSize=200, sortTypes=-1, sortColumns="REPORT_DATE")
+    if not rows:
+        return []
+    latest = max((r.get("REPORT_DATE") or "") for r in rows)
+    out = [{"date": latest[:10], "notice": (r.get("NOTICE_DATE") or "")[:10], "name": r.get("HOLDER_NAME"),
+            "shares": to_float(r.get("TOTAL_SHARES")), "ratio": to_float(r.get("TOTAL_SHARES_RATIO")),
+            "role": r.get("EQUITY_TYPE") or "", "identity": r.get("HOLD_IDENTITY") or "", "share_type": r.get("SHARES_TYPE") or ""}
+           for r in rows if r.get("REPORT_DATE") == latest]
+    return sorted(out, key=lambda x: x["ratio"] or 0, reverse=True)

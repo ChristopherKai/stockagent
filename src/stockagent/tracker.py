@@ -50,7 +50,8 @@ DISCLAIMER = "目标价（情景加权估值）由程序按估值假设计算，
 
 # 修正 agent 可用的工具（ToolBox 白名单）；web_search 由 tracker.web_search 控制，深度报告运行期间自动去掉
 TOOLS = ["calculate", "company_events", "web_search", "fetch_url", "list_filings", "search_filings", "read_filing",
-         "market_data", "financials", "fcf_yield", "broker_research", "manual_data", "valuation_matrix", "ima_search", "ima_read"]
+         "market_data", "financials", "statements", "fcf_yield", "broker_research", "shareholders", "ccass", "manual_data",
+         "valuation_matrix", "ima_search", "ima_read"]
 # 修正时附给 agent 的报告章节（论证逻辑），按顺序截取
 REPORT_SECTIONS = ["核心洞见", "关键经营变量", "估值：框架与可比", "12 个月情景", "证伪条件"]
 SECTION_CHARS = 3000
@@ -61,7 +62,7 @@ RESEARCH_SYSTEM = """你是买方研究员，负责跟踪「{company}」的投�
 任务：逐条判断新依据是否改变估值假设（驱动指标、倍数、情景概率、股本、净现金），需要时用工具核实并量化。
 
 工作规则：
-1. 先用 fetch_url 打开事件原文（公告 PDF 也可以）；新财报用 financials、search_filings 核对；需要行业价格、竞争对手、卖方观点等外部信息时再用 web_search。
+1. 先用 fetch_url 打开事件原文（公告 PDF 也可以）；新财报用 financials、statements、search_filings 核对；CCASS 持股异动用 ccass 看前后分布；需要行业价格、竞争对手、卖方观点等外部信息时再用 web_search。
 2. 所有计算都用 calculate，不要心算；数字写明出处，如〔公告 09-29〕〔financials 2026中报〕〔网页：媒体 日期〕。
 3. 对照报告的论证逻辑与跟踪指标的阈值判断影响；区分新信息与旧闻、标题与实质。只有影响收入、利润、现金、合理倍数、情景概率、股本或净现金的依据才构成修改理由，股价涨跌本身不是理由。
 4. 修改只能来自新依据带来的新信息。对报告已有数据的重新解读、估值口径的调整（例如净现金是否计入受限制现金或租赁负债、股本口径）不属于修正：发现这类问题写进笔记的「口径问题」一节，交给使用者决定。

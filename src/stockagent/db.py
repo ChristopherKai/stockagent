@@ -18,8 +18,8 @@ CREATE TABLE IF NOT EXISTS items (
     uid           TEXT UNIQUE NOT NULL,
     company_id    TEXT NOT NULL,
     listing       TEXT,
-    kind          TEXT NOT NULL,          -- announcement | news | manual
-    source        TEXT NOT NULL,          -- hkex | cninfo | sec | eastmoney | google_news | manual
+    kind          TEXT NOT NULL,          -- announcement | news | data（程序发现的数据异动，如 CCASS） | manual
+    source        TEXT NOT NULL,          -- hkex | cninfo | sec | eastmoney | google_news | ima | ccass | manual
     source_name   TEXT,                   -- 媒体名 / 公告类别
     title         TEXT NOT NULL,
     title_norm    TEXT NOT NULL,
@@ -102,6 +102,16 @@ CREATE TABLE IF NOT EXISTS profiles (
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ccass (            -- 港股中央结算系统（CCASS）持股快照：每只港股每个交易日一行
+    code          TEXT NOT NULL,              -- 港股代码（5 位）
+    date          TEXT NOT NULL,              -- 持股日期（港交所日终数据，YYYY-MM-DD）
+    issued        INTEGER,                    -- 已发行股份（港交所最近更新数）
+    summary_json  TEXT NOT NULL,              -- 各类参与者合计：{类别: {shares, participants, pct}}
+    participants_json TEXT NOT NULL,          -- 持股最多的参与者 [[编号, 名称, 股数]]（只存前 sources.ccass_keep 名）
+    fetched_at    TEXT NOT NULL,
+    PRIMARY KEY (code, date)
 );
 
 CREATE TABLE IF NOT EXISTS ima_seen (         -- ima 知识库中已处理过的条目（按公司检索到的；收录与否都记）
@@ -456,6 +466,27 @@ class DB:
     def quote(self, secid: str) -> dict | None:
         r = self._one("SELECT * FROM quotes WHERE secid=?", (secid,))
         return {**json.loads(r["data_json"]), "taken_at": r["taken_at"]} if r else None
+
+    # ------------------------------------------------------------ CCASS 持股快照
+
+    def save_ccass(self, code: str, snap: dict, keep: int) -> None:
+        rows = [[p["id"], p["name"], p["shares"]] for p in snap["participants"][:keep]]
+        self._exec(
+            "INSERT INTO ccass(code, date, issued, summary_json, participants_json, fetched_at) VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(code, date) DO UPDATE SET issued=excluded.issued, summary_json=excluded.summary_json, "
+            "participants_json=excluded.participants_json, fetched_at=excluded.fetched_at",
+            (code, snap["date"], snap.get("issued"), json.dumps(snap.get("summary") or {}, ensure_ascii=False),
+             json.dumps(rows, ensure_ascii=False), iso(utcnow())),
+        )
+
+    def ccass(self, code: str, on_or_before: str | None = None) -> dict | None:
+        """on_or_before 当日或之前最近的一份快照；不填为最新一份。形状与 sources.ccass.parse 相同。"""
+        r = (self._one("SELECT * FROM ccass WHERE code=? AND date<=? ORDER BY date DESC LIMIT 1", (code, on_or_before))
+             if on_or_before else self._one("SELECT * FROM ccass WHERE code=? ORDER BY date DESC LIMIT 1", (code,)))
+        if not r:
+            return None
+        return {"date": r["date"], "issued": r["issued"], "summary": json.loads(r["summary_json"]),
+                "participants": [{"id": i, "name": n, "shares": sh} for i, n, sh in json.loads(r["participants_json"])]}
 
     # ------------------------------------------------------------ ima 知识库
 

@@ -29,10 +29,11 @@ from .tracker import (
 from .utils import fmt_local, log, to_simplified, today_local
 from .valuation import SCENARIO_LABEL, TARGET_LABEL, describe, fmt, load_model
 
-TOOLS = ["report_notes", "search_filings", "read_filing", "list_filings", "financials", "market_data", "fcf_yield",
-         "valuation_history", "company_events", "manual_data", "calculate", "web_search", "fetch_url"]
+TOOLS = ["report_notes", "search_filings", "read_filing", "list_filings", "financials", "statements", "market_data", "fcf_yield",
+         "valuation_history", "shareholders", "ccass", "company_events", "manual_data", "calculate", "web_search", "fetch_url"]
 TOOL_LABEL = {"report_notes": "查报告与研究笔记", "search_filings": "检索年报等资料", "read_filing": "阅读资料原文",
-              "list_filings": "查看资料清单", "financials": "查财务数据", "market_data": "查行情", "fcf_yield": "计算自由现金流收益率",
+              "list_filings": "查看资料清单", "financials": "查财务数据", "statements": "查财务报表", "market_data": "查行情",
+              "fcf_yield": "计算自由现金流收益率", "shareholders": "查股东结构", "ccass": "查 CCASS 持股",
               "valuation_history": "查历史估值", "company_events": "查已分级事件", "manual_data": "查补充数据",
               "calculate": "计算", "web_search": "网页搜索", "fetch_url": "打开网页"}
 MAX_QUESTION = 2000

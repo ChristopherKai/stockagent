@@ -47,6 +47,11 @@ def _no_external_search(monkeypatch):
     from stockagent.sources import emdata
 
     monkeypatch.setattr(emdata, "fcf_data", lambda *a, **k: None)  # 报表数据需要联网；需要的测试自行替换
+    from stockagent.sources import ccass, nasdaq, sec
+
+    monkeypatch.setattr(ccass, "holdings", lambda *a, **k: None)  # 港交所 CCASS、SEC XBRL、Nasdaq 同理
+    monkeypatch.setattr(sec, "company_facts", lambda *a, **k: {})
+    monkeypatch.setattr(nasdaq, "_get", lambda *a, **k: {})
     from stockagent.sources import ima
 
     monkeypatch.delenv(ima.ENV_CLIENT_ID, raising=False)  # 本机 .env 里的 ima 凭证不带进测试；需要的测试自行设置

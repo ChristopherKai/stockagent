@@ -125,7 +125,10 @@ sources:
     max_download_mb: 40
     max_downloads_per_day: 25       # ima 对取原文有未公开的每日上限（实测约几十次），agent 的 ima_read 也计入
     in_alert: false                 # 盘中 stock alert 是否也检索（默认只在 stock run 时）
-  sec_user_agent: null              # 跟踪美股时必填，格式 "姓名 邮箱"（SEC 要求）
+  sec_user_agent: "your.email@example.com"   # 跟踪美股时必填，格式 "姓名 邮箱"（SEC 要求）；美股公告与 XBRL 报表（statements 工具）都要用
+  ccass: true                       # 每天记录自选港股的 CCASS（中央结算系统）持股快照（港交所，T+1 可查）
+  ccass_alert_pct: 1.0              # 相邻两份快照间某参与者持股变化 ≥ 此值（占已发行股份的百分点）时，生成一条数据异动进入分级
+  ccass_keep: 60                    # 每份快照保存持股最多的前几名参与者
 
 # ------------------------------------------------------------------ 研究 agent（深度报告）
 agent:

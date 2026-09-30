@@ -119,7 +119,10 @@ class SourcesConfig(BaseModel):
     blocked_title_patterns: list[str] = Field(default_factory=list)
     auto_download_reports: bool = True
     ima: ImaConfig = Field(default_factory=ImaConfig)
-    sec_user_agent: str | None = None
+    sec_user_agent: str | None = None  # SEC 要求 User-Agent 带联系方式（「姓名 邮箱」）；美股公告与 XBRL 财报都要用
+    ccass: bool = True           # 每天记录自选港股的 CCASS（中央结算系统）持股快照
+    ccass_alert_pct: float = 1.0  # 相邻两份快照间某参与者持股变化 ≥ 此值（占已发行股份的百分点）时生成一条「数据异动」进入分级
+    ccass_keep: int = 60          # 每份快照保存持股最多的前几名参与者
     sec_forms: list[str] = Field(
         default_factory=lambda: [
             "8-K", "10-Q", "10-K", "6-K", "20-F", "S-1", "S-3", "424B4", "424B5",

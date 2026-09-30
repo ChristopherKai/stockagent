@@ -18,12 +18,12 @@ from typing import Callable
 
 from . import fcf as fcf_mod
 from . import imafeed, technical
-from .app import FX_HKDCNH, PRICE_SOURCES, SOURCE_LABEL, App, _try, klines
+from .app import FX_HKDCNH, PRICE_SOURCES, SOURCE_LABEL, App, _try, ccass_snapshot, klines
 from .config import Company, Listing
 from .docs import DOC_TYPES, read_document_text
-from .sources import eastmoney, emdata, ima, tencent, web
+from .sources import ccass, eastmoney, emdata, ids, ima, nasdaq, sec, tencent, web
 from .triage import DIRECTIONS, event_label
-from .utils import big_num, fmt_local, iso, lock_holder, num, pct, to_simplified, utcnow
+from .utils import big_num, fmt_local, iso, lock_holder, num, pct, to_simplified, today_local, utcnow
 
 
 
@@ -265,21 +265,24 @@ def resolve_ticker(app: App, ticker: str) -> list[tuple[str, str, str]]:
     raise ValueError(f"无法识别代码 {ticker}（港股 5 位数字、A 股 6 位数字、美股字母代码）")
 
 
-def listings_for(app: App, company: Company | None, ticker: str | None) -> list[Listing]:
-    """结构化数据只支持 A 股与港股：不填 ticker 表示本公司（不针对某家公司的 agent 必须填 ticker）。"""
+def listings_for(app: App, company: Company | None, ticker: str | None, markets: tuple[str, ...] = ("A", "HK")) -> list[Listing]:
+    """结构化数据默认只支持 A 股与港股（markets 可加 "US"）：不填 ticker 表示本公司（不针对某家公司的 agent 必须填 ticker）。"""
     if not ticker:
         if company is None:
-            raise ValueError("需要指定 ticker（A 股 6 位、港股 5 位代码）")
-        return [l for l in company.listings if l.market in ("A", "HK")]
+            raise ValueError("需要指定 ticker（A 股 6 位、港股 5 位代码" + ("、美股字母代码" if "US" in markets else "") + "）")
+        return [l for l in company.listings if l.market in markets]
     c = app.watchlist.get(ticker)
     if c is not None:
-        return [l for l in c.listings if l.market in ("A", "HK")]
+        return [l for l in c.listings if l.market in markets]
     t = ticker.strip().upper()
     if m := re.fullmatch(r"(\d{6})(?:\.(SH|SZ|BJ))?", t):
         return [Listing(market="A", code=m.group(1), exchange=m.group(2))]
     if m := re.fullmatch(r"(\d{1,5})(?:\.HK)?", t):
         return [Listing(market="HK", code=m.group(1))]
-    raise ValueError(f"{ticker}：结构化财务与估值数据只支持 A 股（6 位）和港股（5 位）代码")
+    if "US" in markets and re.fullmatch(r"[A-Z][A-Z.\-]{0,7}", t):
+        return [Listing(market="US", code=t)]
+    raise ValueError(f"{ticker}：结构化财务与估值数据只支持 A 股（6 位）和港股（5 位）代码"
+                     + ("，以及美股字母代码" if "US" in markets else ""))
 
 
 def latest_quote(app: App, secid: str) -> dict:
@@ -411,6 +414,164 @@ def ensure_bars(app: App, secid: str, max_age_days: int = 4, min_bars: int = 0):
     return bars
 
 
+RATING_ZH = {"Strong Buy": "强烈买入", "Buy": "买入", "Hold": "持有", "Sell": "卖出", "Strong Sell": "强烈卖出"}
+
+
+def us_consensus(app: App, listing: Listing) -> str:
+    """美股卖方一致预期：Nasdaq 的目标价、评级分布与年度 EPS 预测。"""
+    c = _try(app, "nasdaq", nasdaq.consensus, app.session, listing.code)
+    if not c:
+        return f"{listing.display}：Nasdaq 没有分析师一致预期数据"
+    t, r = c["target"], c["ratings"]
+    line = (f"{listing.display} 卖方一致预期（Nasdaq 分析师数据）：评级 买入 {r['buy']} / 持有 {r['hold']} / 卖出 {r['sell']}"
+            + (f"（综合评级 {RATING_ZH.get(c['mean_rating'], c['mean_rating'])}"
+               + (f"，Nasdaq 列出的覆盖机构 {c['brokers']} 家" if c["brokers"] else "") + "）" if c["mean_rating"] else "")
+            + (f"；目标价均值 {num(t['avg'])} 美元，最高 {num(t['high'])}，最低 {num(t['low'])}" if t["avg"] else ""))
+    price = latest_quote(app, app.secid(listing)).get("price")
+    if price and t["avg"]:
+        line += f"；相对现价 {num(price)} 美元，均值 {pct(t['avg'] / price - 1)}"
+    if c["eps"]:
+        line += "\n年度 EPS 一致预期（每股或每 ADS，美元）：\n| 财年 | 均值 | 最高 | 最低 | 家数 | 近 4 周上调/下调 |\n|---|---|---|---|---|---|\n"
+        line += "\n".join(f"| {e['year']} | {num(e['avg'])} | {num(e['high'])} | {num(e['low'])} | {e['n'] or '—'} | {e['up'] or 0}/{e['down'] or 0} |"
+                           for e in c["eps"])
+    return line
+
+
+def _cell(label: str, v: float | None) -> str:
+    if v is None:
+        return "—"
+    return f"{v:,.2f}" if "每股" in label else f"{v / 1e8:,.2f}"
+
+
+def statement_table(app: App, listing: Listing, kind: str, periods: int, annual_only: bool) -> str:
+    """一张报表的 Markdown 表：科目为行、期间为列（金额单位亿，每股指标为原值）。"""
+    name = emdata.STATEMENT_KINDS[kind]
+    if listing.market == "US":
+        ua = app.settings.sources.sec_user_agent
+        if not ua:
+            return f"{listing.display}：美股报表来自 SEC XBRL，需要先在 config.yaml 设置 sources.sec_user_agent（「姓名 邮箱」）"
+        cik = ids.sec_cik(app.db, app.session, listing, ua)
+        if not cik:
+            return f"{listing.display}：SEC 找不到这个代码"
+        data = sec.statement_from_facts(sec.company_facts(app.session, cik, ua), kind, periods, annual_only)
+        src, cur = "SEC XBRL（10-K/10-Q/20-F 申报数据）", (data or {}).get("currency", "")
+    else:
+        data = emdata.statement(app.session, listing, kind, periods, annual_only)
+        src = "东方财富数据中心"
+        cur = "CNY"
+        if listing.market == "HK":
+            rows = emdata.financials(app.session, listing, 2)
+            cur = (rows[0].get("币种") if rows else None) or "CNY"
+            src += "（港股报告币种由数据推断）"
+    if not data or not data["rows"]:
+        return f"{listing.display}：没有取到{name}" + ("（A 股银行、保险、券商的报表格式不同，这里只整理一般工商业格式）" if listing.market == "A" else "")
+    cols = [p["label"] for p in data["periods"]]
+    lines = [f"{listing.display} {name}（{src}；金额单位：亿 {cur}，每股指标为原值；期间倒序"
+             + ("；流量为年初至今累计" if kind != "balance" and listing.market != "US" else "") + "）：",
+             "| 科目 | " + " | ".join(cols) + " |", "|---|" + "---|" * len(cols)]
+    lines += [f"| {label} | " + " | ".join(_cell(label, v) for v in values) + " |" for label, values in data["rows"]]
+    return "\n".join(lines)
+
+
+def _holder_change(text: str) -> str:
+    """东方财富的「较上期」字段：不变 / 新进 / 股数变化（如 -10186873）。"""
+    try:
+        return f"{float(text) / 1e4:+,.0f} 万股"
+    except (TypeError, ValueError):
+        return text or "—"
+
+
+def _a_holders_text(app: App, l: Listing) -> str:
+    out = [f"{l.display} 股东（东方财富数据中心）"]
+    top: set[str] = set()
+    for free, title in ((False, "十大股东"), (True, "十大流通股东")):
+        rows = emdata.a_holders(app.session, l.code, free=free)
+        if not rows:
+            out.append(f"{title}：没有数据")
+            continue
+        dates = sorted({r["date"] for r in rows}, reverse=True)
+        latest = [r for r in rows if r["date"] == dates[0]]
+        prev = {r["name"] for r in rows if len(dates) > 1 and r["date"] == dates[1]}
+        gone = [n for n in prev if n not in {r["name"] for r in latest}]
+        if free:  # 十大流通股东多与十大股东重合，只列不同的
+            extra = [r for r in latest if r["name"] not in top]
+            out.append(f"\n{title}（{dates[0]}）：与十大股东重合 {len(latest) - len(extra)} 名"
+                       + ("；另有 " + "；".join(f"{r['name']}（{r['type'] or '—'}）{(r['shares'] or 0) / 1e4:,.0f} 万股、占流通股 {num(r['ratio'])}%、"
+                                              f"较上期 {'新进' if prev and r['name'] not in prev else _holder_change(r['change'])}" for r in extra)
+                          if extra else ""))
+            if gone:
+                out.append("退出十大流通股东：" + "、".join(gone))
+            continue
+        top = {r["name"] for r in latest}
+        out.append(f"\n{title}（{dates[0]}" + (f"，对比 {dates[1]}" if len(dates) > 1 else "") + "）：\n"
+                   "| 名次 | 股东 | 持股（万股） | 占总股本% | 较上期 |\n|---|---|---|---|---|")
+        out += [f"| {r['rank']} | {r['name']} | {(r['shares'] or 0) / 1e4:,.0f} | {num(r['ratio'])} | "
+                f"{'新进' if prev and r['name'] not in prev else _holder_change(r['change'])} |" for r in latest]
+        if gone:
+            out.append("退出十大股东：" + "、".join(gone))
+    counts = emdata.a_holder_counts(app.session, l.code)
+    if counts:
+        out.append("\n股东户数（户数减少、户均持股上升常见于筹码集中）：\n| 截止日 | 户数 | 较上期% | 户均流通股 |\n|---|---|---|---|")
+        out += [f"| {c['date']} | {(c['holders'] or 0):,.0f} | {num(c['change_pct'])} | {(c['avg_shares'] or 0):,.0f} |" for c in counts]
+    return "\n".join(out)
+
+
+def _hk_holders_text(app: App, l: Listing) -> str:
+    rows = emdata.hk_holders(app.session, l.code)
+    if not rows:
+        return f"{l.display}：没有主要股东披露数据"
+    lines = [(f"{l.display} 主要股东与董事权益（东方财富数据中心，据 {rows[0]['date']} 期定期报告，{rows[0]['notice']} 披露；"
+              "同一批股份常经多个受控法团重复披露，占比不能相加）："),
+             "| 名称 | 身份 | 权益性质 | 股份类别 | 持股（万股） | 占已发行% |", "|---|---|---|---|---|---|"]
+    lines += [f"| {r['name']} | {r['role'] or '—'} | {r['identity'] or '—'} | {r['share_type'] or '—'} | {(r['shares'] or 0) / 1e4:,.0f} | {num(r['ratio'])} |"
+              for r in rows[:15]]
+    if len(rows) > 15:
+        lines.append(f"（另有 {len(rows) - 15} 条持股更少的披露未列出）")
+    return "\n".join(lines)
+
+
+def ccass_text(app: App, l: Listing) -> str:
+    """CCASS 持股分布与 5/20 个交易日（约 7/28 个自然日）前的对比；缺的快照当场向港交所查询并存库。"""
+    code = l.code.zfill(5)
+    snap = app.db.ccass(code)
+    if snap is None or (today_local() - date.fromisoformat(snap["date"])).days > 4:
+        snap = ccass_snapshot(app, code, today_local() - timedelta(days=1)) or snap
+    if snap is None:
+        return f"{l.display}：没有取到 CCASS 持股数据（港交所查询失败或代码不存在）"
+    day = date.fromisoformat(snap["date"])
+    base = {n: ccass_snapshot(app, code, day - timedelta(days=d)) for n, d in ((5, 7), (20, 28))}
+    issued = snap["issued"]
+    total = (snap["summary"].get("total") or {}).get("pct")
+    head = f"{l.display} CCASS 持股（港交所中央结算系统，{snap['date']} 日终" + (f"；已发行股份 {issued:,} 股" if issued else "") + "）："
+    parts = []
+    if total is not None:
+        parts.append(f"存于中央结算系统的合计占 {total:.2f}%，未存入的 {100 - total:.2f}% 多为控股股东实物持股或未上市股份")
+    c5, c10 = ccass.concentration(snap, 5), ccass.concentration(snap, 10)
+    if c5 is not None:
+        parts.append(f"前 5 名参与者合计 {c5:.2f}%，前 10 名 {c10:.2f}%（港股通两个账户合并计）")
+    lines = [head + "；".join(parts), ""]
+    if not issued:
+        return "\n".join(lines + ["（港交所未给出已发行股数，无法计算占比）"])
+    olds = {n: {p["id"]: p["shares"] for p in b["participants"]} if b else None for n, b in base.items()}
+    hdr = " | ".join(f"较 {b['date']}" if b else f"较约{n}日前" for n, b in base.items())
+    lines += [f"| 参与者 | 持股（万股） | 占已发行% | {hdr} |", "|---|---|---|---|---|"]
+
+    def delta(n: int, p: dict) -> str:
+        if olds[n] is None:
+            return "无数据"
+        return f"{(p['shares'] - olds[n].get(p['id'], 0)) / issued * 100:+.2f} 个百分点"
+
+    for p in snap["participants"][:15]:
+        name = ccass.CONNECT_IDS.get(p["id"]) or to_simplified(p["name"])
+        lines.append(f"| {name}（{p['id']}） | {p['shares'] / 1e4:,.0f} | {p['shares'] / issued * 100:.2f} | {delta(5, p)} | {delta(20, p)} |")
+    if base[20]:
+        moves = [m for m in ccass.changes(base[20], snap, 0.5) if m["id"] not in {p["id"] for p in snap["participants"][:15]}]
+        if moves:
+            lines.append("\n前 15 名以外、20 日内变化 ≥ 0.5 个百分点的参与者：" + "；".join(
+                f"{to_simplified(m['name'])} {m['pct']:+.2f} 个百分点" for m in moves[:8]))
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- 工具箱
 
 class ToolBox:
@@ -520,9 +681,31 @@ class ToolBox:
                  "每股净资产、经营现金流、负债率、周转天数等。核心财务数字优先用它，再用年报原文核对细节。ticker 不填表示本公司。",
                  _obj({"ticker": {"type": "string"}, "periods": {"type": "integer"}}, []),
                  self.financials),
+            Tool("statements",
+                 "完整财务报表（程序整理，原始数字）：kind 取 income 利润表 / balance 资产负债表 / cashflow 现金流量表。"
+                 "A 股与港股来自东方财富数据中心（A 股科目按一般工商业格式，港股为数据商的标准化科目），美股来自 SEC XBRL（10-K/10-Q/20-F，需要配置 sec_user_agent）。"
+                 "financials 没有的明细用它：费用结构（销售、管理、研发、财务费用）、其他收益与投资收益、减值、少数股东损益、应收票据、合同负债、"
+                 "在建工程、有息负债各科目、折旧摊销、分红与回购现金。各列标明截止日与期间长度（利润表与现金流量表为年初至今累计；美股 10-Q 利润表为单季）。"
+                 "periods 默认 4 期；annual_only=true 只看年报。A+H 公司用 A 股报表。ticker 不填表示本公司。",
+                 _obj({"kind": {"type": "string", "enum": ["income", "balance", "cashflow"]}, "ticker": {"type": "string"},
+                       "periods": {"type": "integer"}, "annual_only": {"type": "boolean"}}, ["kind"]),
+                 self.statements),
+            Tool("shareholders",
+                 "股东结构。A 股：十大股东与十大流通股东（最近两期，含增减变化与股东性质）、股东户数与户均持股趋势（户数减少常见于筹码集中）；"
+                 "港股：定期报告披露的主要股东与董事权益（同一批股份可能经多个受控法团重复披露，不能简单相加）。"
+                 "港股的券商/托管行持股分布用 ccass。ticker 不填表示本公司。",
+                 _obj({"ticker": {"type": "string"}}, []),
+                 self.shareholders),
+            Tool("ccass",
+                 "港股中央结算系统（CCASS）持股：前 15 名参与者（托管行、券商、港股通）的持股与占已发行股份比例，较约 5 个与 20 个交易日前的变化，"
+                 "前 5/前 10 名集中度，以及未存入 CCASS 的比例（多为控股股东实物持股或未上市股份）。"
+                 "用于看筹码集中度、大额转仓（配售交收、换托管行、质押）和港股通进出；参与者一增一减、数量相近多为转仓，不一定是买卖。仅港股。ticker 不填表示本公司。",
+                 _obj({"ticker": {"type": "string"}}, []),
+                 self.ccass),
             Tool("broker_research",
                  "卖方一致预期。A 股：东方财富研报库近几个月的研报列表，汇总评级分布与 EPS 预测中位数、目标价中位数；"
-                 "港股：富途个股预测页的分析师数量与目标价均值/区间（经 Exa 读取）。单家机构的最新目标价请再用 web_search 核实。ticker 不填表示本公司。",
+                 "港股：富途个股预测页的分析师数量与目标价均值/区间（经 Exa 读取）；美股：Nasdaq 的一致目标价、评级分布与年度 EPS 一致预期"
+                 "（中概股为每 ADS 美元口径）。单家机构的最新目标价请再用 web_search 核实。ticker 不填表示本公司。",
                  _obj({"ticker": {"type": "string"}, "months": {"type": "integer"}}, []),
                  self.broker_research),
             Tool("fcf_yield",
@@ -716,12 +899,34 @@ class ToolBox:
         return "\n\n".join(out)
 
     def broker_research(self, ticker: str | None = None, months: int = 6) -> str:
-        ls = listings_for(self.app, self.company, ticker)
+        ls = listings_for(self.app, self.company, ticker, markets=("A", "HK", "US"))
         out = [hk_consensus(self.app, l) for l in ls if l.market == "HK"]
         a = [l for l in ls if l.market == "A"]
         if a:
             out.append(self._a_research(a[0], months))
-        return "\n\n".join(out) or "只支持 A 股和港股"
+        out += [us_consensus(self.app, l) for l in ls if l.market == "US"]
+        return "\n\n".join(out) or "只支持 A 股、港股和美股"
+
+    def statements(self, kind: str, ticker: str | None = None, periods: int = 4, annual_only: bool = False) -> str:
+        if kind not in emdata.STATEMENT_KINDS:
+            return "错误：kind 只能是 income、balance、cashflow"
+        ls = listings_for(self.app, self.company, ticker, markets=("A", "HK", "US"))
+        if not ls:
+            return "本公司没有可查询报表的上市地"
+        l = next(x for m in ("A", "HK", "US") for x in ls if x.market == m)  # A+H 用 A 股报表，港美两地用港股
+        return statement_table(self.app, l, kind, max(1, min(int(periods), 12)), bool(annual_only))
+
+    def shareholders(self, ticker: str | None = None) -> str:
+        out = []
+        for l in listings_for(self.app, self.company, ticker):
+            out.append(_a_holders_text(self.app, l) if l.market == "A" else _hk_holders_text(self.app, l))
+        return "\n\n".join(out) or "股东数据只支持 A 股和港股"
+
+    def ccass(self, ticker: str | None = None) -> str:
+        hk = [l for l in listings_for(self.app, self.company, ticker) if l.market == "HK"]
+        if not hk:
+            return "CCASS 持股只适用于港股"
+        return "\n\n".join(ccass_text(self.app, l) for l in hk)
 
     def fcf_yield(self, ticker: str | None = None, growth: float = 0.0, forward_fcf: float | None = None,
                   forward_label: str = "") -> str:
