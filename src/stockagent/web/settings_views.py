@@ -29,7 +29,7 @@ router = APIRouter(prefix="/settings", dependencies=[Depends(verify_csrf)])
 
 TASK_LABEL = {"triage": "事件分级", "stock_brief": "个股研判", "market_brief": "今日要点", "profile": "公司画像",
               "research": "深度报告·研究 agent", "dossier": "深度报告·撰写与跟踪卡", "monitor": "证伪条件检查",
-              "tracker": "标的追踪·估值修正"}
+              "tracker": "标的追踪·估值修正", "chat": "报告研读对话"}
 PROFILE_LABELS = {
     "protocol": ("协议", "openai：OpenAI 兼容接口（本地网关、DeepSeek、通义、Ollama 等）；anthropic：Claude 官方 SDK；mock：离线模拟"),
     "base_url": ("接口地址", "如 http://127.0.0.1:18080/v1；anthropic 协议留空为官方地址"),
@@ -53,7 +53,7 @@ PROFILE_LABELS = {
 }
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,40}$")
 SEARCH_KEYS = {"EXA_API_KEY": "Exa 搜索", "BOCHA_API_KEY": "博查搜索", "TAVILY_API_KEY": "Tavily 搜索", "SERPER_API_KEY": "Serper 搜索"}
-SECTIONS = {"sources": "数据源", "report": "简报", "agent": "研究 agent", "notify": "推送", "web": "WebUI"}
+SECTIONS = {"sources": "数据源", "report": "简报", "agent": "研究 agent", "notify": "推送", "web": "WebUI", "chat": "报告研读对话"}
 for k, v in PROFILE_LABELS.items():
     forms.LABELS[f"profile.{k}"] = v
 

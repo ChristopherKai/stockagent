@@ -42,7 +42,7 @@ uv run stock screen refresh|run|show|promote|themes|eval        # screener: HK C
   - once-a-day markers: `reports_checked:`, `monitor_checked:`.
   - scheduler fire markers `sched_last:<schedule name>` (last minute fired, CST ISO).
 - Tracker tables: `trackers` (one row per tracked company; points at the current baseline dossier and latest revision), `revisions` (baseline / revision / review snapshots with the full model JSON, applied and rejected changes, assessed evidence, trigger-status snapshot), `tracker_refs` (primary key `(company_id, ref)`: every piece of evidence the tracker has shown to the model, so nothing is processed twice). `jobs` holds WebUI / scheduler / tracker-queued background jobs.
-- Process locks live in `data/tmp/locks/*.lock` (fcntl.flock, released when the process dies): `dossier`, `pipeline` (run / alert / target run), `web` (only one scheduler + job runner). `PRAGMA user_version` is set (currently 1); new columns on existing tables need an ALTER keyed on it.
+- Process locks live in `data/tmp/locks/*.lock` (fcntl.flock, released when the process dies): `dossier`, `pipeline` (run / alert / target run), `web` (only one scheduler + job runner). `PRAGMA user_version` is set (currently 3); new columns on existing tables go in `db.MIGRATIONS` (version → columns, added with ALTER if missing).
 - `data/` is gitignored, generated output: the DB; `docs/` (originals plus extracted `.txt`); `dossiers/` (html/md/pdf plus `notes/*.json`); `reports/`; `inbox/`; `tmp/`.
 
 **Instrument keys.** The Eastmoney `secid` keys all price data:
@@ -59,9 +59,9 @@ uv run stock screen refresh|run|show|promote|themes|eval        # screener: HK C
 - Users add material via `data/inbox/<company>/` (imported by `stock run`), `stock docs add`, `stock data add` and `stock note`.
 
 **LLM layer** (llm.py).
-- Tasks (`triage`, `stock_brief`, `market_brief`, `profile`, `research`, `dossier`, `monitor`) route to profiles via `llm.tasks`. Protocols: `anthropic`, `openai` (any compatible endpoint) and `mock`.
+- Tasks (`triage`, `stock_brief`, `market_brief`, `profile`, `research`, `dossier`, `monitor`, `tracker`, `chat`, `screen`, `screen_theme`) route to profiles via `llm.tasks`. Protocols: `anthropic`, `openai` (any compatible endpoint) and `mock`.
 - `complete()`: JSON-schema output plus a pydantic `validate` hook, retried once with the parse error appended. Truncated text is auto-continued up to `max_continuations` times.
-- `run_agent()`: the tool loop, using native tool calls or a `<tool_call>` text protocol (`tool_mode: text`).
+- `run_agent()`: the tool loop, using native tool calls or a `<tool_call>` text protocol (`tool_mode: text`). Optional `history` (prior text-only user/assistant turns) is placed before the current user message.
 - Fallback: retryable failures (connection errors, 402/403/408/409/429/5xx) move down the profile's `fallback` chain. A failed profile is tried last for the next 120 s.
 - Every call is logged to `llm_calls`.
 - `mock` fabricates schema-valid JSON and echoes any `id=` values in the prompt; the tests rely on this.
@@ -91,6 +91,16 @@ uv run stock screen refresh|run|show|promote|themes|eval        # screener: HK C
   5. Materiality ≥ `tracker.redo_materiality` judged material, or thesis broken → `queue_redo` inserts a `dossier` job (cooldown `redo_cooldown_days`); `cmd_dossier` re-baselines tracked companies after saving the new dossier. `dossier.previous_revisions()` feeds revisions since the last dossier into the next one.
 - **Jobs & scheduler** (jobs.py, jobrun.py, scheduler.py, cron.py): the WebUI and scheduler may only run tasks registered in `jobs.TASKS` (fixed argv, validated company ids and flags, no shell). `JobRunner` (thread in `stock web`) launches `python -m stockagent.jobrun <id>`, which runs the CLI in-process and writes its own exit status; groups `pipeline` and `dossier` are mutually exclusive (also checked against the file locks). Free-text input (notes, manual data, uploads) is handled in the web process, never passed as argv.
 - **WebUI** (web/): FastAPI + Jinja2, server-rendered, vanilla JS/CSS, SVG chart built in Python. Pages read the DB only (no network). Config edits go through `web/yamledit.py` (ruamel round-trip, comments kept, codes written as double-quoted strings, full validation, backup, etag conflict check); `.env` edits only accept names ending `_KEY/_TOKEN/_SECRET/_WEBHOOK`.
+- **Report chat** (chat.py, web/chat_views.py, report page sidebar): the LLM explains a dossier; it is an explainer, not a second analyst.
+  - Context: rules, full `report_md` (only key sections if over `max_input_chars`), card, and valuation baseline/revisions/live model. Uses `run_agent("chat")` with a `ToolBox` whitelist. The `report_notes` tool (chat only) searches the report body, `notes_json` and `tool_log_json`. `web_search` is dropped while the dossier lock is held.
+  - Answers run in a `ThreadPoolExecutor` on `app.state.chat_pool` inside `stock web`. Free text never goes to jobrun argv. On startup, `stock web` marks leftover pending messages as errors.
+  - Streaming: `run_agent(on_event=...)` switches the openai/anthropic loops to streaming requests. They emit `thinking`/`text` deltas: the OpenAI path reads `reasoning_content`, and `StreamSplitter` splits `<think>` tags and hides text-protocol `<tool_call>` blocks. They emit `restart` before a fallback profile. The chat tool wrapper adds `tool`/`tool_result`. Events go to an in-memory `chat.Trace` (per message id, kept 10 min after done).
+  - `/chats/msg/{id}/events` streams the trace as SSE (resumes from `Last-Event-ID`) and ends with an `event: final` carrying the sanitized HTML. Deltas are shown with `textContent` only.
+  - `chat.segments` merges the events into `trace_json`, which was added by the first `MIGRATIONS` entry (schema v2).
+  - The per-question `web_search` flag drops `web_search` and `fetch_url`.
+  - After each answer, `chat.checks` runs in code with no LLM call. It matches each 「」 quote tagged 【报告…】 verbatim against the report (normalized) and traces numbers with `verify.check`. The result is stored in `checks_json`.
+  - Revision page chat: `chats.revision_id` (schema v3) adds the `chat.revision_context(rev)` block and `REVISION_RULES`. 【修正…】 quotes are checked against that block and 【报告…】 quotes against the report (`chat.tagged_quotes`). The report page lists only chats without a `revision_id`.
+  - Chats never feed back: the `chats`/`chat_messages` tables are not tracker evidence and not dossier context.
 - **Screener** (`screen/`, `stock screen`, WebUI 选股): depends on the core; the core never imports it. Own tables (`screen_*`, created by `screen.store.ensure`), own `screen` lock and job group.
   - L0 `universe.py`: 港股通 list + A-share valuation snapshot + statements, all via `sources/emscreen.py` bulk datacenter queries (never push2 `clist`: it rate-limits hard and then breaks single quotes too). `emscreen.rows_all` requires a unique sort key; unsorted datacenter paging drops and duplicates rows. A-share statements are cached per report period in `screen_bulk`.
   - Statement shapes come from `emdata.hk_fcf_from_rows` / `a_fcf_from_rows` (same as `fcf_data`); metrics from `fcf.metrics` (shared with the `fcf_yield` tool). `fcf.capex_checked` replaces near-zero HK capex with net investing outflow and flags it.

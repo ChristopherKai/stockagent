@@ -164,6 +164,16 @@ class TrackerConfig(BaseModel):
     redo_cooldown_days: int = 3         # 同一公司自动重跑深度报告的冷却天数
 
 
+class ChatConfig(BaseModel):
+    """报告研读对话（WebUI 报告页）：讲解深度报告，不改报告结论，也不作为追踪修正的依据。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    web_search: bool = True             # 对话可用网页搜索（深度报告运行期间自动暂停，避免争抢搜索源）
+    max_steps: int = 8                  # 每次回答最多调用工具的轮数
+    max_turns: int = 20                 # 追问时带上最近多少轮问答（另受 profile 的 max_input_chars 限制）
+
+
 class ScreenConfig(BaseModel):
     """选股器（stock screen）：全市场初筛 → 代码打分 → 模型快筛 → 人工点选送深研。输出是研究候选，不是买卖建议。"""
 
@@ -260,6 +270,7 @@ class Settings(BaseModel):
     report: ReportConfig = Field(default_factory=ReportConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
+    chat: ChatConfig = Field(default_factory=ChatConfig)
     screen: ScreenConfig = Field(default_factory=ScreenConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)

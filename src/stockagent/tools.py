@@ -23,7 +23,7 @@ from .config import Company, Listing
 from .docs import DOC_TYPES, read_document_text
 from .sources import eastmoney, emdata, tencent, web
 from .triage import DIRECTIONS, event_label
-from .utils import big_num, fmt_local, iso, num, pct, to_simplified, utcnow
+from .utils import big_num, fmt_local, iso, lock_holder, num, pct, to_simplified, utcnow
 
 
 
@@ -545,6 +545,11 @@ class ToolBox:
                  _obj({"days": {"type": "integer"}, "min_materiality": {"type": "integer"}}, []),
                  self.company_events),
             Tool("manual_data", "查询使用者手动补充的数据（公司指标，以及行业/宏观指标）。", _obj({}, []), self.manual_data),
+            Tool("report_notes",
+                 "检索本公司深度报告的正文、背后的研究笔记，以及写报告时的工具调用记录（当时查到的原始数据、推理与出处），"
+                 "用于回答「报告里这个数字、这个判断从哪来」。多个关键词用空格分隔；dossier_id 不填 = 最新一份报告。",
+                 _obj({"query": {"type": "string"}, "dossier_id": {"type": "integer"}, "top_k": {"type": "integer"}}, ["query"]),
+                 self.report_notes),
             Tool("web_search",
                  "网页搜索，用于查行业数据、竞争对手、政策、卖方观点等。结果只是线索，重要数字要用 fetch_url 打开原文或与年报交叉核实。",
                  _obj({"query": {"type": "string"}, "max_results": {"type": "integer"}}, ["query"]),
@@ -840,6 +845,48 @@ class ToolBox:
         return "\n".join(f"{scope}｜{m['metric']}｜{m['period']}｜{m['value']}{m['unit'] or ''}｜{m['note'] or ''}｜{m['source'] or ''}"
                          for scope, m in rows)
 
+    def report_notes(self, query: str, dossier_id: int | None = None, top_k: int = 5) -> str:
+        d = self.app.db.dossier(int(dossier_id)) if dossier_id else self.app.db.latest_dossier(self.company.id)
+        if d is None or d["company_id"] != self.company.id:
+            return f"错误：本公司没有编号为 {dossier_id} 的深度报告" if dossier_id else "本公司还没有深度报告"
+        terms = [to_simplified(t) for t in re.split(r"[\s,，;；、]+", query) if t]
+        if not terms:
+            return "错误：query 为空"
+        chunks = []  # (出处, 原文)
+        section = ""
+        for para in re.split(r"\n\s*\n", d.get("report_md") or ""):
+            if m := re.match(r"#+\s*(?:§\s*)?(.+)", para.strip()):
+                section = m.group(1).strip()[:40]
+            if para.strip():
+                chunks.append((f"报告正文·{section}" if section else "报告正文", para.strip()))
+        for note in json.loads(d.get("notes_json") or "{}").values():
+            for para in re.split(r"\n\s*\n", note.get("text") or ""):
+                if para.strip():
+                    chunks.append((f"研究笔记·{note.get('title', '')}", para.strip()))
+        for i, x in enumerate(json.loads(d.get("tool_log_json") or "[]"), 1):
+            args = json.dumps(x.get("args") or {}, ensure_ascii=False)[:200]
+            chunks.append((f"研究过程 #{i}·{x.get('section') or '—'}·{x.get('tool')}（{args}）", str(x.get("result") or "")))
+        simple = [to_simplified(t) for _, t in chunks]
+        df = [sum(1 for t in simple if k in t) for k in terms]
+        idf = [math.log((len(chunks) + 1) / (n + 1)) + 1 for n in df]
+        hits = []
+        for (src, text), low in zip(chunks, simple):
+            counts = [low.count(k) for k in terms]
+            if not any(counts):
+                continue
+            score = sum(w * c * 2.2 / (c + 1.2) for w, c in zip(idf, counts) if c) * (1.5 if all(counts) else 1)
+            hits.append((score, src, text, low))
+        if not hits:
+            return f"深度报告 #{d['id']} 的正文、研究笔记与研究过程中没有找到「{query}」"
+        hits.sort(key=lambda h: -h[0])
+        out = []
+        for _, src, text, low in hits[: max(1, min(int(top_k), 10))]:
+            rare = max((k for k in terms if k in low), key=lambda k: idf[terms.index(k)], default=terms[0])
+            pos = max(0, low.find(rare))
+            body = text if len(text) == len(low) else low
+            out.append(f"〔深度报告 #{d['id']} {src}〕" + re.sub(r"\s+", " ", body[max(0, pos - 200): pos + 600]).strip())
+        return "\n\n".join(out)
+
     def web_search(self, query: str, max_results: int = 8) -> str:
         res, source = web.search(self.app.session, query, max(1, min(int(max_results), 10)), self.web_providers)
         if not res:
@@ -850,6 +897,11 @@ class ToolBox:
 
     def fetch_url(self, url: str, max_chars: int = 4000) -> str:
         return web.fetch_text(self.app.session, url, max(500, min(int(max_chars), self.max_chars)))
+
+
+def dossier_running(app: App) -> bool:
+    """深度报告正在运行（持有 dossier 锁）：它的并行 agent 已占满免费搜索源，其他 agent 应暂停网页搜索。"""
+    return lock_holder(app.lock_path("dossier")) is not None
 
 
 def tool_log_markdown(log: list[dict], limit: int = 60) -> str:

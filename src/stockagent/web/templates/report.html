@@ -2,13 +2,16 @@
 {% from "_macros.html" import thesis_badge, kind_badge, delta %}
 {% block title %}{{ c.name }} · 深度报告（当前版本）{% endblock %}
 {% block content %}
+<div class="report-layout" data-chat-layout>
+<div class="report-main">
 <section class="card">
   <div class="card-head">
     <div><h1>{{ c.name }} · 深度报告 #{{ d.id }}</h1>
       <div class="muted small">{{ d.created_at | when }} · 模型 {{ d.model or '—' }}
         {% if d.html_path %} · <a href="/files/dossiers/{{ d.html_path.split('/')[-1] }}" target="_blank">原始 HTML</a>{% endif %}
         {% if d.pdf_path %} · <a href="/files/dossiers/{{ d.pdf_path.split('/')[-1] }}" target="_blank">PDF</a>{% endif %}</div></div>
-    <a class="btn ghost" href="/c/{{ c.id }}">返回标的页面</a>
+    <div class="btns"><button type="button" class="btn small" data-chat-toggle>研读对话</button>
+      <a class="btn ghost small" href="/c/{{ c.id }}">返回标的页面</a></div>
   </div>
   {% set changed = revisions | selectattr('kind', 'equalto', 'revision') | list %}
   {% if baseline %}
@@ -28,7 +31,7 @@
   {% endif %}
 </section>
 <section class="card">
-  <div class="md report">{{ d.report_md | md }}</div>
+  <div class="md report" data-report-body>{{ d.report_md | md }}</div>
 </section>
 <section class="card">
   <h2>跟踪卡</h2>
@@ -40,4 +43,8 @@
   </tbody></table></div>
   {% endif %}
 </section>
+</div>
+{% set chat_title = "研读对话" %}{% set chat_dossier = d.id %}{% set chat_revision = "" %}{% set chat_page = "report" %}
+{% include "_chat.html" %}
+</div>
 {% endblock %}

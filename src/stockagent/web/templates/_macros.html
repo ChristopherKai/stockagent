@@ -20,27 +20,29 @@
 {%- endmacro %}
 
 {# 估值模型表：rows 为 views._compare 的结果（当前模型与基线逐情景对比） #}
-{% macro valuation_table(model, rows, target_label, live_target, currency, mode='expected') -%}
+{% macro valuation_table(model, rows, target_label, live_target, currency, mode='expected', was='基线', drivers_row=False) -%}
 <div class="tblwrap">
 <table class="tbl model">
   <thead><tr>
     <th>情景</th>
     {% if model.method == 'matrix' %}<th>{{ model.driver_label }}</th><th>{{ model.multiple_label }}</th>{% endif %}
-    <th class="r">股价（{{ currency }}）</th><th class="r">概率</th><th>报告原区间</th><th>关键驱动</th>
+    <th class="r">股价（{{ currency }}）</th><th class="r">概率</th><th>报告原区间</th>{% if not drivers_row %}<th>关键驱动</th>{% endif %}
   </tr></thead>
   <tbody>
   {% for x in rows %}
     <tr>
       <td><b>{{ x.label }}</b></td>
       {% if model.method == 'matrix' %}
-      <td class="r">{{ x.s.driver | num }}{% if x.b and x.b.driver != x.s.driver %}<div class="was">基线 {{ x.b.driver | num }}</div>{% endif %}</td>
-      <td class="r">{{ x.s.multiple | num }}{% if x.b and (x.b.multiple - x.s.multiple) | abs > 0.005 %}<div class="was">基线 {{ x.b.multiple | num }}</div>{% endif %}</td>
+      <td class="r">{{ x.s.driver | num }}{% if x.b and x.b.driver != x.s.driver %}<div class="was">{{ was }} {{ x.b.driver | num }}</div>{% endif %}</td>
+      <td class="r">{{ x.s.multiple | num }}{% if x.b and (x.b.multiple - x.s.multiple) | abs > 0.005 %}<div class="was">{{ was }} {{ x.b.multiple | num }}</div>{% endif %}</td>
       {% endif %}
-      <td class="r"><b>{{ x.price | num }}</b>{% if x.bprice and (x.bprice - x.price) | abs > 0.005 %}<div class="was">基线 {{ x.bprice | num }} {{ delta(x.price, x.bprice) }}</div>{% endif %}</td>
-      <td class="r">{{ x.prob | pct(0, false) }}{% if x.bprob is not none and (x.bprob - x.prob) | abs > 0.0005 %}<div class="was">基线 {{ x.bprob | pct(0, false) }}</div>{% endif %}</td>
+      <td class="r"><b>{{ x.price | num }}</b>{% if x.bprice and (x.bprice - x.price) | abs > 0.005 %}<div class="was">{{ was }} {{ x.bprice | num }} {{ delta(x.price, x.bprice) }}</div>{% endif %}</td>
+      <td class="r">{{ x.prob | pct(0, false) }}{% if x.bprob is not none and (x.bprob - x.prob) | abs > 0.0005 %}<div class="was">{{ was }} {{ x.bprob | pct(0, false) }}</div>{% endif %}</td>
       <td class="muted">{{ x.s.low | num }}–{{ x.s.high | num }}</td>
-      <td class="drivers">{{ x.s.drivers_text }}</td>
+      {% if not drivers_row %}<td class="drivers">{{ x.s.drivers_text }}</td>{% endif %}
     </tr>
+    {% if drivers_row and x.s.drivers_text %}<tr class="drivers-row"><td colspan="{{ 6 if model.method == 'matrix' else 4 }}">
+      <span class="muted">关键驱动：</span>{{ x.s.drivers_text }}</td></tr>{% endif %}
   {% endfor %}
   </tbody>
 </table>

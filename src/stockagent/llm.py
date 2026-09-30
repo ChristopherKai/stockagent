@@ -14,6 +14,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Callable
 
 from .config import LLMConfig, LLMProfile, TaskRoute
@@ -77,6 +78,43 @@ def strip_think(text: str) -> str:
     if "</think>" in text:
         text = text.split("</think>", 1)[1]
     return text.strip()
+
+
+_STREAM_TAGS = {"<think>": "thinking", "</think>": "text", "<tool_call>": "hidden", "</tool_call>": "text"}
+
+
+class StreamSplitter:
+    """把流式正文分成「思考」与「正文」事件（给界面实时展示用；最终答案仍按完整文本处理）。
+    <think>…</think> 里的内容算思考；hide_tool_calls 时（文本工具协议）<tool_call>…</tool_call> 不展示。标签可能被拆在两个分片里。"""
+
+    def __init__(self, emit: Callable[[dict], None], hide_tool_calls: bool = False):
+        self.emit = emit
+        self.hide = hide_tool_calls
+        self.mode = "text"
+        self.buf = ""
+
+    def _out(self, text: str) -> None:
+        if text and self.mode != "hidden":
+            self.emit({"type": self.mode, "text": text})
+
+    def feed(self, chunk: str) -> None:
+        self.buf += chunk
+        while self.buf:
+            hits = [(i, t) for t in _STREAM_TAGS if (i := self.buf.find(t)) >= 0 and (self.hide or "tool_call" not in t)]
+            if hits:
+                i, tag = min(hits)
+                self._out(self.buf[:i])
+                self.mode = _STREAM_TAGS[tag]
+                self.buf = self.buf[i + len(tag):]
+                continue
+            keep = max((k for t in _STREAM_TAGS for k in range(1, len(t)) if self.buf.endswith(t[:k])), default=0)  # 可能是半个标签
+            self._out(self.buf[: len(self.buf) - keep])
+            self.buf = self.buf[len(self.buf) - keep:]
+            return
+
+    def flush(self) -> None:
+        self._out(self.buf)
+        self.buf = ""
 
 
 def parse_tool_calls(text: str) -> list[tuple[str, dict]]:
@@ -288,26 +326,41 @@ class LLM:
         max_steps: int = 12,
         max_tokens: int = 8000,
         profile: str | None = None,
+        history: list[dict] | None = None,
+        on_event: Callable[[dict], None] | None = None,
     ) -> LLMResult:
         """让模型在 max_steps 轮内调用工具，然后给出最终答案。
-        tools: [{"name", "description", "parameters"(JSON Schema)}]；call_tool(name, args) 返回给模型看的文本。"""
+        tools: [{"name", "description", "parameters"(JSON Schema)}]；call_tool(name, args) 返回给模型看的文本。
+        history：多轮对话中之前的轮次 [{"role": "user"|"assistant", "content": 文本}]，放在本轮 user 之前（只含文本，不回放工具调用）。
+        on_event：给出时改用流式请求，边生成边回调 {"type": "thinking"|"text", "text": 片段}（只用于展示；
+        换用 fallback 模型前回调 {"type": "restart"}）。返回值与非流式相同。"""
         name, _, route = self._resolve(task, profile)
+        prior = [{"role": m["role"], "content": m["content"]} for m in history or [] if m.get("content")]
+        tries = 0
 
         def attempt(pname: str, prof: LLMProfile) -> LLMResult:
+            nonlocal tries
+            tries += 1
+            if on_event and tries > 1:
+                on_event({"type": "restart", "profile": pname})
             mt = min(route.max_tokens or max_tokens, prof.max_tokens)
             if prof.protocol == "anthropic":
-                return self._agent_anthropic(task, pname, prof, route, system, user, tools, call_tool, max_steps, mt)
+                return self._agent_anthropic(task, pname, prof, route, system, user, tools, call_tool, max_steps, mt, prior, on_event)
             if prof.protocol == "openai":
-                return self._agent_openai(task, pname, prof, system, user, tools, call_tool, max_steps, mt)
-            return self._agent_mock(task, pname, prof, tools, call_tool)
+                return self._agent_openai(task, pname, prof, system, user, tools, call_tool, max_steps, mt, prior, on_event)
+            return self._agent_mock(task, pname, prof, tools, call_tool, on_event)
 
         return self._with_fallback(name, attempt, use_fallback=profile is None)
 
-    def _openai_create(self, name: str, prof: LLMProfile, kwargs: dict):
+    def _openai_create(self, name: str, prof: LLMProfile, kwargs: dict, on_event=None):
+        """on_event 给出时用流式请求，并把分片拼成与非流式相同形状的结果（choices[0].message / finish_reason）。"""
+        import httpx
         import openai
 
         client = self._client(name, prof)
         try:
+            if on_event is not None:
+                return self._openai_stream(client, prof, kwargs, on_event)
             resp = client.chat.completions.create(**kwargs)
         except openai.AuthenticationError as e:
             raise LLMError(f"[{name}] 认证失败，请检查 API key：{e.message}") from e
@@ -321,6 +374,8 @@ class LLM:
             raise LLMError(f"[{name}] API 错误 {e.status_code}：{e.message}", retryable=_retryable_status(e.status_code)) from e
         except openai.APIConnectionError as e:
             raise LLMError(f"[{name}] 网络连接失败：{e}", retryable=True) from e
+        except (openai.APIError, httpx.HTTPError) as e:  # 流式输出中途断开
+            raise LLMError(f"[{name}] 接口中断：{e}", retryable=True) from e
         if not resp.choices:
             raise LLMError(f"[{name}] 返回为空")
         u = resp.usage
@@ -328,12 +383,51 @@ class LLM:
                  "cache_read": 0, "cache_write": 0}
         return resp, usage, resp.model or prof.model
 
-    def _agent_openai(self, task, name, prof: LLMProfile, system, user, tools, call_tool, max_steps, max_tokens) -> LLMResult:
+    @staticmethod
+    def _openai_stream(client, prof: LLMProfile, kwargs: dict, on_event):
+        stream = client.chat.completions.create(**kwargs, stream=True, stream_options={"include_usage": True})
+        split = StreamSplitter(on_event, hide_tool_calls=prof.tool_mode != "native")
+        content: list[str] = []
+        calls: dict[int, dict] = {}
+        finish, model, u = None, prof.model, None
+        for chunk in stream:
+            model = getattr(chunk, "model", None) or model
+            u = getattr(chunk, "usage", None) or u
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            d = choice.delta
+            extra = getattr(d, "model_extra", None) or {}
+            thinking = extra.get("reasoning_content") or extra.get("reasoning")  # DeepSeek、Qwen 等把思考放在单独字段
+            if isinstance(thinking, str) and thinking:
+                on_event({"type": "thinking", "text": thinking})
+            if d.content:
+                content.append(d.content)
+                split.feed(d.content)
+            for tc in d.tool_calls or []:
+                slot = calls.setdefault(tc.index or 0, {"id": None, "name": "", "arguments": ""})
+                slot["id"] = tc.id or slot["id"]
+                if tc.function is not None:
+                    if tc.function.name and tc.function.name != slot["name"]:
+                        slot["name"] += tc.function.name
+                    slot["arguments"] += tc.function.arguments or ""
+            finish = choice.finish_reason or finish
+        split.flush()
+        tool_calls = [SimpleNamespace(id=c["id"] or f"call_{i}", function=SimpleNamespace(name=c["name"], arguments=c["arguments"] or "{}"))
+                      for i, c in sorted(calls.items())]
+        message = SimpleNamespace(content="".join(content), tool_calls=tool_calls or None)
+        resp = SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish)], model=model)
+        usage = {"input_tokens": getattr(u, "prompt_tokens", None), "output_tokens": getattr(u, "completion_tokens", None),
+                 "cache_read": 0, "cache_write": 0}
+        return resp, usage, model
+
+    def _agent_openai(self, task, name, prof: LLMProfile, system, user, tools, call_tool, max_steps, max_tokens,
+                      history: list[dict] | None = None, on_event=None) -> LLMResult:
         native = prof.tool_mode == "native"
         sys_text = "\n\n".join(s for s in system if s)
         if not native:
             sys_text += TOOL_PROTOCOL.format(tools=json.dumps(tools, ensure_ascii=False))
-        messages: list[dict] = [{"role": "system", "content": sys_text}, {"role": "user", "content": user}]
+        messages: list[dict] = [{"role": "system", "content": sys_text}, *(history or []), {"role": "user", "content": user}]
         oa_tools = [{"type": "function", "function": t} for t in tools]
         totals = {"input_tokens": 0, "output_tokens": 0}
         model = prof.model
@@ -352,7 +446,7 @@ class LLM:
             if native:  # 不再允许调用工具时仍带上定义（历史里有工具调用），但 tool_choice 设为 none
                 kwargs["tools"] = oa_tools
                 kwargs["tool_choice"] = "none" if no_tools else "auto"
-            resp, usage, model = self._logged(task, name, prof, lambda kw=kwargs: self._openai_create(name, prof, kw))
+            resp, usage, model = self._logged(task, name, prof, lambda kw=kwargs: self._openai_create(name, prof, kw, on_event))
             for k in totals:
                 totals[k] += usage.get(k) or 0
             choice = resp.choices[0]
@@ -399,8 +493,9 @@ class LLM:
             messages.append({"role": "user", "content": "请继续：需要资料就调用工具，否则直接给出最终答案。"})
 
     def _agent_anthropic(self, task, name, prof: LLMProfile, route: TaskRoute, system, user, tools, call_tool,
-                         max_steps, max_tokens) -> LLMResult:
+                         max_steps, max_tokens, history: list[dict] | None = None, on_event=None) -> LLMResult:
         import anthropic
+        import httpx
 
         client = self._client(name, prof)
         sys_blocks = [{"type": "text", "text": s} for s in system if s]
@@ -415,13 +510,15 @@ class LLM:
             base["thinking"] = {"type": "adaptive"}
         if prof.temperature is not None:
             base["temperature"] = prof.temperature
-        messages: list[dict] = [{"role": "user", "content": user}]
+        messages: list[dict] = [*(history or []), {"role": "user", "content": user}]
         totals = {"input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_write": 0}
         model = prof.model
 
         def create(kwargs):
             try:
-                if prof.refusal_fallback:
+                if on_event is not None:
+                    msg = stream(kwargs)
+                elif prof.refusal_fallback:
                     msg = client.beta.messages.create(betas=[FALLBACK_BETA], fallbacks="default", **kwargs)
                 else:
                     msg = client.messages.create(**kwargs)
@@ -429,11 +526,26 @@ class LLM:
                 raise LLMError(f"[{name}] API 错误 {e.status_code}：{e.message}", retryable=_retryable_status(e.status_code)) from e
             except anthropic.APIConnectionError as e:
                 raise LLMError(f"[{name}] 网络连接失败：{e}", retryable=True) from e
+            except (anthropic.APIError, httpx.HTTPError) as e:  # 流式输出中途断开
+                raise LLMError(f"[{name}] 接口中断：{e}", retryable=True) from e
             u = msg.usage
             usage = {"input_tokens": u.input_tokens, "output_tokens": u.output_tokens,
                      "cache_read": getattr(u, "cache_read_input_tokens", None) or 0,
                      "cache_write": getattr(u, "cache_creation_input_tokens", None) or 0}
             return msg, usage, msg.model
+
+        def stream(kwargs):
+            ctx = (client.beta.messages.stream(betas=[FALLBACK_BETA], fallbacks="default", **kwargs) if prof.refusal_fallback
+                   else client.messages.stream(**kwargs))
+            with ctx as s:
+                for ev in s:
+                    if ev.type != "content_block_delta":
+                        continue
+                    if ev.delta.type == "text_delta":
+                        on_event({"type": "text", "text": ev.delta.text})
+                    elif ev.delta.type == "thinking_delta":
+                        on_event({"type": "thinking", "text": ev.delta.thinking})
+                return s.get_final_message()
 
         tool_rounds = conts = 0
         acc, finishing = "", False
@@ -474,13 +586,18 @@ class LLM:
                 results.append(block)
             messages.append({"role": "user", "content": results})
 
-    def _agent_mock(self, task, name, prof, tools, call_tool) -> LLMResult:
+    def _agent_mock(self, task, name, prof, tools, call_tool, on_event=None) -> LLMResult:
         """模拟：调用一次 calculate（如有）后给出固定答案，用于测试流程。"""
+        text = "（模拟研究笔记，未调用真实模型）"
+        if on_event:
+            on_event({"type": "thinking", "text": "（模拟思考）"})
         if any(t["name"] == "calculate" for t in tools):
             call_tool("calculate", {"code": "1 + 1"})
         self._logged(task, name, prof, lambda: (None, {"input_tokens": 0, "output_tokens": 0}, "mock"))
-        return LLMResult(text="（模拟研究笔记，未调用真实模型）", data=None, model="mock", profile=name,
-                         usage={"input_tokens": 0, "output_tokens": 0})
+        if on_event:
+            for i in range(0, len(text), 6):
+                on_event({"type": "text", "text": text[i:i + 6]})
+        return LLMResult(text=text, data=None, model="mock", profile=name, usage={"input_tokens": 0, "output_tokens": 0})
 
     def _client(self, name: str, prof: LLMProfile):
         with self._lock:

@@ -24,9 +24,9 @@ from .app import SOURCE_LABEL, App
 from .config import Company
 from .docs import DOC_TYPES
 from .llm import LLMError
-from .tools import ToolBox
+from .tools import ToolBox, dossier_running
 from .triage import DIRECTIONS, event_label, listing_market, short_id
-from .utils import fmt_local, iso, lock_holder, log, parse_iso, pct, sha1, today_local, utcnow
+from .utils import fmt_local, iso, log, parse_iso, pct, sha1, today_local, utcnow
 from .valuation import (
     FACT_PATHS, TARGET_LABEL, ValuationModel, apply_op, build_baseline, check_value, describe, fmt, get_values,
     load_model, path_label, paths, refresh_fx, set_value,
@@ -393,7 +393,7 @@ def revisions_context(app: App, company: Company, since_id: int, limit: int = 6)
 def _allowed_tools(app: App) -> tuple[list[str], str]:
     if not app.settings.tracker.web_search:
         return [t for t in TOOLS if t != "web_search"], "按配置不使用网页搜索"
-    if lock_holder(app.lock_path("dossier")) is not None:
+    if dossier_running(app):
         return [t for t in TOOLS if t != "web_search"], "深度报告正在运行，本次修正暂停网页搜索（避免与它争抢搜索源）"
     return list(TOOLS), ""
 

@@ -240,3 +240,84 @@ def test_upload_document_and_limits(web):
     web.holder.app.settings.web.upload_max_mb = 0  # 上限 1 MB（留 1 MB 给表单字段）
     r = post(web, "/c/dongyue/upload", {}, files={"file": ("big.txt", b"a" * (2 * 1024 * 1024), "text/plain")})
     assert r.status_code == 413
+
+
+# ---------------------------------------------------------------- 报告研读对话
+
+class SyncPool:
+    """测试里同步执行回答（生产中是后台线程池）。"""
+
+    def submit(self, fn, *args):
+        fn(*args)
+
+
+def test_report_chat_flow(web, monkeypatch):
+    from stockagent.llm import LLMResult
+
+    web.app.state.chat_pool = SyncPool()
+    app = web.holder.app
+    did = app.db.latest_dossier("dongyue")["id"]
+    page = web.get("/c/dongyue/report").text
+    assert "data-chat" in page and "研读对话" in page and "data-report-body" in page and "引文会与原文逐字核对" not in page
+    url = "/c/dongyue/chats"
+    body = {"dossier_id": did, "question": "估值怎么算？"}
+    assert web.post(url, json=body).status_code == 403  # 没有 CSRF token
+    hdr = {"X-CSRF-Token": token(web)}
+    assert web.post(url, json=body, headers={**hdr, "origin": "http://evil.example"}).status_code == 403
+    assert web.post(url, json={**body, "question": " "}, headers=hdr).json()["error"] == "问题不能为空"
+
+    seen = {}
+
+    def fake(task, system, user, tools, call_tool, **kw):
+        seen["tools"] = [t["name"] for t in tools]
+        kw["on_event"]({"type": "thinking", "text": "先看报告"})
+        call_tool("calculate", {"code": "1 + 1"})
+        kw["on_event"]({"type": "text", "text": "<script>x</script>"})
+        return LLMResult(text="【报告·核心洞见】「配额是行政性供给刚性」<script>alert(1)</script>净利 99.9 亿",
+                         data=None, model="fake", profile="mock", usage={})
+
+    monkeypatch.setattr(app.llm, "run_agent", fake)
+    r = web.post(url, json={**body, "quote": "配额是行政性供给刚性", "web_search": False}, headers=hdr)
+    assert r.status_code == 200, r.text
+    assert "web_search" not in seen["tools"] and "fetch_url" not in seen["tools"]
+    chat_id, mid = r.json()["chat_id"], r.json()["message_id"]
+    m = web.get(f"/chats/msg/{mid}").json()
+    assert m["status"] == "done" and "<script" not in m["html"] and m["tools"] == 1
+    assert [s["type"] for s in m["trace"]] == ["note", "thinking", "tool", "text"]
+    sse = web.get(f"/chats/msg/{mid}/events")  # 回答已结束：补发全部事件，最后是 final
+    assert sse.headers["content-type"].startswith("text/event-stream")
+    assert '"type": "tool"' in sse.text and sse.text.rstrip().split("\n\n")[-1].startswith("id: ")
+    assert "event: final" in sse.text and sse.text.index('"type": "thinking"') < sse.text.index("event: final")
+    assert "event: final" in web.get(f"/chats/msg/{mid}/events", headers={"Last-Event-ID": "99"}).text
+    assert m["checks"]["quotes"] == [{"text": "配额是行政性供给刚性", "source": "report", "found": True}] and "99.9亿" in m["checks"]["unverified"]
+    detail = web.get(f"/chats/{chat_id}").json()
+    assert [x["role"] for x in detail["messages"]] == ["user", "assistant"] and detail["messages"][0]["quote"] == "配额是行政性供给刚性"
+    assert web.get(f"/c/dongyue/chats?dossier={did}").json()["chats"][0]["id"] == chat_id
+    assert "估值怎么算？" in web.get("/c/dongyue/report").text  # 历史对话出现在下拉框
+
+    app.db.add_chat_message(chat_id, "assistant", status="pending")
+    assert web.post(f"/chats/{chat_id}/ask", json={"question": "追问"}, headers=hdr).status_code == 409
+    assert web.post(f"/chats/{chat_id}/delete", json={}, headers=hdr).json() == {"ok": True}
+    assert web.get(f"/chats/{chat_id}").status_code == 404 and app.db.chat_messages(chat_id) == []
+    assert web.get("/chats/msg/999999").status_code == 404
+
+
+def test_revision_page_layout_and_chat(web):
+    from test_chat import EVENTS
+
+    web.app.state.chat_pool = SyncPool()
+    app = web.holder.app
+    rid = app.db.latest_revision("dongyue")["id"]
+    app.db._exec("UPDATE revisions SET events_json=?, notes_md=? WHERE id=?",
+                 (__import__("json").dumps(EVENTS, ensure_ascii=False), "研究笔记正文", rid))
+    page = web.get(f"/c/dongyue/revisions/{rid}").text
+    assert "研讨对话" in page and f'data-revision="{rid}"' in page and 'data-page="revision"' in page
+    assert page.index("修正研究笔记") < page.index("本次评估的依据")
+    assert page.index('id="ev-ccc"') < page.index('id="ev-bbb"') < page.index('id="ev-K7"') < page.index('id="ev-aaa"')
+    assert "不影响估值的依据（1 条）" in page and "引文会与原文逐字核对" not in page
+    hdr = {"X-CSRF-Token": token(web)}
+    r = web.post("/c/dongyue/chats", json={"dossier_id": 0, "revision_id": rid, "question": "改了什么？"}, headers=hdr)
+    assert r.status_code == 200, r.text
+    assert web.get(f"/c/dongyue/chats?revision={rid}").json()["chats"][0]["id"] == r.json()["chat_id"]
+    assert "改了什么？" in web.get(f"/c/dongyue/revisions/{rid}").text
+    assert "改了什么？" not in web.get("/c/dongyue/report").text  # 修正页的对话不出现在报告页
