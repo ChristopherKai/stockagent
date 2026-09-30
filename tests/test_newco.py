@@ -8,7 +8,7 @@ import pytest
 
 from stockagent import cli, jobs, newco
 from stockagent.app import App
-from stockagent.sources import emdata
+from stockagent.sources import eastmoney, emdata
 from stockagent.web import yamledit
 from test_web import post, web  # noqa: F401 - fixture
 
@@ -47,6 +47,33 @@ def test_build_entry_from_profile(app, profile):
     assert newco.normalize("hk", "00100.HK") == ("HK", "00100")
 
 
+SUGGEST = {
+    "小鹏": [{"code": "XPEV", "name": "小鹏汽车", "mkt_num": "106", "type": "美股"},
+             {"code": "09868", "name": "小鹏集团-W", "mkt_num": "116", "type": "港股"},
+             {"code": "89868", "name": "小鹏集团-WR", "mkt_num": "116", "type": "港股"},        # 人民币柜台
+             {"code": "13027", "name": "小鹏摩利六乙购C", "mkt_num": "116", "type": "港股"}],  # 窝轮
+    "小鹏集团": [{"code": "XPEV", "name": "小鹏集团", "mkt_num": "106", "type": "美股"},
+                 {"code": "09868", "name": "小鹏集团-W", "mkt_num": "116", "type": "港股"},
+                 {"code": "XPEX", "name": "二倍做多小鹏ETF", "mkt_num": "107", "type": "美股"}],
+}
+
+
+def test_resolve_name_or_code(app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(eastmoney, "suggest", lambda s, q, count=10: calls.append(q) or SUGGEST.get(q, []))
+    assert newco.resolve(app, "2577") == ("HK", "02577", "2577") and newco.resolve(app, "300308")[:2] == ("A", "300308")
+    assert calls == []  # 纯数字不联网
+    assert newco.resolve(app, "小鹏集团") == ("HK", "09868", "小鹏集团-W")  # 同一家公司两地上市：去掉后缀后同名
+    with pytest.raises(ValueError, match="匹配到多家公司"):
+        newco.resolve(app, "小鹏")  # 小鹏汽车 与 小鹏集团 名称不同，不替使用者猜
+    with pytest.raises(ValueError, match="查不到"):
+        newco.resolve(app, "不存在")
+    for bad in ["-rf", "a;b", "x" * 31, ""]:
+        with pytest.raises(ValueError, match="请输入股票名称或代码"):
+            newco.check_query(bad)
+    assert newco.existing_name(app, "測試公司").id == "acme"
+
+
 def test_cli_add_writes_watchlist_and_onboards(app, project, profile, monkeypatch, capsys):
     ran = []
     orig = cli.main
@@ -54,7 +81,8 @@ def test_cli_add_writes_watchlist_and_onboards(app, project, profile, monkeypatc
     cfg = str(project / "config.yaml")
     orig(["-c", cfg, "add", "US", "XPEV", "--dry-run"])
     assert "id=xpeng" in capsys.readouterr().out and App.load(cfg).watchlist.get("xpeng") is None
-    orig(["-c", cfg, "add", "US", "XPEV", "--onboard"])
+    monkeypatch.setattr(eastmoney, "suggest", lambda s, q, count=10: SUGGEST.get(q, []))
+    orig(["-c", cfg, "add", "小鹏集团", "--onboard"])  # 名称：先识别成 HK 09868
     c = App.load(cfg).watchlist.get("xpeng")
     assert c.name == "小鹏集团" and [l.display for l in c.listings] == ["09868.HK", "XPEV"]
     assert "测试公司" in (project / "watchlist.yaml").read_text(encoding="utf-8")  # 原有条目保留
@@ -67,7 +95,8 @@ def test_cli_add_writes_watchlist_and_onboards(app, project, profile, monkeypatc
 def test_add_company_job_validation(app):
     steps, title, cid = jobs.build(app.watchlist, {}, "add_company", listing=("hk", "2577"))
     assert steps == [["add", "HK", "02577", "--onboard"]] and title == "新增公司并初始化：HK 02577" and cid is None
-    for bad in [None, ("HK", "--help"), ("XX", "1")]:
+    assert jobs.build(app.watchlist, {}, "add_company", listing=("", "腾讯控股"))[0] == [["add", "腾讯控股", "--onboard"]]
+    for bad in [None, ("HK", "--help"), ("XX", "1"), ("", "--onboard"), ("", "a b;c")]:
         with pytest.raises(jobs.JobError):
             jobs.build(app.watchlist, {}, "add_company", listing=bad)
     with pytest.raises(jobs.JobError, match="不接受市场与代码"):
@@ -80,6 +109,10 @@ def test_quick_add_page_and_watchlist_reload(web):
     r = post(web, "/companies/quick", {"market": "HK", "code": "189"})
     assert r.status_code == 303 and "已在观察清单中：东岳集团" in unquote(r.headers["location"])
     assert "A 股代码为 6 位数字" in unquote(post(web, "/companies/quick", {"market": "A", "code": "12"}).headers["location"])
+    assert "已在观察清单中：东岳集团" in unquote(post(web, "/companies/quick", {"market": "", "code": "东岳集团"}).headers["location"])
+    assert "已在观察清单中：东岳集团" in unquote(post(web, "/companies/quick", {"market": "", "code": "189"}).headers["location"])
+    assert post(web, "/companies/quick", {"market": "", "code": "腾讯控股"}).headers["location"].startswith("/jobs/")
+    assert web.holder.app.db.jobs(1)[0]["argv"] == [["add", "腾讯控股", "--onboard"]]
     r = post(web, "/companies/quick", {"market": "HK", "code": "2577"})
     assert r.headers["location"].startswith("/jobs/")
     job = web.holder.app.db.jobs(1)[0]

@@ -4,10 +4,10 @@
 <section class="card">
   <div class="card-head"><h2>观察清单</h2><a class="btn ghost" href="/companies/new">+ 手动填写新增</a></div>
   <form method="post" action="/companies/quick" class="quick-add">{{ csrf_field }}
-    <select name="market" aria-label="市场"><option value="HK">港股</option><option value="A">A 股</option><option value="US">美股</option></select>
-    <input name="code" required placeholder="代码，如 2577、300308、XPEV" aria-label="代码" autocomplete="off">
+    <select name="market" aria-label="市场"><option value="">自动识别</option><option value="HK">港股</option><option value="A">A 股</option><option value="US">美股</option></select>
+    <input name="code" required placeholder="名称或代码，如 腾讯控股、2577、300308、XPEV" aria-label="名称或代码" autocomplete="off">
     <button class="btn">一键添加并初始化</button>
-    <span class="muted small">自动查名称、英文名、行业与其他上市地（A+H、港股+美股），再依次抓取资料、下载年报、分级、画像、生成深度报告并开始追踪。</span>
+    <span class="muted small">输入股票名称或代码；自动查名称、英文名、行业与其他上市地（A+H、港股+美股），再依次抓取资料、下载年报、分级、画像、生成深度报告并开始追踪。</span>
   </form>
   <form method="post" action="/companies/track" id="bulk">{{ csrf_field }}</form>
   <div class="tblwrap">

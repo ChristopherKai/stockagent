@@ -191,20 +191,27 @@ async def company_delete(request: Request, cid: str):
 
 @router.post("/companies/quick")
 async def companies_quick(request: Request):
-    """只填市场与代码：提交后台任务，查公司资料写入观察清单，再跑完整的初始化（页面进程不联网）。"""
+    """只填名称或代码（可选市场）：提交后台任务，联网识别并查公司资料写入观察清单，再跑完整的初始化（页面进程不联网）。"""
     app = holder(request).app
     form = await request.form()
+    market, query = (form.get("market") or "").strip(), (form.get("code") or "").strip()
     try:
-        market, code = newco.normalize(form.get("market") or "", form.get("code") or "")
+        if market:
+            market, query = newco.normalize(market, query)
+        else:
+            query = newco.check_query(query)
+            if hit := newco.infer(query):
+                market, query = hit
     except ValueError as e:
         return back("/companies", err=str(e))
-    if c := newco.existing(app, market, code):
-        return back("/companies", err=f"{market} {code} 已在观察清单中：{c.name}")
+    c = newco.existing(app, market, query) if market else newco.existing_name(app, query)
+    if c:
+        return back("/companies", err=f"{query} 已在观察清单中：{c.name}")
     try:
-        jid = jobs.submit(app, "add_company", listing=(market, code), source="web")
+        jid = jobs.submit(app, "add_company", listing=(market, query), source="web")
     except jobs.JobError as e:
         return back("/companies", err=str(e))
-    return back(f"/jobs/{jid}", ok=f"已提交：查询 {market} {code} 的公司资料并加入观察清单，随后自动初始化（深度报告每家数分钟）")
+    return back(f"/jobs/{jid}", ok=f"已提交：识别「{query}」并加入观察清单，随后自动初始化（深度报告每家数分钟）")
 
 
 @router.post("/companies/track")

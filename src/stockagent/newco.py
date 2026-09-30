@@ -11,7 +11,8 @@ from zhconv import convert
 
 from .app import App
 from .config import Company, Listing
-from .sources import emdata
+from .sources import eastmoney, emdata
+from .utils import to_simplified
 
 _NAME_SUFFIX = re.compile(r"-(?:W|SW|B|S|R|WR|SWR|U)$", re.I)  # 港股简称后缀：同股不同权、未盈利生物科技等
 _EN_CUT = re.compile(r"\s*(?:,|\bCo\b\.?|\bInc\b\.?|\bLtd\b\.?|\bLimited\b|\bCorporation\b|\bCorp\b\.?|\bHoldings?\b|\bGroup\b|"
@@ -53,6 +54,64 @@ def normalize(market: str, code: str) -> tuple[str, str]:
     if not _CODE[market].fullmatch(code):
         raise ValueError({"HK": "港股代码为 1–5 位数字", "A": "A 股代码为 6 位数字", "US": "美股代码为字母（如 XPEV）"}[market] + f"：{code}")
     return market, Listing(market=market, code=code).code
+
+
+# 名称或代码（交给后台任务作参数）：中英文、数字与少量符号，不能以 - 开头（避免被当成命令行选项）
+_QUERY = re.compile(r"[0-9A-Za-z\u3400-\u9fff][0-9A-Za-z\u3400-\u9fff·.&()（） \-]{0,29}")
+_MKT_NUM = {"0": "A", "1": "A", "116": "HK", "105": "US", "106": "US", "107": "US"}
+_DERIVATIVE = re.compile(r"ETF|基金|期货|指数|债|购|沽|牛|熊|做多|做空|杠杆|反向|[两二三]倍|\(ADR\)|（ADR）", re.I)
+_A_STOCK = re.compile(r"(?:00|30|60|68|8\d|4\d|92)\d{4}")
+
+
+def check_query(query: str) -> str:
+    q = (query or "").strip()
+    if not _QUERY.fullmatch(q):
+        raise ValueError(f"请输入股票名称或代码（最多 30 个字，不含特殊符号）：{q[:30]}")
+    return q
+
+
+def _base(name: str) -> str:
+    return re.sub(r"\s+", "", _NAME_SUFFIX.sub("", to_simplified(name).strip())).lower()
+
+
+def infer(query: str) -> tuple[str, str] | None:
+    """纯数字不用联网：6 位是 A 股，1–5 位是港股。"""
+    q = query.strip()
+    if re.fullmatch(r"\d{6}", q):
+        return "A", q
+    if re.fullmatch(r"\d{1,5}", q):
+        return normalize("HK", q)
+    return None
+
+
+def resolve(app: App, query: str) -> tuple[str, str, str]:
+    """名称或代码 → (市场, 代码, 名称)。只认正股（剔除窝轮、ETF、期货、ADR、人民币柜台）；名称完全一致的优先；
+    剩下的是几家不同公司时报错，让使用者输入更完整的名称或代码。"""
+    q = check_query(query)
+    if hit := infer(q):
+        return (*hit, q)
+    cands = []
+    for x in eastmoney.suggest(app.session, q):
+        market, code, name = _MKT_NUM.get(x["mkt_num"]), x["code"].upper(), x["name"]
+        if not market or _DERIVATIVE.search(name):
+            continue
+        if (market == "A" and not _A_STOCK.fullmatch(code)) or (market == "HK" and not (code.isdigit() and int(code) < 10000)):
+            continue
+        cands.append((market, code, name))
+    exact = [c for c in cands if c[1] == q.upper() or _base(c[2]) == _base(q)]
+    pool = exact or cands
+    if not pool:
+        raise ValueError(f"东方财富查不到名为「{q}」的股票，请换个名称或直接输入代码")
+    if len({_base(c[2]) for c in pool}) > 1:
+        raise ValueError(f"「{q}」匹配到多家公司：{'、'.join(f'{n}（{m} {c}）' for m, c, n in pool[:6])}，请输入完整名称或代码")
+    market, code, name = sorted(pool, key=lambda c: ("A", "HK", "US").index(c[0]))[0]  # 同一家公司多地上市：A 股优先
+    return (*normalize(market, code), name)
+
+
+def existing_name(app: App, query: str) -> Company | None:
+    """名称（或别名、英文名）已在观察清单中的公司。"""
+    b = _base(query)
+    return next((c for c in app.watchlist.companies if any(_base(n) == b for n in c.names())), None)
 
 
 def existing(app: App, market: str, code: str) -> Company | None:

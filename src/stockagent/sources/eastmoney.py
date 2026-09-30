@@ -13,6 +13,8 @@ from ..utils import CST, clean_text, jsonp_body, log, to_float
 KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
 SEARCH_URL = "https://search-api-web.eastmoney.com/search/jsonp"
+SUGGEST_URL = "https://searchapi.eastmoney.com/api/suggest/get"
+SUGGEST_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8"  # 东方财富网页搜索框使用的公开 token
 
 US_MARKETS = {"NASDAQ": "105", "NYSE": "106", "AMEX": "107"}
 
@@ -133,3 +135,12 @@ def search_news(session: requests.Session, keyword: str, page_size: int = 20) ->
             "published_at": published,
         })
     return out
+
+
+def suggest(session: requests.Session, query: str, count: int = 10) -> list[dict]:
+    """股票名称或代码联想（东方财富搜索框）：[{code, name, mkt_num, type}]，含窝轮、ETF、期货等，由调用方筛选。"""
+    r = session.get(SUGGEST_URL, params={"input": query, "type": "14", "token": SUGGEST_TOKEN, "count": str(count)}, timeout=15)
+    r.raise_for_status()
+    rows = ((r.json() or {}).get("QuotationCodeTable") or {}).get("Data") or []
+    return [{"code": str(x.get("Code") or ""), "name": str(x.get("Name") or ""), "mkt_num": str(x.get("MktNum") or ""),
+             "type": str(x.get("SecurityTypeName") or "")} for x in rows]

@@ -58,7 +58,7 @@ TASKS: dict[str, Task] = {t.key: t for t in [
          steps=(("fetch",), ("docs", "fetch"), ("triage",), ("profile",), ("dossier",), ("target", "add")),
          desc="依次运行：抓取 → 下载年报 → 分级 → 画像 → 深度报告 → 开始追踪"),
     Task("add_company", "新增公司并初始化", ("add",), (), "none", "dossier", category="追踪管理", listing=True,
-         desc="按市场与代码查公司资料写入观察清单，再依次抓取 → 下载年报 → 分级 → 画像 → 深度报告 → 开始追踪"),
+         desc="按名称或代码查公司资料写入观察清单，再依次抓取 → 下载年报 → 分级 → 画像 → 深度报告 → 开始追踪"),
     Task("screen_run", "选股器", ("screen", "run"), ("--long-only", "--event-only", "--no-llm", "--push"), "none", "screen",
          category="选股", desc="港股通 + A 股全市场初筛：刷新数据 → 代码打分 → 模型快筛；长线池每周、事件池每个交易日"),
     Task("screen_refresh", "选股器：刷新数据", ("screen", "refresh"), (), "none", "screen", category="选股",
@@ -86,16 +86,16 @@ def build(watchlist, profiles, task: str, companies: list[str] | None = None, fl
     t = TASKS.get(task)
     if t is None:
         raise JobError(f"不支持的任务：{task}")
-    if t.listing:
-        from .newco import normalize
+    if t.listing:  # listing = (市场, 代码)；市场为空时第二项是名称或代码，由任务联网识别
+        from .newco import check_query, normalize
 
         if listing is None:
-            raise JobError(f"{t.title} 需要市场与代码")
+            raise JobError(f"{t.title} 需要名称或代码")
         try:
-            market, code = normalize(*listing)
+            target = list(normalize(*listing)) if listing[0] else [check_query(listing[1])]
         except ValueError as e:
             raise JobError(str(e)) from e
-        return [[*(["-v"] if verbose else []), *t.argv, market, code, "--onboard"]], f"{t.title}：{market} {code}", None
+        return [[*(["-v"] if verbose else []), *t.argv, *target, "--onboard"]], f"{t.title}：{' '.join(target)}", None
     if listing is not None:
         raise JobError(f"{t.title} 不接受市场与代码")
     ids: list[str] = []

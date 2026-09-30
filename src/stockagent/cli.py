@@ -631,7 +631,14 @@ def cmd_llm_test(args) -> None:
 def cmd_add(args) -> None:
     app = _load(args)
     try:
-        data = newco.build(app, args.market, args.code)
+        if len(args.target) == 2:
+            market, code = args.target
+        elif len(args.target) == 1:
+            market, code, name = newco.resolve(app, args.target[0])
+            print(f"「{args.target[0]}」→ {name}（{market} {code}）")
+        else:
+            raise ValueError("用法：stock add 名称或代码，或 stock add 市场 代码")
+        data = newco.build(app, market, code)
     except (ValueError, requests.RequestException) as e:
         sys.exit(f"新增失败：{e}")
     print("查到：" + newco.describe(data))
@@ -814,9 +821,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="查看数据与配置状态").set_defaults(func=cmd_status)
 
-    sp = sub.add_parser("add", help="按市场与代码新增公司：自动查名称、英文名、行业、其他上市地（A+H、港股+美股），写入观察清单")
-    sp.add_argument("market", help="HK / A / US")
-    sp.add_argument("code", help="如 2577、300308、XPEV")
+    sp = sub.add_parser("add", help="按名称或代码新增公司：自动查名称、英文名、行业、其他上市地（A+H、港股+美股），写入观察清单")
+    sp.add_argument("target", nargs="+", help="名称或代码（腾讯控股、2577、300308、XPEV），或 市场 代码（HK 2577）")
     sp.add_argument("--onboard", action="store_true", help="接着初始化：抓取 → 下载年报 → 分级 → 画像 → 深度报告 → 开始追踪")
     sp.add_argument("--dry-run", action="store_true", help="只查询，不写入观察清单")
     sp.set_defaults(func=cmd_add)
