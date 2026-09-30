@@ -67,28 +67,6 @@ companies:
       zh-HK: ['"東岳集團"']
       en-US: ['"Dongyue Group"']
 
-  - id: rigol
-    name: 普源精电
-    name_en: RIGOL Technologies
-    aliases: [普源精電, RIGOL]
-    listings:
-      - {market: A, code: "688337", benchmark: "1.000688"}
-      - {market: HK, code: "00537", benchmark: "124.HSTECH"}
-    sector: 电子测量仪器 · 数字示波器 / 信号源 / 频谱与网络分析仪
-    notes: >
-      国产通用电子测量仪器厂商，核心产品为数字示波器（自研示波器芯片组），另有信号发生器、频谱与网络分析仪、电源、万用表等。
-      海外对标是德科技、泰克、罗德与施瓦茨，国内同业有鼎阳科技。主线是高端产品突破与国产替代；有海外收入，
-      受关税与出口管制影响（比例以年报为准）。A+H 两地上市。
-    watch_items:
-      - 高带宽示波器等高端新品与订单
-      - 国产替代政策，政府、高校、半导体客户的采购
-      - 毛利率与海外收入（关税、汇率）
-      - 是德科技等海外龙头的业绩与指引（行业景气度）
-    news_queries:
-      zh-CN: ['"普源精电"']
-      zh-HK: ['"普源精電"']
-      en-US: ['"RIGOL Technologies"', '"RIGOL" oscilloscope']
-
   - id: minimax
     name: MiniMax
     name_en: MiniMax
@@ -138,7 +116,33 @@ companies:
       zh-CN: ['"小鹏汽车"', '"小鹏集团"']
       zh-HK: ['"小鵬汽車"', '"小鵬集團"']
       en-US: ['"XPeng"']
+  - id: hk06098
+    name: 碧桂园服务
+    listings:
+      - {market: HK, code: "06098"}
+    sector: 地产
+    notes: 由选股器加入（2026-09-30）：事件池（1–3 个月），B 类：高赔率，入选价 5.34 HKD
 
+  - id: hk01513
+    name: 丽珠医药
+    listings:
+      - {market: A, code: "000513"}
+      - {market: HK, code: "01513"}
+    sector: 药品及生物科技
+    notes: 由选股器加入（2026-09-30）：事件池（1–3 个月），A 类：高胜率 + 高赔率，入选价 21.9 HKD
+  - id: hk00811
+    name: 新华文轩
+    listings:
+      - {market: A, code: "601811"}
+      - {market: HK, code: "00811"}
+    sector: 媒体及娱乐
+    notes: 由选股器加入（2026-09-30）：长线池（6–24 个月），A 类：高胜率 + 高赔率，入选价 8.05 HKD
+  - id: hk02877
+    name: 神威药业
+    listings:
+      - {market: HK, code: "02877"}
+    sector: 药品及生物科技
+    notes: 由选股器加入（2026-09-30）：长线池（6–24 个月），B 类：高赔率，入选价 8.38 HKD
 benchmarks:
   HK:
     - {secid: "100.HSI", name: 恒生指数}

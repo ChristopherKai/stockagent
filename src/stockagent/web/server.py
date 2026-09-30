@@ -8,6 +8,7 @@ from __future__ import annotations
 import shutil
 import threading
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from markupsafe import Markup, escape
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .. import config, jobs, scheduler, tracker, triage, valuation
+from .. import chat, config, jobs, scheduler, tracker, triage, valuation
 from ..app import MARKET_LABEL, SOURCE_LABEL, App
 from ..db import DB
 from ..jobs import JobRunner
@@ -105,12 +106,15 @@ def create_app(config_path: str | Path = "config.yaml", allowed_hosts: list[str]
     holder = AppHolder(config_path)
     runner = JobRunner(holder)
     sched = scheduler.Scheduler(holder)
+    chat_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="chat")  # 报告研读对话的回答在这里生成
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         stack = ExitStack()
+        stack.callback(lambda: chat_pool.shutdown(wait=False, cancel_futures=True))
         if start_background:
             if stack.enter_context(holder.app.lock("web")):
+                holder.app.db.fail_pending_chat_messages(chat.INTERRUPTED)  # 上次退出时没写完的回答
                 runner.start()
                 sched.start()
                 stack.callback(runner.stop)
@@ -125,14 +129,17 @@ def create_app(config_path: str | Path = "config.yaml", allowed_hosts: list[str]
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None, title="stockagent")
     app.state.holder = holder
     app.state.runner = runner
+    app.state.chat_pool = chat_pool
     app.middleware("http")(security_middleware)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts or LOOPBACK_HOSTS)  # 最外层：先挡掉非本机 Host
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
-    from . import settings_views, views  # noqa: PLC0415 - 路由模块引用本模块的 page()
+    from . import chat_views, screen_views, settings_views, views  # noqa: PLC0415 - 路由模块引用本模块的 page()
 
     app.include_router(views.router)
+    app.include_router(chat_views.router)
     app.include_router(settings_views.router)
+    app.include_router(screen_views.router)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException):

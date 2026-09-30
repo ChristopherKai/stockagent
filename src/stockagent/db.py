@@ -247,9 +247,42 @@ CREATE TABLE IF NOT EXISTS jobs (
     log_path     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, id);
+
+CREATE TABLE IF NOT EXISTS chats (          -- 报告研读对话（只供理解报告，不作为追踪修正或深度报告的依据）
+    id           INTEGER PRIMARY KEY,
+    company_id   TEXT NOT NULL,
+    dossier_id   INTEGER NOT NULL,
+    revision_id  INTEGER,                 -- 在修正页发起的对话：讨论的是这次修正
+    title        TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chats_company ON chats(company_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id             INTEGER PRIMARY KEY,
+    chat_id        INTEGER NOT NULL,
+    role           TEXT NOT NULL,         -- user | assistant
+    content        TEXT NOT NULL DEFAULT '',
+    quote          TEXT,                  -- 使用者引用的报告段落
+    status         TEXT NOT NULL DEFAULT 'done',  -- pending | done | error（assistant）
+    progress       TEXT,                  -- 回答进行中：最近在做什么（调用了哪个工具）
+    checks_json    TEXT NOT NULL DEFAULT '{}',    -- 代码核对：报告引文是否在原文中、数字能否溯源
+    tool_log_json  TEXT NOT NULL DEFAULT '[]',
+    trace_json     TEXT NOT NULL DEFAULT '[]',    -- 回答过程：思考、工具调用及结果、中间说明（按顺序）
+    model          TEXT,
+    profile        TEXT,
+    usage_json     TEXT,
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, id);
 """
 
-SCHEMA_VERSION = 1  # PRAGMA user_version；以后给已有表加列时在 DB.__init__ 里按版本号执行 ALTER
+SCHEMA_VERSION = 3  # PRAGMA user_version；以后给已有表加列时在 DB.__init__ 里按版本号执行 ALTER
+MIGRATIONS = {  # 版本号 → 升到该版本要补的列（表, 列, 定义）；新库由 SCHEMA 直接建好，已有的列跳过
+    2: [("chat_messages", "trace_json", "TEXT NOT NULL DEFAULT '[]'")],
+    3: [("chats", "revision_id", "INTEGER")],
+}
 
 TRIAGE_FIELDS = (
     "relevant", "duplicate_of", "event_type", "direction", "materiality",
@@ -269,7 +302,12 @@ class DB:
         self.lock = threading.RLock()
         with self.lock:
             self.conn.executescript(SCHEMA)
-            if self.conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+            version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+            if version < SCHEMA_VERSION:
+                for v in range(version + 1, SCHEMA_VERSION + 1):
+                    for table, col, ddl in MIGRATIONS.get(v, []):
+                        if col not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
+                            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
                 self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self.conn.commit()
 
@@ -705,6 +743,62 @@ class DB:
         """某公司某类任务在 since 之后的最近一次（排队、运行或已完成；取消的不算）。"""
         return self._one("SELECT * FROM jobs WHERE task=? AND company_id=? AND created_at>=? AND status NOT IN ('cancelled') "
                          "ORDER BY id DESC LIMIT 1", (task, company_id, since))
+
+    # ------------------------------------------------------------ 报告研读对话
+
+    def create_chat(self, company_id: str, dossier_id: int, title: str, revision_id: int | None = None) -> int:
+        now = iso(utcnow())
+        return self._exec("INSERT INTO chats(company_id, dossier_id, revision_id, title, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+                          (company_id, dossier_id, revision_id, title, now, now)).lastrowid
+
+    def chat(self, chat_id: int) -> dict | None:
+        return self._one("SELECT * FROM chats WHERE id=?", (chat_id,))
+
+    def chats(self, company_id: str, limit: int = 50) -> list[dict]:
+        return self._all("SELECT * FROM chats WHERE company_id=? ORDER BY updated_at DESC, id DESC LIMIT ?", (company_id, limit))
+
+    def delete_chat(self, chat_id: int) -> None:
+        with self.lock:
+            self.conn.execute("DELETE FROM chat_messages WHERE chat_id=?", (chat_id,))
+            self.conn.execute("DELETE FROM chats WHERE id=?", (chat_id,))
+            self.conn.commit()
+
+    @staticmethod
+    def _chat_message(r: dict | None) -> dict | None:
+        if r:
+            r["checks"] = json.loads(r.pop("checks_json") or "{}")
+            r["tool_log"] = json.loads(r.pop("tool_log_json") or "[]")
+            r["usage"] = json.loads(r.pop("usage_json") or "null")
+            r["trace"] = json.loads(r.pop("trace_json", None) or "[]")
+        return r
+
+    def chat_messages(self, chat_id: int) -> list[dict]:
+        return [self._chat_message(r) for r in self._all("SELECT * FROM chat_messages WHERE chat_id=? ORDER BY id", (chat_id,))]
+
+    def chat_message(self, message_id: int) -> dict | None:
+        return self._chat_message(self._one("SELECT * FROM chat_messages WHERE id=?", (message_id,)))
+
+    def add_chat_message(self, chat_id: int, role: str, content: str = "", quote: str | None = None,
+                         status: str = "done") -> int:
+        now = iso(utcnow())
+        with self.lock:
+            mid = self.conn.execute(
+                "INSERT INTO chat_messages(chat_id, role, content, quote, status, created_at) VALUES(?,?,?,?,?,?)",
+                (chat_id, role, content, quote, status, now)).lastrowid
+            self.conn.execute("UPDATE chats SET updated_at=? WHERE id=?", (now, chat_id))
+            self.conn.commit()
+        return mid
+
+    def update_chat_message(self, message_id: int, **fields) -> None:
+        for k in ("checks", "tool_log", "usage", "trace"):
+            if k in fields:
+                fields[f"{k}_json"] = json.dumps(fields.pop(k), ensure_ascii=False)
+        self._exec(f"UPDATE chat_messages SET {', '.join(f'{k}=?' for k in fields)} WHERE id=?", (*fields.values(), message_id))
+
+    def fail_pending_chat_messages(self, reason: str) -> int:
+        """上次进程退出时尚未写完的回答（后台线程随进程结束）。"""
+        return self._exec("UPDATE chat_messages SET status='error', progress=NULL, content=? WHERE status='pending'",
+                          (reason,)).rowcount
 
     # ------------------------------------------------------------ 向使用者请求的数据
 

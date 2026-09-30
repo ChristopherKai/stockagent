@@ -16,13 +16,14 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Callable
 
+from . import fcf as fcf_mod
 from . import imafeed, technical
 from .app import FX_HKDCNH, PRICE_SOURCES, SOURCE_LABEL, App, _try, klines
 from .config import Company, Listing
 from .docs import DOC_TYPES, read_document_text
 from .sources import eastmoney, emdata, ima, tencent, web
 from .triage import DIRECTIONS, event_label
-from .utils import big_num, fmt_local, iso, num, pct, to_simplified, utcnow
+from .utils import big_num, fmt_local, iso, lock_holder, num, pct, to_simplified, utcnow
 
 
 
@@ -264,9 +265,11 @@ def resolve_ticker(app: App, ticker: str) -> list[tuple[str, str, str]]:
     raise ValueError(f"无法识别代码 {ticker}（港股 5 位数字、A 股 6 位数字、美股字母代码）")
 
 
-def listings_for(app: App, company: Company, ticker: str | None) -> list[Listing]:
-    """结构化数据只支持 A 股与港股：不填 ticker 表示本公司。"""
+def listings_for(app: App, company: Company | None, ticker: str | None) -> list[Listing]:
+    """结构化数据只支持 A 股与港股：不填 ticker 表示本公司（不针对某家公司的 agent 必须填 ticker）。"""
     if not ticker:
+        if company is None:
+            raise ValueError("需要指定 ticker（A 股 6 位、港股 5 位代码）")
         return [l for l in company.listings if l.market in ("A", "HK")]
     c = app.watchlist.get(ticker)
     if c is not None:
@@ -315,16 +318,12 @@ def hk_consensus(app: App, listing: Listing) -> str:
 
 def _payback_years(ev: float, fcf: float, growth: float, cap: int = 50) -> str:
     """未来 FCF（按 growth 增长）累计多少年能覆盖当前 EV。"""
-    if ev <= 0:
+    n = fcf_mod.payback_years(ev, fcf, growth, cap)
+    if n == 0:
         return "EV 已为负"
-    if fcf <= 0:
+    if n is None:
         return "FCF 为负，不适用"
-    total = 0.0
-    for n in range(1, cap + 1):
-        total += fcf * (1 + growth) ** n
-        if total >= ev:
-            return f"约 {n} 年"
-    return f"超过 {cap} 年"
+    return f"约 {n} 年" if n <= cap else f"超过 {cap} 年"
 
 
 def fcf_snapshot(app: App, company: Company, ticker: str | None = None, growth: float = 0.0,
@@ -358,19 +357,13 @@ def fcf_snapshot(app: App, company: Company, ticker: str | None = None, growth: 
             mcap /= 7.8
             note += "，按 1 USD = 7.8 HKD 换算"
     b = data["balance"]
-    cash_like = b["cash"] + b["invest"]
-    ev = mcap + b["debt"] + b["minority"] - cash_like
-    net_cash = cash_like - b["debt"]
+    m = fcf_mod.metrics(data, mcap)
+    ev, flows, avg = m["ev"], m["flows"], m["fcf_avg3"]
     yi = 1e8
 
     def f(v: float) -> str:
         return f"{v / yi:,.2f}"
 
-    flows = [x for x in [emdata.ttm_flow(data["flows"])] if x] + [
-        {**x, "label": f"{x['date'][:4]} 年报"} for x in data["flows"] if x["annual"] and x["ocf"] is not None][:3]
-    annual = [x for x in flows if x["label"].endswith("年报")]
-    if flows and flows[0]["label"].endswith("年报") and len(annual) > 3:
-        annual = annual[:3]
     lines = [f"{l.display} EV 与自由现金流（程序按东方财富现金流量表/资产负债表计算；金额：亿 {cur}；资产负债表截至 {b['date']}）",
              f"- 市值 {f(mcap)}（{note}）",
              f"- 现金及存款 {f(b['cash'])}"
@@ -381,25 +374,24 @@ def fcf_snapshot(app: App, company: Company, ticker: str | None = None, growth: 
              + (f"（{'、'.join(f'{k} {f(v)}' for k, v in b['debt_items'].items())}）" if b["debt_items"] else "")
              + f"；少数股东权益 {f(b['minority'])}",
              f"- EV = 市值 + 有息负债 + 少数股东权益 − 现金及短期投资 = {f(ev)}",
-             f"- 净现金 {f(net_cash)}，占市值 {pct(net_cash / mcap, sign=False)}；Negative EV（净现金超过市值）：{'是' if ev < 0 else '否'}",
+             f"- 净现金 {f(m['net_cash'])}，占市值 {pct(m['net_cash_ratio'], sign=False)}；Negative EV（净现金超过市值）：{'是' if m['negative_ev'] else '否'}",
              "", "| 期间 | 经营现金流 | 资本开支 | FCF | FCF Yield（FCF ÷ EV） |", "|---|---|---|---|---|"]
     for x in flows:
-        fcf = x["ocf"] - x["capex"]
-        lines.append(f"| {x['label']} | {f(x['ocf'])} | {f(x['capex'])} | {f(fcf)} | "
-                     + (f"{pct(fcf / ev, sign=False)} |" if ev > 0 else "EV 为负 |"))
-    avg = None
-    if len(annual) >= 3:
-        avg = sum(x["ocf"] - x["capex"] for x in annual[:3]) / 3
+        lines.append(f"| {x['label']} | {f(x['ocf'])} | {f(x['capex'])} | {f(x['fcf'])} | "
+                     + (f"{pct(x['fcf'] / ev, sign=False)} |" if ev > 0 else "EV 为负 |"))
+    if avg is not None:
         lines.append(f"| 近 3 个年度平均 | | | {f(avg)} | " + (f"{pct(avg / ev, sign=False)} |" if ev > 0 else "EV 为负 |"))
-    base = (flows[0]["ocf"] - flows[0]["capex"]) if flows else 0
+    base = m["fcf_base"] or 0
+    if m["capex_proxy"]:
+        lines.append(f"- 注意：{'、'.join(m['capex_proxy'])} 的资本开支科目缺失或归类异常（标准化报表里接近 0），"
+                     "上表按投资活动现金净流出估算资本开支（偏保守），请用年报现金流量表核对")
     lines.append("")
     lines.append(f"- FCF 累计覆盖 EV 的年数（FCF 年增速假设 {pct(growth)}）：按 {flows[0]['label'] if flows else '—'} "
                  f"{_payback_years(ev, base, growth)}" + (f"；按 3 年平均 {_payback_years(ev, avg, growth)}" if avg is not None else ""))
     if forward_fcf is not None:
         fwd = float(forward_fcf) * yi
         lines.append(f"- 前瞻 FCF Yield（{forward_label or '前瞻年度'} FCF {forward_fcf:g} 亿）：" + (pct(fwd / ev, sign=False) if ev > 0 else "EV 为负"))
-    if b["liabilities"]:
-        ev2 = mcap + b["liabilities"] - b["cash"]
+    if (ev2 := m["ev_conservative"]) is not None:
         lines.append(f"- 保守口径（EV = 市值 + 总负债 − 现金，雪球「价值投资新经济」框架的算法）：EV {f(ev2)}"
                      + (f"，{flows[0]['label']} FCF Yield {pct(base / ev2, sign=False)}" if flows and ev2 > 0 else ""))
     lines.append("- 说明：FCF = 经营现金流 − 购建长期资产支付的现金。周期股的 FCF 波动大，应看多年平均；资本开支扩张期 FCF 为负时 "
@@ -422,8 +414,9 @@ def ensure_bars(app: App, secid: str, max_age_days: int = 4, min_bars: int = 0):
 # ---------------------------------------------------------------- 工具箱
 
 class ToolBox:
-    def __init__(self, app: App, company: Company, allow: list[str] | None = None):
-        """allow：工具白名单。不在其中的工具既不提供给模型，模型硬要调用时也只返回错误（specs 只是告诉模型有哪些工具）。"""
+    def __init__(self, app: App, company: Company | None, allow: list[str] | None = None):
+        """allow：工具白名单。不在其中的工具既不提供给模型，模型硬要调用时也只返回错误（specs 只是告诉模型有哪些工具）。
+        company 为 None 时（选股器的主题 agent）只应开放带 ticker 参数的行情、财务工具与网页工具。"""
         self.app = app
         self.company = company
         self.max_chars = app.settings.agent.tool_result_chars
@@ -571,6 +564,11 @@ class ToolBox:
                  _obj({"days": {"type": "integer"}, "min_materiality": {"type": "integer"}}, []),
                  self.company_events),
             Tool("manual_data", "查询使用者手动补充的数据（公司指标，以及行业/宏观指标）。", _obj({}, []), self.manual_data),
+            Tool("report_notes",
+                 "检索本公司深度报告的正文、背后的研究笔记，以及写报告时的工具调用记录（当时查到的原始数据、推理与出处），"
+                 "用于回答「报告里这个数字、这个判断从哪来」。多个关键词用空格分隔；dossier_id 不填 = 最新一份报告。",
+                 _obj({"query": {"type": "string"}, "dossier_id": {"type": "integer"}, "top_k": {"type": "integer"}}, ["query"]),
+                 self.report_notes),
             Tool("web_search",
                  "网页搜索，用于查行业数据、竞争对手、政策、卖方观点等。结果只是线索，重要数字要用 fetch_url 打开原文或与年报交叉核实。",
                  _obj({"query": {"type": "string"}, "max_results": {"type": "integer"}}, ["query"]),
@@ -866,6 +864,48 @@ class ToolBox:
         return "\n".join(f"{scope}｜{m['metric']}｜{m['period']}｜{m['value']}{m['unit'] or ''}｜{m['note'] or ''}｜{m['source'] or ''}"
                          for scope, m in rows)
 
+    def report_notes(self, query: str, dossier_id: int | None = None, top_k: int = 5) -> str:
+        d = self.app.db.dossier(int(dossier_id)) if dossier_id else self.app.db.latest_dossier(self.company.id)
+        if d is None or d["company_id"] != self.company.id:
+            return f"错误：本公司没有编号为 {dossier_id} 的深度报告" if dossier_id else "本公司还没有深度报告"
+        terms = [to_simplified(t) for t in re.split(r"[\s,，;；、]+", query) if t]
+        if not terms:
+            return "错误：query 为空"
+        chunks = []  # (出处, 原文)
+        section = ""
+        for para in re.split(r"\n\s*\n", d.get("report_md") or ""):
+            if m := re.match(r"#+\s*(?:§\s*)?(.+)", para.strip()):
+                section = m.group(1).strip()[:40]
+            if para.strip():
+                chunks.append((f"报告正文·{section}" if section else "报告正文", para.strip()))
+        for note in json.loads(d.get("notes_json") or "{}").values():
+            for para in re.split(r"\n\s*\n", note.get("text") or ""):
+                if para.strip():
+                    chunks.append((f"研究笔记·{note.get('title', '')}", para.strip()))
+        for i, x in enumerate(json.loads(d.get("tool_log_json") or "[]"), 1):
+            args = json.dumps(x.get("args") or {}, ensure_ascii=False)[:200]
+            chunks.append((f"研究过程 #{i}·{x.get('section') or '—'}·{x.get('tool')}（{args}）", str(x.get("result") or "")))
+        simple = [to_simplified(t) for _, t in chunks]
+        df = [sum(1 for t in simple if k in t) for k in terms]
+        idf = [math.log((len(chunks) + 1) / (n + 1)) + 1 for n in df]
+        hits = []
+        for (src, text), low in zip(chunks, simple):
+            counts = [low.count(k) for k in terms]
+            if not any(counts):
+                continue
+            score = sum(w * c * 2.2 / (c + 1.2) for w, c in zip(idf, counts) if c) * (1.5 if all(counts) else 1)
+            hits.append((score, src, text, low))
+        if not hits:
+            return f"深度报告 #{d['id']} 的正文、研究笔记与研究过程中没有找到「{query}」"
+        hits.sort(key=lambda h: -h[0])
+        out = []
+        for _, src, text, low in hits[: max(1, min(int(top_k), 10))]:
+            rare = max((k for k in terms if k in low), key=lambda k: idf[terms.index(k)], default=terms[0])
+            pos = max(0, low.find(rare))
+            body = text if len(text) == len(low) else low
+            out.append(f"〔深度报告 #{d['id']} {src}〕" + re.sub(r"\s+", " ", body[max(0, pos - 200): pos + 600]).strip())
+        return "\n\n".join(out)
+
     def web_search(self, query: str, max_results: int = 8) -> str:
         res, source = web.search(self.app.session, query, max(1, min(int(max_results), 10)), self.web_providers)
         if not res:
@@ -909,6 +949,11 @@ class ToolBox:
         self._pages.pop(doc["id"], None)
         return (f"已入库为本公司资料 #{doc['id']}《{doc['title']}》（{doc['pages'] or '-'} 页，{doc['chars']:,} 字）。"
                 f"用 search_filings（doc_id={doc['id']}）检索、read_filing 读取指定页。开头内容：\n{text[:2500]}")
+
+
+def dossier_running(app: App) -> bool:
+    """深度报告正在运行（持有 dossier 锁）：它的并行 agent 已占满免费搜索源，其他 agent 应暂停网页搜索。"""
+    return lock_holder(app.lock_path("dossier")) is not None
 
 
 def tool_log_markdown(log: list[dict], limit: int = 60) -> str:

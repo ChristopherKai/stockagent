@@ -93,6 +93,9 @@ llm:
     dossier: local          # 深度报告：撰写与跟踪卡
     monitor: local          # 事件类证伪条件检查
     tracker: local          # 标的追踪：按新事件修正估值假设（带工具的 agent + 结构化修正）
+    screen: local           # 选股器快筛：每家候选一次结构化判断（不带工具）
+    screen_theme: local     # 选股器主题 agent：按产业链主题找瓶颈环节公司（带工具，按月运行）
+    chat: local             # 报告研读对话：WebUI 报告页讲解深度报告（带工具的 agent）
 
 # ------------------------------------------------------------------ 数据源
 sources:
@@ -149,6 +152,43 @@ tracker:
   redo_on_broken: true              # 论点被判失效时自动排队重跑深度报告
   redo_cooldown_days: 3             # 同一公司自动重跑深度报告的冷却天数
 
+# ------------------------------------------------------------------ 报告研读对话（WebUI 报告页右侧；只讲解报告，不改结论，不作为追踪修正的依据）
+chat:
+  web_search: true                  # 可用网页搜索（深度报告运行期间自动暂停，避免争抢搜索源）
+  max_steps: 8                      # 每次回答最多调用工具的轮数
+  max_turns: 20                     # 追问时带上最近多少轮问答（另受 profile 的 max_input_chars 限制）
+
+# ------------------------------------------------------------------ 选股器（stock screen：港股通 + A 股全市场初筛；研究候选，不是买卖建议）
+screen:
+  markets: [HK, A]                  # 港股只看港股通标的
+  refresh_days: 6                   # 报表缓存多少天后重抓（已披露一年以上的报告期只抓一次）
+  min_mcap: {HK: 2.0e+9, A: 3.0e+9} # 总市值下限（港元 / 人民币）
+  min_avg_amount: {HK: 1.0e+7, A: 3.0e+7}   # 20 日成交额中位数下限（港元 / 人民币）
+  participation: 0.1                # 可容纳资金 ≈ 成交额中位数 × 10% × 5 天（只作参考，不参与过滤）
+  min_listing_days: 365
+  # 桶 1 现金地板：保守 FCF Yield（TTM 与 3 年平均取低）≥ 8%，或净现金 ≥ 市值 50%，或 Negative EV
+  min_fcf_yield: 0.08
+  min_net_cash_ratio: 0.5
+  # 粗算赔率 = (合理价值 − 现价) ÷ (现价 − 地板)，只用于排序和分层；深研后以深度报告的情景估值为准
+  fair_fcf_yield: 0.08              # 合理价值 = 保守 FCF ÷ 8% + 净现金
+  bear_fcf_yield: 0.2               # 地板 = 最差一期 FCF ÷ 20% + 净现金 × 70%（净负债全额扣减）
+  cash_haircut: 0.3                 # 现金打七折：现金可能滞留子公司、不分配
+  min_downside: 0.15                # 下行至少按 15% 计（地板高于现价时也有市场风险）
+  # 分层：A 高胜率 + 高赔率 / B 高胜率 / C 高赔率 / D 观察
+  odds_a: 3.0                       # A 类：赔率 ≥ 3、下行 ≤ 20%、有催化剂、无严重风险标记
+  max_downside_a: 0.2
+  odds_win: 1.0                     # B 类：质量红利入选或「催化剂 + 下行 ≤ 20%」，赔率 ≥ 1
+  odds_b: 3.0                       # C 类：赔率 ≥ 3，但胜率证据（地板、催化剂、稳定现金流）不足
+  event_odds_a: 2.0                 # 事件池的 A 类赔率门槛
+  # 质量红利桶（高胜率）：近 3 年 FCF 都为正且稳定、连续派息 ≥ 3 年、股息率 ≥ 4% 且被 FCF 覆盖、保守 FCF Yield ≥ 5%
+  quality_min_dividend_yield: 0.04
+  quality_min_div_years: 3
+  quality_fcf_stability: 0.4
+  quality_min_fcf_yield: 0.05
+  top_n: 40                         # 每个策略桶进入候选的数量
+  quick_top_n: 15                   # 每个池送模型快筛的数量
+  themes_file: themes.yaml          # 产业链瓶颈主题（桶 3），由你维护
+
 # ------------------------------------------------------------------ WebUI（stock web，只监听 127.0.0.1）
 web:
   port: 8765
@@ -167,6 +207,9 @@ scheduler:
     - {name: 收盘日报, task: run, args: [--push], cron: "30 17 * * 1-5", enabled: true}
     - {name: 盘中提醒, task: alert, args: [], cron: "*/20 9-16 * * 1-5", enabled: true}
     - {name: 周末深度报告, task: dossier, args: [], cron: "0 20 * * 6", enabled: false}   # 重大事件已会自动重跑单家报告
+    - {name: 选股·事件池, task: screen_run, args: [--event-only], cron: "0 18 * * 1-5", enabled: true}
+    - {name: 选股·长线池, task: screen_run, args: [--long-only], cron: "0 10 * * 6", enabled: true}
+    - {name: 选股·主题 agent, task: screen_themes, args: [], cron: "0 14 1 * *", enabled: true}
 
 # ------------------------------------------------------------------ 推送（webhook 地址写在 .env）
 notify:

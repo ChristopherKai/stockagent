@@ -1,13 +1,21 @@
 {% extends "base.html" %}
-{% from "_macros.html" import thesis_badge, stance_badge, kind_badge, delta %}
+{% from "_macros.html" import thesis_badge, stance_badge, kind_badge, delta, valuation_table %}
+{% macro evref(code) -%}
+{%- if code[:1] == 'T' and code[1:].isdigit() -%}<a class="evref mono" href="#tool-{{ code[1:] }}">{{ code }}</a>
+{%- else -%}<a class="evref mono" href="#ev-{{ code }}">{{ code }}</a>{%- endif -%}
+{%- endmacro %}
 {% block title %}修正 #{{ r.id }} · {{ c.name }}{% endblock %}
 {% block content %}
+<div class="report-layout" data-chat-layout>
+<div class="report-main rev" data-report-body>
+
 <section class="card">
   <div class="card-head">
     <div><h1>{{ c.name }} · {{ KIND_LABEL[r.kind] }} #{{ r.id }}</h1>
       <div class="muted small">{{ r.created_at | when }} · 来源 {{ {'cli': '命令行', 'run': '日常流程', 'web': 'WebUI', 'scheduler': '日程', 'dossier': '深度报告', 'tracker': '标的追踪'}.get(r.origin, r.origin or '—') }}
-        · 基线深度报告 #{{ r.dossier_id }}{% if r.llm_model %} · 模型 {{ r.llm_model }}{% endif %}</div></div>
-    <a class="btn ghost" href="/c/{{ c.id }}#rev-{{ r.id }}">返回时间线</a>
+        · 基线 <a href="/c/{{ c.id }}/report?did={{ r.dossier_id }}">深度报告 #{{ r.dossier_id }}</a>{% if r.llm_model %} · 模型 {{ r.llm_model }}{% endif %}</div></div>
+    <div class="btns"><button type="button" class="btn small" data-chat-toggle>研讨对话</button>
+      <a class="btn ghost small" href="/c/{{ c.id }}#rev-{{ r.id }}">返回时间线</a></div>
   </div>
   <div class="kpis">
     <div class="kpi main"><div class="k">{{ TARGET_LABEL }}</div><div class="v">{{ r.target | num }}</div>
@@ -17,30 +25,45 @@
     <div class="kpi"><div class="k">立场 / 论点</div><div class="v small">{{ stance_badge(r.stance) }} {{ thesis_badge(r.thesis_status) }}</div>
       <div class="s">{{ THESIS_HELP.get(r.thesis_status, '') }}</div></div>
   </div>
-  <p><b>{{ r.summary }}</b></p>
+  {% if r.summary %}<p class="rev-lead">{{ r.summary }}</p>{% endif %}
   {% if r.narrative_md %}<div class="md">{{ r.narrative_md | md }}</div>{% endif %}
-  {% for f in r.flags or [] %}<div class="flash warn small">⚠ {{ f }}</div>{% endfor %}
 </section>
+
+{% if flags %}
+<section class="card">
+  <h2>需要你留意（{{ flags | length }}）</h2>
+  <ul class="rev-flags">
+    {% for f in flags %}<li>{% if f.tag %}<span class="badge warn">{{ f.tag }}</span> {% endif %}<b>{{ f.title }}</b>
+      {% if f.detail %}<div class="muted small">{{ f.detail }}</div>{% endif %}</li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
 
 {% if r.changes %}
 <section class="card">
-  <h2>假设变化</h2>
-  <div class="tblwrap"><table class="tbl">
-    <thead><tr><th>假设</th><th class="r">原值</th><th class="r">新值</th><th>操作</th><th>理由</th><th>依据</th></tr></thead>
+  <h2>假设变化（{{ r.changes | length }}）</h2>
+  <div class="tblwrap"><table class="tbl rev-changes">
+    <thead><tr><th>假设</th><th>变化</th><th>理由</th><th>依据</th></tr></thead>
     <tbody>{% for ch in r.changes %}
-      <tr><td>{{ ch.label }}{% for fl in ch.flags or [] %} <span class="badge warn">{{ fl }}</span>{% endfor %}</td>
-        <td class="r">{{ ch.old | num(4) }}</td><td class="r"><b>{{ ch.new | num(4) }}</b> {{ delta(ch.new, ch.old) }}</td>
-        <td class="small">{{ OP_LABEL.get(ch.op, ch.op) }} {{ ch.operand | num(4) }}<div class="muted">{{ ch.source }}</div></td>
+      <tr><td class="nowrap"><b>{{ ch.label }}</b>{% for fl in ch.flags or [] %}<div><span class="badge warn">{{ fl }}</span></div>{% endfor %}</td>
+        <td class="nowrap">{{ ch.old | num(4) }} → <b>{{ ch.new | num(4) }}</b> {{ delta(ch.new, ch.old) }}
+          <div class="muted small">{{ OP_LABEL.get(ch.op, ch.op) }} {{ ch.operand | num(4) }} · {{ ch.source }}</div></td>
         <td class="small">{{ ch.reason }}{% if ch.derivation %}<div class="muted">推导：{{ ch.derivation }}</div>{% endif %}</td>
-        <td class="small">{{ ch.evidence | join('、') }}</td></tr>
+        <td class="small">{% for code in ch.evidence or [] %}{{ evref(code) }} {% endfor %}</td></tr>
     {% endfor %}</tbody>
   </table></div>
 </section>
 {% endif %}
 
+<section class="card">
+  <h2>修正后的估值模型{% if prev_model %}<span class="muted small">（「上次」为前一条记录的数值）</span>{% endif %}</h2>
+  {{ valuation_table(model, compare, TARGET_LABEL, r.target, model.price_currency, app.settings.tracker.target, was='上次', drivers_row=True) }}
+  {% if r.unverified %}<p class="flash warn small">修正说明中找不到出处的数字（请核对）：{{ r.unverified | join('、') }}</p>{% endif %}
+</section>
+
 {% if r.rejected %}
 <section class="card">
-  <h2>未采纳的修改</h2>
+  <h2>未采纳的修改（{{ r.rejected | length }}）</h2>
   {% for x in r.rejected %}
     <div class="item small">{% if x.confirm %}<span class="badge warn">待你确认</span>{% else %}<span class="badge bad">未采纳</span>{% endif %}
       {{ x.why }}
@@ -53,48 +76,60 @@
 </section>
 {% endif %}
 
+{% if r.notes_md %}
+<section class="card">
+  <details class="rev-notes" open><summary><h2>修正研究笔记</h2></summary><div class="md">{{ r.notes_md | md }}</div></details>
+</section>
+{% endif %}
+
 {% if r.events %}
+{% set n_mat = evidence | selectattr('impact', 'equalto', 'material') | list | length %}
+{% set n_min = evidence | selectattr('impact', 'equalto', 'minor') | list | length %}
 <section class="card">
   <h2>本次评估的依据（{{ r.events | length }} 条）</h2>
-  <div class="tblwrap"><table class="tbl">
-    <thead><tr><th>编号</th><th>影响</th><th>依据</th><th>评估</th></tr></thead>
-    <tbody>{% for e in r.events %}
-      <tr><td class="small mono">{{ e.code }}</td>
-        <td><span class="badge imp-{{ e.impact }}">{{ IMPACT_LABEL.get(e.impact, e.impact) }}</span></td>
-        <td class="small">{{ e.text.split('｜', 1)[1] if '｜' in e.text else e.text }}{% if e.url | safe_url %} <a href="{{ e.url | safe_url }}" target="_blank" rel="noopener noreferrer">原文</a>{% endif %}</td>
-        <td class="small">{{ e.note }}</td></tr>
-    {% endfor %}</tbody>
-  </table></div>
+  <p class="muted small">实质影响 {{ n_mat }} · 轻微 {{ n_min }}{% if evidence | length - n_mat - n_min %} · 未评估 {{ evidence | length - n_mat - n_min }}{% endif %} · 不影响估值 {{ unaffected | length }}；按影响程度、重要性排序</p>
+  {% for e in evidence %}
+  <div class="ev imp-{{ e.impact }}" id="ev-{{ e.code }}">
+    <div class="ev-head">
+      <span class="badge imp-{{ e.impact }}">{{ IMPACT_LABEL.get(e.impact, e.impact) }}</span>
+      {% if e.kind == 'trigger' %}<span class="badge bad">证伪条件</span>{% elif e.materiality %}<span class="badge">重要性 {{ e.materiality }}</span>{% endif %}
+      <span class="muted small">{{ e.meta | join(' · ') }}{% if e.reaction %} · 发布后 {{ e.reaction }}{% endif %}</span>
+      <span class="ev-code mono">{{ e.code }}</span>
+    </div>
+    <div class="ev-title">{{ e.title }}{% if e.url | safe_url %} <a href="{{ e.url | safe_url }}" target="_blank" rel="noopener noreferrer" class="small">原文 ↗</a>{% endif %}</div>
+    {% if e.note %}<div class="ev-note"><b>评估：</b>{{ e.note }}</div>{% endif %}
+    {% if e.extra %}<details class="ev-more small"><summary>{{ e.extra | map('first') | join('、') }}</summary>
+      {% for k, v in e.extra %}<div><b>{{ k }}：</b>{{ v }}</div>{% endfor %}</details>{% endif %}
+  </div>
+  {% endfor %}
+  {% if unaffected %}
+  <details class="ev-rest"><summary>不影响估值的依据（{{ unaffected | length }} 条）</summary>
+    {% for e in unaffected %}
+    <div class="ev-row" id="ev-{{ e.code }}">
+      <div><span class="muted small nowrap">{{ e.meta[0] if e.meta else e.code }}{% if e.materiality %} · 重要性 {{ e.materiality }}{% endif %}</span>
+        {{ e.title }}{% if e.url | safe_url %} <a href="{{ e.url | safe_url }}" target="_blank" rel="noopener noreferrer" class="small">原文 ↗</a>{% endif %}</div>
+      {% if e.note %}<div class="muted small">{{ e.note }}</div>{% endif %}
+    </div>
+    {% endfor %}
+  </details>
+  {% endif %}
 </section>
 {% endif %}
 
 {% if r.catalysts %}
 <section class="card"><h2>催化剂评估</h2>
-  {% for x in r.catalysts %}<div class="item small"><b>{{ x.when or '' }}</b> {{ x.event }}：<span class="badge">{{ IMPACT_LABEL.get(x.status, x.status) }}</span> {{ x.note }}</div>{% endfor %}
+  {% for x in r.catalysts %}<div class="item small"><b>{{ x.when or '' }}</b> {{ x.event }}：<span class="badge">{{ IMPACT_LABEL.get(x.status) or {'pending': '尚未发生'}.get(x.status, x.status) }}</span> {{ x.note }}</div>{% endfor %}
 </section>
 {% endif %}
 
-<section class="card">
-  <h2>修正后的估值模型</h2>
-  {% set probs = model.probabilities() %}
-  <div class="tblwrap"><table class="tbl">
-    <thead><tr><th>情景</th>{% if model.method == 'matrix' %}<th class="r">{{ model.driver_label }}</th><th class="r">{{ model.multiple_label }}</th>{% endif %}<th class="r">股价</th><th class="r">概率</th></tr></thead>
-    <tbody>{% for sp in model.scenarios %}
-      <tr><td>{{ SCENARIO_LABEL[sp.name] }}</td>{% if model.method == 'matrix' %}<td class="r">{{ sp.driver | num }}</td><td class="r">{{ sp.multiple | num }}</td>{% endif %}
-        <td class="r">{{ model.price(sp) | num }}</td><td class="r">{{ probs[sp.name] | pct(0, false) }}</td></tr>
-    {% endfor %}</tbody>
-  </table></div>
-  {% if model.method == 'matrix' %}<p class="formula">净现金 {{ model.net_cash | num }} · 总股本 {{ model.shares | num(4) }} 亿股 · 汇率 {{ model.fx | num(4) }} · {{ model.source }}</p>{% endif %}
-  {% if r.unverified %}<p class="muted small">修正说明中找不到出处的数字（请核对）：{{ r.unverified | join('、') }}</p>{% endif %}
-</section>
-
-{% if r.notes_md %}
-<section class="card"><details><summary><b>修正研究笔记</b></summary><div class="md">{{ r.notes_md | md }}</div></details></section>
-{% endif %}
 {% if r.tool_log %}
-<section class="card"><details><summary><b>工具调用（{{ r.tool_log | length }} 次）</b></summary>
-  {% for x in r.tool_log %}<details class="tool"><summary class="small mono">T{{ loop.index }} {{ x.tool }} {{ x.args | tojson | truncate(160) }}</summary>
+<section class="card"><details class="rev-tools"><summary><h2>工具调用（{{ r.tool_log | length }} 次）</h2></summary>
+  {% for x in r.tool_log %}<details class="tool" id="tool-{{ loop.index }}"><summary class="small mono">T{{ loop.index }} {{ x.tool }} {{ x.args | tojson | truncate(160) }}</summary>
     <pre class="log">{{ x.result }}</pre></details>{% endfor %}
 </details></section>
 {% endif %}
+</div>
+{% set chat_title = "研讨对话" %}{% set chat_dossier = r.dossier_id %}{% set chat_revision = r.id %}{% set chat_page = "revision" %}
+{% include "_chat.html" %}
+</div>
 {% endblock %}

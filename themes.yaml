@@ -1,0 +1,40 @@
+# 产业链瓶颈主题（选股器的桶 3，stock screen）。由你维护：主题 → 链条节点 → 公司代码。
+# - bottleneck: true 表示瓶颈环节（供给集中、扩产周期长、工艺 / 认证壁垒、涨价或交期拉长），打分时加权。
+# - tickers 写 A 股 6 位或港股 5 位代码，加引号；A+H 公司写一个即可（可用 "HK:01888" / "A:600183" 指定上市地）。
+#   只认港股通标的与 A 股；不在股票池里的代码会在 stock screen run / stock screen themes 中提示。
+# - 主题 agent（stock screen themes --suggest，或 WebUI 选股页）只提建议，你采纳后才会写进本文件。
+# 下面的初始内容取自 ref/价值投资新经济-投资思路蒸馏.md 第 5 节提到的方向与公司，仅作起点，请按自己的研究增删。
+
+themes:
+  - id: ai_optical
+    name: AI 算力 · 光互联
+    thesis: AI 数据中心的带宽需求推动光模块、光芯片、光纤光缆放量；高端光芯片与部分材料扩产周期长、良率壁垒高。
+    nodes:
+      - name: 光芯片（EML / CW 激光器）
+        bottleneck: true
+        why: 高速光芯片供给集中，良率与产能爬坡慢
+        tickers: ["688498"]
+      - name: 光模块 / 光器件
+        bottleneck: false
+        tickers: ["002281", "000988"]
+      - name: 光纤光缆
+        bottleneck: false
+        tickers: ["601869", "600487"]
+
+  - id: ai_pcb_materials
+    name: AI 服务器 · PCB 与覆铜板材料
+    thesis: AI 服务器与交换机推高高速覆铜板、电子布用量；高端电子布织机产能被少数厂商锁定。
+    nodes:
+      - name: 电子布（玻纤布）
+        bottleneck: true
+        why: 新织机产能被少数厂商锁定至 2028 年（据参考资料），扩产周期长
+        tickers: ["600176", "603256"]
+      - name: 覆铜板
+        bottleneck: false
+        tickers: ["600183", "HK:01888"]
+      - name: 覆铜板上游一体化（控股平台）
+        bottleneck: false
+        tickers: ["HK:00148"]
+      - name: PCB 制造
+        bottleneck: false
+        tickers: ["002384"]

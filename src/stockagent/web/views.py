@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from .. import app as appmod
-from .. import docs, jobs, monitor, newco, notify, scheduler, tracker
+from .. import chat, docs, jobs, monitor, newco, notify, scheduler, tracker
 from ..config import Company
 from ..docs import DOC_TYPES, SUPPORTED
 from ..utils import iso, lock_holder, parse_iso, utcnow
@@ -440,6 +440,48 @@ async def request_close(request: Request, rid: int):
     return back(request.headers.get("referer") or "/", ok="已关闭请求" if ok else None, err=None if ok else "没有这个未关闭的请求")
 
 
+IMPACT_ORDER = {"material": 0, "minor": 1, "unassessed": 2, "none": 3}
+
+
+def _evidence(events: list[dict] | None) -> list[dict]:
+    """修正依据的展示结构：元信息（时间、来源、重要性、方向、类型）、标题、带标签的字段（预期、待跟踪、发布后）。
+    排序：先按影响（实质 → 轻微 → 未评估 → 不影响），再按重要性从高到低（证伪条件升级视同最高），最后按时间从新到旧。"""
+    out = []
+    for e in events or []:
+        parts = [x.strip() for x in (e.get("text") or "").split("｜") if x.strip()]
+        body = parts[1:] if len(parts) > 1 else parts
+        if e.get("kind") == "event" and len(body) >= 6:
+            meta, title, rest = body[:5], body[5], body[6:]
+        else:
+            meta, title, rest = [], (body[0] if body else ""), body[1:]
+        fields = {}
+        for x in rest:
+            k, sep, v = x.partition("：")
+            if sep and len(k) <= 6:
+                if k != "原文":
+                    fields[k] = v
+            else:
+                title += "｜" + x
+        weight = 5 if e.get("kind") == "trigger" else (e.get("materiality") or 0)
+        out.append({**e, "meta": [m for m in meta if not m.startswith("重要性")], "title": title, "weight": weight,
+                    "reaction": fields.pop("发布后", None), "extra": list(fields.items())})
+    out.sort(key=lambda x: x["meta"][0] if x["meta"] else "", reverse=True)
+    out.sort(key=lambda x: (IMPACT_ORDER.get(x.get("impact"), 2), -x["weight"]))
+    return out
+
+
+def _flags(flags: list[str] | None) -> list[dict]:
+    """提示与待确认问题：「类别：标题——说明」拆开展示。"""
+    out = []
+    for f in flags or []:
+        head, _, detail = f.partition("——")
+        tag, sep, title = head.partition("：")
+        if not sep or len(tag) > 10:
+            tag, title = "", head
+        out.append({"tag": tag, "title": title, "detail": detail})
+    return out
+
+
 @router.get("/c/{cid}/revisions/{rid}")
 def revision_page(request: Request, cid: str, rid: int):
     app = holder(request).app
@@ -448,8 +490,14 @@ def revision_page(request: Request, cid: str, rid: int):
     if r is None or r["company_id"] != cid:
         raise HTTPException(404, "没有这条修正记录")
     prev = next((x for x in app.db.revisions(cid) if x["id"] < rid), None)
-    return page(request, "revision.html", c=c, r=r, model=load_model(r["model"]), prev_model=load_model(prev["model"]) if prev else None,
-                confirmed=tracker.confirmed_refs(app, c))
+    model = load_model(r["model"])
+    prev_model = load_model(prev["model"]) if prev else None
+    evidence = _evidence(r["events"])
+    return page(request, "revision.html", c=c, r=r, model=model, prev_model=prev_model, compare=_compare(model, prev_model),
+                evidence=[e for e in evidence if e.get("impact") != "none"], unaffected=[e for e in evidence if e.get("impact") == "none"],
+                confirmed=tracker.confirmed_refs(app, c), flags=_flags(r["flags"]),
+                chats=[x for x in app.db.chats(cid) if x["revision_id"] == rid], quick=chat.QUICK_REVISION,
+                chat_reason=app.llm.unavailable_reason("chat"), chat_model=app.llm.describe("chat"))
 
 
 @router.get("/c/{cid}/report")
@@ -463,7 +511,9 @@ def report_page(request: Request, cid: str, did: int | None = None):
     s = tracker.status(app, c)
     revs = [r for r in app.db.revisions(cid) if r["dossier_id"] == d["id"]]
     return page(request, "report.html", c=c, d=d, s=s, revisions=revs,
-                baseline=next((r for r in reversed(revs) if r["kind"] == "baseline"), None))
+                baseline=next((r for r in reversed(revs) if r["kind"] == "baseline"), None),
+                chats=[x for x in app.db.chats(cid) if x["dossier_id"] == d["id"] and not x["revision_id"]], quick=chat.QUICK_QUESTIONS,
+                chat_reason=app.llm.unavailable_reason("chat"), chat_model=app.llm.describe("chat"))
 
 
 # ---------------------------------------------------------------- 事件与文件
@@ -571,7 +621,7 @@ def status_page(request: Request):
     return page(request, "status.html", stats=app.db.stats(), breakers=breakers, usage=app.db.llm_usage_by(since),
                 channels=notify.channels(app.settings), missing=notify.missing(app.settings), locks=locks, config_path=h.config_path,
                 tasks={t: (app.llm.describe(t), app.llm.unavailable_reason(t)) for t in
-                       ("triage", "stock_brief", "market_brief", "profile", "research", "dossier", "monitor", "tracker")},
+                       ("triage", "stock_brief", "market_brief", "profile", "research", "dossier", "monitor", "tracker", "chat")},
                 today=date.today())
 
 

@@ -59,13 +59,20 @@ TASKS: dict[str, Task] = {t.key: t for t in [
          desc="依次运行：抓取 → 下载年报 → 分级 → 画像 → 深度报告 → 开始追踪"),
     Task("add_company", "新增公司并初始化", ("add",), (), "none", "dossier", category="追踪管理", listing=True,
          desc="按市场与代码查公司资料写入观察清单，再依次抓取 → 下载年报 → 分级 → 画像 → 深度报告 → 开始追踪"),
+    Task("screen_run", "选股器", ("screen", "run"), ("--long-only", "--event-only", "--no-llm", "--push"), "none", "screen",
+         category="选股", desc="港股通 + A 股全市场初筛：刷新数据 → 代码打分 → 模型快筛；长线池每周、事件池每个交易日"),
+    Task("screen_refresh", "选股器：刷新数据", ("screen", "refresh"), (), "none", "screen", category="选股",
+         desc="只刷新股票池、报表与全市场公告事件，不打分"),
+    Task("screen_themes", "选股器：主题 agent", ("screen", "themes", "--suggest"), (), "none", "screen", category="选股",
+         desc="按 themes.yaml 的产业链主题找瓶颈环节的公司，结果是建议，在选股页采纳后才写入主题文件"),
     Task("llm_test", "测试模型连接", ("llm-test",), (), "none", profile=True, category="维护", desc="逐个测试文本与 JSON 输出"),
     Task("eval", "事后检验", ("eval",), (), "any", category="维护", desc="统计已分级事件发布后的超额收益，检验分级有没有预测力"),
 ]}
-CATEGORIES = ["常用", "资料与分级", "追踪管理", "维护"]
+CATEGORIES = ["常用", "资料与分级", "追踪管理", "选股", "维护"]
 FLAG_LABEL = {"--push": "推送", "--no-llm": "不调用模型", "--no-fetch": "不抓取（只处理已分级的依据）", "--force": "强制重做",
               "--reuse-notes": "复用研究笔记", "--refill": "重新补缺", "--dossier": "缺报告时先生成", "--no-prices": "不抓行情",
-              "--no-filings": "不抓公告", "--no-news": "不抓新闻", "--no-push": "不推送"}
+              "--no-filings": "不抓公告", "--no-news": "不抓新闻", "--no-push": "不推送",
+              "--long-only": "只跑长线池", "--event-only": "只跑事件池"}
 
 
 class JobError(ValueError):

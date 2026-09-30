@@ -51,6 +51,10 @@ LABELS: dict[str, tuple[str, str]] = {
     "web.port": ("端口", "修改后重启 stock web 生效"),
     "web.max_jobs": ("同时运行的后台任务数", "深度报告另有全局互斥：同一时间只跑一个"),
     "web.upload_max_mb": ("上传文档大小上限（MB）", ""),
+    # 报告研读对话
+    "chat.web_search": ("对话可用网页搜索", "深度报告运行期间自动暂停，避免争抢搜索源"),
+    "chat.max_steps": ("每次回答最多工具轮数", ""),
+    "chat.max_turns": ("追问时带上的历史轮数", "另受模型 profile 的 max_input_chars 限制"),
     # 标的追踪
     "tracker.min_materiality": ("触发修正的最低事件重要性", "1–5；分级低于它的事件只展示，不进入修正"),
     "tracker.max_events": ("每次修正最多处理的依据数", "其余留到下次"),

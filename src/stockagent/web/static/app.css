@@ -195,3 +195,108 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
 .quick-add input[name=code] { width: 16em; }
 .quick-add select, .quick-add input { width: auto; }
 @media (max-width: 700px) { .quick-add input[name=code] { flex: 1 1 10em; width: auto; } }
+
+/* 报告研读对话：报告页右侧栏；窄屏为全屏弹层 */
+.report-layout { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 16px; align-items: start; }
+.report-layout.chat-off { grid-template-columns: minmax(0, 1fr); }
+.report-layout.chat-off .chat { display: none; }
+.report-main { min-width: 0; }
+.chat { position: sticky; top: 64px; height: calc(100vh - 80px); display: flex; flex-direction: column; background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.chat-head { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.chat-head select { flex: 1; min-width: 0; font-size: 12.5px; padding: 3px 6px; }
+.chat-note { padding: 6px 12px; background: var(--warn-bg); color: var(--warn); line-height: 1.5; }
+.chat-log { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
+.chat-quick { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.chat-quick .btn { text-align: left; white-space: normal; }
+.chat-msg { border-radius: 8px; padding: 8px 10px; overflow-wrap: anywhere; }
+.chat-msg.user { background: var(--accent-bg); align-self: flex-end; max-width: 92%; white-space: pre-wrap; }
+.chat-msg.assistant { background: var(--bg); border: 1px solid var(--line); }
+.chat-answer { line-height: 1.65; font-size: 13.5px; white-space: pre-wrap; }
+.chat-answer.md { white-space: normal; }
+.chat-answer:empty { display: none; }
+.chat-answer.md > :first-child { margin-top: 0; }
+.chat-answer.md > :last-child { margin-bottom: 0; }
+/* 回答过程：思考、工具调用、中间说明 */
+.chat-trace { margin-bottom: 6px; font-size: 12.5px; }
+.chat-trace > summary { cursor: pointer; color: var(--muted); user-select: none; }
+.chat-steps { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 2px; padding-left: 10px; border-left: 2px solid var(--line); }
+.step { color: var(--muted); }
+.step-h { font-weight: 600; margin-bottom: 2px; }
+.step .step-body { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 16em; overflow-y: auto; line-height: 1.55; }
+.step.thinking .step-body { font-style: italic; }
+.step.text .step-body { color: var(--fg); }
+.step.note { color: var(--warn); }
+.step.tool > summary { cursor: pointer; display: flex; gap: 6px; align-items: baseline; }
+.step.tool .step-label { color: var(--fg); overflow-wrap: anywhere; }
+.step.tool pre.step-body { margin: 4px 0 0; padding: 6px 8px; background: var(--code); border-radius: 6px; font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.step-state { margin-left: auto; white-space: nowrap; font-size: 11.5px; }
+.step-state.ok { color: var(--ok); } .step-state.bad { color: var(--bad); } .step-state.run { color: var(--accent); }
+.chat-web { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; cursor: pointer; }
+.chat-web input { margin: 0; }
+/* 全屏 */
+.report-layout.chat-full .chat { display: flex; position: fixed; inset: 0; top: 0; height: 100%; z-index: 40; border-radius: 0; border: 0; }
+.report-layout.chat-full .chat-log, .report-layout.chat-full .chat-form, .report-layout.chat-full .chat-note {
+  padding-left: max(16px, calc((100% - 920px) / 2)); padding-right: max(16px, calc((100% - 920px) / 2)); }
+.report-layout.chat-full .chat-answer { font-size: 14.5px; }
+body.chat-lock { overflow: hidden; }
+.chat-msg.error, .chat-msg.error .chat-answer { background: var(--bad-bg); color: var(--bad); }
+.chat-msg .qt { display: block; border-left: 3px solid var(--accent); padding-left: 8px; margin-bottom: 6px; color: var(--muted); font-size: 12.5px;
+  max-height: 6.5em; overflow: hidden; }
+.chat-progress { color: var(--muted); font-size: 12.5px; }
+.chat-progress::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--accent);
+  animation: chat-pulse 1s ease-in-out infinite alternate; }
+@keyframes chat-pulse { from { opacity: .25; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .chat-progress::before { animation: none; } }
+.chat-checks { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--line); font-size: 12px; color: var(--muted); }
+.chat-checks .ok { color: var(--ok); } .chat-checks .warn { color: var(--warn); }
+.chat-checks button.link { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-align: left; }
+.chat-form { border-top: 1px solid var(--line); padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 6px; }
+.chat-form textarea { width: 100%; resize: vertical; }
+.chat-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.chat-foot .muted { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-quote { display: flex; gap: 6px; align-items: flex-start; font-size: 12.5px; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 8px; }
+.chat-quote span { flex: 1; max-height: 4.8em; overflow: hidden; }
+.chat-ask { position: absolute; z-index: 20; border: 0; border-radius: 6px; padding: 4px 10px; background: var(--accent); color: #fff; font: inherit;
+  font-size: 12.5px; cursor: pointer; box-shadow: 0 2px 8px rgba(0, 0, 0, .2); }
+.report .chat-hit { background: var(--warn-bg); outline: 2px solid var(--warn); border-radius: 4px; transition: background .3s; }
+@media (max-width: 900px) {
+  .report-layout, .report-layout.chat-off { grid-template-columns: minmax(0, 1fr); }
+  .report-layout .chat { display: none; }
+  .report-layout.chat-open .chat { display: flex; position: fixed; inset: 0; top: 0; height: 100%; z-index: 30; border-radius: 0; }
+}
+
+/* 修正详情页 */
+.rev-lead { font-size: 15px; font-weight: 600; line-height: 1.6; margin: 12px 0 6px; }
+.rev-flags { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.rev-flags li { padding: 8px 10px; border-radius: 8px; background: var(--warn-bg); line-height: 1.55; }
+.rev-flags li .muted { margin-top: 3px; }
+.tbl.rev-changes td { line-height: 1.55; }
+.evref { font-size: 11.5px; padding: 0 5px; border-radius: 4px; background: var(--code); margin-right: 2px; white-space: nowrap; }
+details.rev-notes > summary, details.rev-tools > summary { cursor: pointer; list-style-position: outside; }
+details.rev-notes > summary h2, details.rev-tools > summary h2 { display: inline; }
+details.rev-notes .md { margin-top: 8px; }
+.ev { border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 8px; padding: 9px 12px; margin-top: 10px; }
+.ev.imp-material { border-left-color: var(--accent); }
+.ev.imp-minor { border-left-color: var(--warn); }
+.ev-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ev-code { margin-left: auto; font-size: 11px; color: var(--muted); }
+.ev-title { margin-top: 5px; line-height: 1.6; overflow-wrap: anywhere; }
+.ev-note { margin-top: 5px; padding: 6px 9px; border-radius: 6px; background: var(--accent-bg); font-size: 13px; line-height: 1.6; }
+.ev-more { margin-top: 5px; color: var(--muted); }
+.ev-more > summary { cursor: pointer; }
+.ev-more div { margin-top: 3px; line-height: 1.55; }
+.ev-rest { margin-top: 12px; }
+.ev-rest > summary { cursor: pointer; color: var(--muted); }
+.ev-row { padding: 7px 0; border-bottom: 1px dashed var(--line); line-height: 1.55; overflow-wrap: anywhere; }
+.ev-row:last-child { border-bottom: 0; }
+.target-hit { animation: target-hit 2.2s ease-out; }
+@keyframes target-hit { from { background: var(--warn-bg); } to { background: transparent; } }
+.tbl.model tr:not(.drivers-row) > td:first-child { white-space: nowrap; }
+.tbl.model tr.drivers-row td { white-space: normal; }
+.tbl.model tr:has(+ .drivers-row) td { border-bottom: 0; padding-bottom: 2px; }
+.tbl.model tr.drivers-row td { font-size: 12.5px; color: var(--fg); line-height: 1.6; padding-top: 0; }
+.rev-notes .md h1 { font-size: 17px; margin: 12px 0 6px; }
+.rev-notes .md h2 { font-size: 15px; margin: 14px 0 6px; }
+.rev-notes .md h3 { font-size: 14px; }

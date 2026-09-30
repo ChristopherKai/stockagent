@@ -1,0 +1,33 @@
+{# 报告研读 / 修正研讨对话侧栏。需要：c、chat_title、chat_dossier、chat_revision、chat_page（report | revision）、
+   chats、quick、chat_reason、chat_model。正文区域标 data-report-body（「问这段」与引文定位） #}
+<aside class="chat" id="chat" data-chat data-cid="{{ c.id }}" data-dossier="{{ chat_dossier }}" data-revision="{{ chat_revision }}"
+       data-page="{{ chat_page }}" data-report-url="/c/{{ c.id }}/report?did={{ chat_dossier }}" aria-label="{{ chat_title }}">
+  <div class="chat-head">
+    <b>{{ chat_title }}</b>
+    <select data-chat-select aria-label="历史对话">
+      <option value="">＋ 新对话</option>
+      {% for x in chats %}<option value="{{ x.id }}">{{ x.title }}（{{ x.updated_at | when }}）</option>{% endfor %}
+    </select>
+    <button type="button" class="btn tiny ghost" data-chat-delete hidden title="删除这个对话">删除</button>
+    <button type="button" class="btn tiny ghost" data-chat-full title="全屏（Esc 退出）" aria-pressed="false">⤢</button>
+    <button type="button" class="btn tiny ghost" data-chat-close title="收起">✕</button>
+  </div>
+  <div class="chat-log" data-chat-log aria-live="polite">
+    <div class="chat-empty" data-chat-empty>
+      <p class="muted small">遇到看不懂的术语、数字或推理，可以在这里提问；在正文中选中一段文字，可以直接「问这段」。</p>
+      <div class="chat-quick">{% for q in quick %}<button type="button" class="btn tiny ghost" data-chat-quick>{{ q }}</button>{% endfor %}</div>
+    </div>
+  </div>
+  {% if chat_reason %}<div class="flash err small">对话模型不可用：{{ chat_reason }}（在「设置 → 模型」为 chat 任务配置可用的模型）</div>{% endif %}
+  <form class="chat-form" data-chat-form>
+    <div class="chat-quote" data-chat-quote hidden><span data-chat-quote-text></span><button type="button" class="btn tiny ghost" data-chat-quote-clear title="取消引用">✕</button></div>
+    <textarea rows="3" maxlength="2000" placeholder="输入问题（Enter 发送，Shift+Enter 换行）" data-chat-input {{ 'disabled' if chat_reason }}></textarea>
+    <div class="chat-foot">
+      <label class="chat-web small" title="允许网页搜索与打开网页（深度报告运行期间自动暂停）">
+        <input type="checkbox" data-chat-web {{ 'checked' if app.settings.chat.web_search }}> 联网搜索</label>
+      <span class="muted small" title="{{ chat_model }}">模型：{{ chat_model }}</span>
+      <button type="submit" class="btn small" data-chat-send {{ 'disabled' if chat_reason }}>发送</button></div>
+    <div class="muted small">{{ DISCLAIMER }}</div>
+  </form>
+</aside>
+<button type="button" class="chat-ask" data-chat-ask hidden>问这段</button>
