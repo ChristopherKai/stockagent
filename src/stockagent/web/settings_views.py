@@ -53,7 +53,8 @@ PROFILE_LABELS = {
 }
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,40}$")
 SEARCH_KEYS = {"EXA_API_KEY": "Exa 搜索", "BOCHA_API_KEY": "博查搜索", "TAVILY_API_KEY": "Tavily 搜索", "SERPER_API_KEY": "Serper 搜索"}
-SECTIONS = {"sources": "数据源", "report": "简报", "agent": "研究 agent", "notify": "推送", "web": "WebUI", "chat": "报告研读对话"}
+SECTIONS = {"sources": "数据源", "report": "简报", "agent": "研究 agent", "consensus": "业绩 vs 一致预期", "notify": "推送",
+            "web": "WebUI", "chat": "报告研读对话"}
 for k, v in PROFILE_LABELS.items():
     forms.LABELS[f"profile.{k}"] = v
 

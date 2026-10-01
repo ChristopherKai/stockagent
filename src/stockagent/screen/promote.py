@@ -35,7 +35,7 @@ def entry(app: App, u: dict) -> dict:
     listings = [u]
     if u.get("org_code"):
         listings += [x for x in store.universe(app.db) if x["org_code"] == u["org_code"] and x["secid"] != u["secid"]]
-    listings.sort(key=lambda x: x["market"] != "A")  # A+H 公司 A 股在前（fcf_yield 等工具用 A 股报表与市值）
+    listings.sort(key=lambda x: x["market"] != "A")  # 只是排列顺序：定价上市地默认港股（Company.pricing_listing）
     last = next((h for h in reversed(store.all_hits(app.db)) if h["secid"] in {x["secid"] for x in listings}), None)
     note = f"由选股器加入（{today_local():%Y-%m-%d}）"
     watch = []

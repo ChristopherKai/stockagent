@@ -196,11 +196,12 @@ def _year(label: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def quote_shares(quote: dict | None) -> float | None:
-    """行情快照推算的总股本（亿股）：市值 ÷ 现价。"""
+def quote_shares(quote: dict | None, listing=None) -> float | None:
+    """行情快照推算的总股本（亿股）：市值 ÷ 现价。美股 ADS 的行情按 ADS 计，乘以每 ADS 股数换成普通股。"""
     if not quote or not quote.get("market_cap") or not quote.get("price"):
         return None
-    return quote["market_cap"] / quote["price"] / 1e8
+    ratio = (listing.ads_ratio or 1.0) if listing is not None and listing.market == "US" else 1.0
+    return quote["market_cap"] / quote["price"] / 1e8 * ratio
 
 
 def matrix_candidates(tool_log: list[dict], shares_ref: float | None) -> tuple[list[dict], list[str]]:
@@ -242,6 +243,60 @@ def match_endpoints(cells: dict, scenarios: list[dict], tol: float = MATCH_TOL) 
     return hits
 
 
+def endpoint_candidates(cells: dict, scenario: dict, tol: float = MATCH_TOL) -> list[float]:
+    """情景的 price_low / price_high 在容差内命中的所有格点的驱动值（同一价格常对应多个格点）。"""
+    out = set()
+    for end in ("price_low", "price_high"):
+        v = scenario.get(end)
+        if v:
+            out |= {d for (d, _), cell in cells.items() if abs(cell - v) <= abs(v) * tol}
+    return sorted(out)
+
+
+_PLAIN_NUM = re.compile(r"(?<![A-Za-z0-9.])\d[\d,]*(?:\.\d+)?")  # 前面是汉字也算数字的开头（\w 会匹配汉字）
+
+
+def narrative_drivers(text: str, drivers: list[float]) -> list[float]:
+    """情景描述里写明、且是矩阵某一行取值的驱动指标（如「2027E 收入 1,000–1,100 亿元」中的 1000 与 1100）。"""
+    out = set()
+    for raw in _PLAIN_NUM.findall(text or ""):
+        x = raw.replace(",", "")
+        digits = len(x.split(".")[1]) if "." in x else 0
+        out |= {d for d in drivers if d and round(d, digits) == float(x)}  # 按写出的位数比较：1,206 不算 1200
+    return sorted(out)
+
+
+def choose_drivers(scen: list[dict], cells: dict, closest: dict[str, list[tuple[float, float]]],
+                   drivers_all: list[float]) -> tuple[dict[str, float], list[str]]:
+    """每个情景的驱动指标：优先用情景描述里写明的矩阵行；否则在命中的格点里牛市取最大、熊市取最小、基准取最近格点的均值；
+    再保证 牛 ≥ 基准 ≥ 熊（驱动都为正时）——同一价格可由「高驱动 × 低倍数」或「低驱动 × 高倍数」得到，
+    只按价格对格点会出现熊市收入高于基准这类与情景叙述相反的拆分。返回 ({情景: 驱动}, 标注)。"""
+    chosen, cands, flags = {}, {}, []
+    for s in scen:
+        name = s["name"]
+        told = narrative_drivers(s.get("drivers", ""), drivers_all)
+        hit = endpoint_candidates(cells, s)
+        cands[name] = sorted(set(told) | set(hit))
+        if told:
+            chosen[name] = statistics.mean(told)
+        elif hit:
+            near = [d for d, _ in closest.get(name, [])]
+            chosen[name] = max(hit) if name == "bull" else min(hit) if name == "bear" else statistics.mean(near or hit)
+        else:
+            chosen[name] = statistics.median(drivers_all)
+    base = chosen.get("base")
+    if base is None or any(v <= 0 for v in chosen.values()):
+        return chosen, flags
+    for name, ok, pick in (("bear", lambda v: v <= base, max), ("bull", lambda v: v >= base, min)):
+        if name in chosen and not ok(chosen[name]):
+            good = [v for v in cands[name] if ok(v)]
+            old = chosen[name]
+            chosen[name] = pick(good) if good else base
+            flags.append(f"{SCENARIO_LABEL[name]}情景的驱动指标由 {old:g} 调整为 {chosen[name]:g}，以保持 牛 ≥ 基准 ≥ 熊"
+                         + ("" if good else "（命中的格点里没有满足顺序的取值，取基准情景的值）"))
+    return chosen, flags
+
+
 def _range_model(card_scenarios: list[dict], listing: str, currency: str, source: str) -> ValuationModel:
     pts = [ScenarioPoint(name=s["name"], driver=(s["price_low"] + s["price_high"]) / 2, multiple=1.0,
                          probability=s.get("probability") or 0, low=s["price_low"], high=s["price_high"],
@@ -256,7 +311,8 @@ def build_baseline(app, company, dossier: dict) -> tuple[ValuationModel, list[st
     返回 (模型, 标注)。标注提示需要人工留意的地方（股本存疑、驱动年份已到、只能按比例修正等）。"""
     card = dossier["card"]
     tool_log = dossier.get("tool_log") or json.loads(dossier.get("tool_log_json") or "[]")
-    listing = company.listings[0]
+    # 情景价格按报告当时的定价上市地写成；旧卡没有记录，当时按第一个上市地定价
+    listing = next((l for l in company.listings if l.key == card.get("price_listing")), company.listings[0])
     price_ccy = listing.currency
     scen = [s for s in card.get("scenarios", []) if s.get("name") in SCENARIOS and s.get("price_low") and s.get("price_high")]
     seen: set[str] = set()
@@ -266,7 +322,7 @@ def build_baseline(app, company, dossier: dict) -> tuple[ValuationModel, list[st
     if not scen:
         raise ValueError(f"深度报告 #{did} 的跟踪卡没有情景价格，无法建立估值基线")
 
-    shares_ref = quote_shares(app.db.quote(app.secid(listing)))
+    shares_ref = quote_shares(app.db.quote(app.secid(listing)), listing)
     if shares_ref is None:
         flags.append(f"没有 {listing.display} 的行情快照，未能核对估值矩阵的股本")
     calls, skipped = matrix_candidates(tool_log, shares_ref)
@@ -289,11 +345,12 @@ def build_baseline(app, company, dossier: dict) -> tuple[ValuationModel, list[st
     if not report_ccy:
         flags.append(f"无法判断报告币种（矩阵汇率 {fx:g}），之后不按最新汇率刷新")
     drivers_all = [float(d) for d in a["driver_values"]]
+    chosen, order_flags = choose_drivers(scen, best["cells"], best_hits, drivers_all)
+    flags += order_flags
     points = []
     for s in scen:
         mid = (s["price_low"] + s["price_high"]) / 2
-        matched = [d for d, _ in best_hits.get(s["name"], [])]
-        driver = statistics.mean(matched) if matched else statistics.median(drivers_all)
+        driver = chosen[s["name"]]
         # 反解倍数，使情景股价恰好等于区间中值
         multiple = (mid / fx * shares - net_cash) / driver if driver else float("nan")
         if not math.isfinite(multiple) or multiple <= 0:
@@ -389,14 +446,123 @@ def check_value(model: ValuationModel, path: str, value: float) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------- 情景的风险收益统计与参考立场
+
+STANCE_LABEL = {"bullish": "偏多", "neutral": "中性", "bearish": "偏空"}
+
+
+def _excess(lo: float, hi: float, c: float) -> float:
+    """X ~ 均匀分布 [lo, hi]：E[max(X − c, 0)]。"""
+    if c <= lo:
+        return (lo + hi) / 2 - c
+    return 0.0 if c >= hi else (hi - c) ** 2 / (2 * (hi - lo))
+
+
+def _shortfall(lo: float, hi: float, c: float) -> float:
+    """X ~ 均匀分布 [lo, hi]：E[max(c − X, 0)]。"""
+    if c >= hi:
+        return c - (lo + hi) / 2
+    return 0.0 if c <= lo else (c - lo) ** 2 / (2 * (hi - lo))
+
+
+def risk_stats(model: ValuationModel, price: float | None) -> dict | None:
+    """情景表的风险收益统计（代码计算）：
+    - 加权空间 = 概率加权价格 ÷ 现价 − 1；基准情景空间 = 基准情景价 ÷ 现价 − 1；
+    - 跌破现价的概率：每个情景按报告原区间均匀分布（区间按「当前情景价 ÷ 原区间中点」同比缩放，没有区间时视为单点）；
+    - 上行/下行比 = 高于现价部分的期望幅度 ÷ 低于现价部分的期望幅度。"""
+    if not price or price <= 0:
+        return None
+    probs = model.probabilities()
+    up = down = below = 0.0
+    for s in model.scenarios:
+        p, v = probs[s.name], model.price(s)
+        lo, hi = s.low, s.high
+        if lo is not None and hi is not None and hi > lo > 0:
+            k = v / ((lo + hi) / 2)
+            lo, hi = lo * k, hi * k
+            below += p * min(max((price - lo) / (hi - lo), 0.0), 1.0)
+            up, down = up + p * _excess(lo, hi, price), down + p * _shortfall(lo, hi, price)
+        else:
+            below += p * (v < price)
+            up, down = up + p * max(v - price, 0.0), down + p * max(price - v, 0.0)
+    base, bull = model.scenario("base"), model.scenario("bull")
+    expected = model.expected()
+    return {"price": price, "expected": expected, "upside": expected / price - 1,
+            "base_upside": model.price(base) / price - 1 if base else None,
+            "bull_upside": model.price(bull) / price - 1 if bull else None,
+            "p_below": below, "ratio": up / down if down > 0 else None}
+
+
+def reference_stance(stats: dict, band: float) -> tuple[str, str]:
+    """按情景数字给出参考立场与理由（与跟踪卡、修正提示词里的定义一致）：
+    偏多 = 加权空间 ≥ +band 且跌破现价的概率 < 50%；偏空 = 加权空间 ≤ −band，或基准情景低于现价且跌破现价的概率 > 50%；其余中性。"""
+    u, pb, bu = stats["upside"], stats["p_below"], stats["base_upside"]
+    if u <= -band:
+        return "bearish", f"加权空间 {_pct(u)}，低于 −{band:.0%}"
+    if bu is not None and bu < 0 and pb > 0.5:
+        return "bearish", f"基准情景低于现价（{_pct(bu)}）、跌破现价的概率 {pb:.0%}"
+    if u >= band and pb < 0.5:
+        return "bullish", f"加权空间 {_pct(u)}，达到 +{band:.0%}，跌破现价的概率 {pb:.0%}"
+    if u >= band:
+        return "neutral", f"加权空间 {_pct(u)}，但跌破现价的概率 {pb:.0%}，不足以偏多"
+    return "neutral", f"加权空间 {_pct(u)} 在 ±{band:.0%} 以内"
+
+
+def stance_check(stance: str | None, stats: dict | None, band: float) -> dict | None:
+    """报告（或修正）立场与情景数字的对账：{ref, reason, mismatch, note}。立场本身不由代码修改。"""
+    if not stats:
+        return None
+    ref, reason = reference_stance(stats, band)
+    note, mismatch = "", bool(stance) and stance != ref
+    if mismatch:
+        note = (f"报告立场{STANCE_LABEL.get(stance, stance)}，按情景数字的参考立场为{STANCE_LABEL[ref]}（{reason}）")
+        if stance == "bearish" and stats["upside"] > 0 and (stats.get("bull_upside") or 0) > 0:
+            note += f"；加权空间为正是因为牛市情景（{_pct(stats['bull_upside'])}）抬高了均值"
+    elif stance and (stance == "bearish") == (stats["upside"] > 0) and stance != "neutral":
+        tail = (f"牛市情景（{_pct(stats['bull_upside'])}）" if stance == "bearish" else "熊市情景")
+        note = f"加权空间为{'正' if stats['upside'] > 0 else '负'}，是因为{tail}{'抬高' if stats['upside'] > 0 else '拉低'}了均值；" \
+               f"{STANCE_LABEL[stance]}的依据是{reason}"
+    return {"ref": ref, "reason": reason, "mismatch": mismatch, "note": note}
+
+
+def stats_line(stats: dict | None, check: dict | None = None) -> str:
+    """一行文字：加权空间、基准情景空间、跌破现价概率、上行/下行比与参考立场。"""
+    if not stats:
+        return ""
+    line = (f"加权空间 {_pct(stats['upside'])}｜基准情景 {_pct(stats['base_upside'])}｜跌破现价概率约 {stats['p_below']:.0%}"
+            + (f"｜上行/下行 {stats['ratio']:.2f}" if stats.get("ratio") else ""))
+    if check:
+        line += f"｜参考立场 {STANCE_LABEL[check['ref']]}" + (" ⚠" if check["mismatch"] else "")
+        if check["note"]:
+            line += f"（{check['note']}）"
+    return line
+
+
+def _pct(v: float | None) -> str:
+    if v is None:
+        return "—"
+    return f"{v:+.2%}" if abs(v) < 0.01 else f"{v:+.1%}"  # 接近 0 时多给一位，避免显示成 -0.0%
+
+
+def card_stats(card: dict, price: float | None, band: float) -> dict | None:
+    """深度报告刚写好时，按跟踪卡的情景区间（中点）与现价计算统计与参考立场，写进跟踪卡（报告附录展示）。"""
+    scen = [x for x in card.get("scenarios", []) if x.get("name") in SCENARIOS and x.get("price_low") and x.get("price_high")]
+    if not scen or not price:
+        return None
+    model = _range_model(scen, "", "", "")
+    stats = risk_stats(model, price)
+    return {**stats, "check": stance_check(card.get("stance"), stats, band)} if stats else None
+
+
 # ---------------------------------------------------------------- 展示
 
 def fmt(v: float | None, digits: int = 2) -> str:
     return "—" if v is None or not math.isfinite(v) else f"{v:,.{digits}f}"
 
 
-def describe(model: ValuationModel, target_mode: str = "expected") -> str:
-    """估值模型的 Markdown 表（提示词、CLI 与报告附录共用）。"""
+def describe(model: ValuationModel, target_mode: str = "expected", price: float | None = None, stance: str | None = None,
+             band: float = 0.15) -> str:
+    """估值模型的 Markdown 表（提示词、CLI 与报告附录共用）。给出现价时附上情景统计与参考立场。"""
     ccy = model.price_currency
     probs = model.probabilities()
     if model.method == "matrix":
@@ -415,16 +581,39 @@ def describe(model: ValuationModel, target_mode: str = "expected") -> str:
                  f"{s.drivers_text.replace('|', '/')} |" for s in model.scenarios]
     tail = (f"{TARGET_LABEL}：{fmt(model.target(target_mode))} {ccy}"
             + ("（概率加权）" if target_mode == "expected" else "（基准情景）") + f"；来源：{model.source}")
-    return "\n".join([head, "", *rows, "", tail])
+    out = [head, "", *rows, "", tail]
+    if stats := risk_stats(model, price):
+        out.append(f"情景统计（现价 {fmt(price)} {ccy}，代码计算）：{stats_line(stats, stance_check(stance, stats, band))}")
+    return "\n".join(out)
+
+
+def _last_close(app, listing) -> float | None:
+    bars = app.bars(app.secid(listing), limit=5)
+    return float(bars["close"].iloc[-1]) if bars is not None else None
+
+
+def _ads(listing) -> float | None:
+    """每单位股价对应的普通股数：美股 ADS 为换股比例（未填写时未知），其他上市地为 1。"""
+    return (listing.ads_ratio or None) if listing.market == "US" else 1.0
 
 
 def equivalents(app, model: ValuationModel, company, target: float) -> list[str]:
-    """其他上市地的等值价格（按汇率折算，不含 AH 溢价）。美股 ADS 需要换股比例，暂不展示。"""
+    """其他上市地的等值价格（只读库，不联网）。
+    主口径按当前价比折算：目标价 × 该地现价 ÷ 定价上市地现价——各上市地的空间相同，已包含 AH / ADS 溢价与换股比例；
+    另给汇率平价（不计溢价）作参考，美股需要在观察清单里填写 ads_ratio。"""
+    base = next((l for l in company.listings if l.key == model.listing), None)
+    if base is None:
+        return []
+    p0 = _last_close(app, base)
     out = []
     for l in company.listings:
-        if l.key == model.listing or l.market == "US":
+        if l.key == base.key:
             continue
+        p1 = _last_close(app, l)
+        line = (f"{l.display} 等值 {fmt(target * p1 / p0)} {l.currency}（按两地现价之比折算，与定价上市地空间相同）"
+                if p0 and p1 else f"{l.display}：缺少行情，无法折算")
         r = fx_rate(app, model.price_currency, l.currency)
-        if r:
-            out.append(f"{l.display} 等值 {fmt(target * r[0])} {l.currency}（按汇率折算，未计 AH 溢价）")
+        if r and _ads(l) and _ads(base):
+            line += f"；汇率平价 {fmt(target * r[0] * _ads(l) / _ads(base))} {l.currency}（不计溢价）"
+        out.append(line)
     return out

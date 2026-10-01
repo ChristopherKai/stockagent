@@ -20,7 +20,7 @@ from markupsafe import Markup, escape
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .. import chat, config, jobs, scheduler, tracker, triage, valuation
+from .. import chat, config, dossier, jobs, scheduler, tracker, triage, valuation
 from ..app import MARKET_LABEL, SOURCE_LABEL, App
 from ..db import DB
 from ..jobs import JobRunner
@@ -39,6 +39,7 @@ templates.env.globals.update(
     IMPACT_LABEL=tracker.IMPACT_LABEL, TRIGGER_LABEL=tracker.TRIGGER_LABEL, DIRECTIONS=triage.DIRECTIONS,
     EVENT_TYPES=triage.EVENT_TYPES, SOURCE_LABEL=SOURCE_LABEL, MARKET_LABEL=MARKET_LABEL, TASKS=jobs.TASKS,
     OP_LABEL=tracker.OP_LABEL, THESIS_HELP=tracker.THESIS_HELP, TASK_CATEGORIES=jobs.CATEGORIES, FLAG_LABEL=jobs.FLAG_LABEL,
+    DIRECTION_LABEL=dossier.DIRECTION_LABEL, falsifies=dossier.falsifies,
 )
 
 

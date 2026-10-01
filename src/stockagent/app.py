@@ -25,6 +25,7 @@ MARKET_LABEL = {"HK": "港股", "A": "A股", "US": "美股"}
 SOURCE_LABEL = {
     "hkex": "港交所", "cninfo": "巨潮", "sec": "SEC", "eastmoney": "东方财富",
     "google_news": "Google新闻", "ima": "ima知识库", "ccass": "港交所CCASS", "manual": "手动",
+    "consensus": "一致预期对比",
 }
 
 
@@ -93,16 +94,35 @@ class App:
             return None
         return technical.ah_premium(self.bars(self.secid(a)), self.bars(self.secid(h)), self.bars(FX_HKDCNH))
 
+    def ads_premium(self, company: Company) -> dict | None:
+        """美股 ADS 相对港股的溢价（需要在观察清单里填写美股上市地的 ads_ratio）。"""
+        us, hk = company.listing("US"), company.listing("HK")
+        if not (us and hk and us.ads_ratio):
+            return None
+        return technical.adr_premium(self.bars(self.secid(us)), self.bars(self.secid(hk)), self.bars(FX_USDCNH),
+                                     self.bars(FX_HKDCNH), us.ads_ratio)
+
+    def cross_premiums(self, company: Company) -> list[tuple[str, dict]]:
+        """同一家公司不同上市地之间的价差：[(标签, 溢价统计)]。"""
+        out = []
+        if ah := self.ah_premium(company):
+            out.append(("AH溢价（A相对H）", ah))
+        if ads := self.ads_premium(company):
+            out.append(("ADS溢价（美股相对港股）", ads))
+        return out
+
     def market_line(self, company: Company) -> str:
         parts = []
+        pricing = company.pricing_listing.key if len(company.listings) > 1 else None
         for l in company.listings:
             s = self.listing_snapshot(l)
+            tag = "（定价上市地）" if l.key == pricing else ""
             if not s:
-                parts.append(f"{MARKET_LABEL[l.market]} {l.display}：暂无行情")
+                parts.append(f"{MARKET_LABEL[l.market]} {l.display}{tag}：暂无行情")
                 continue
             q = s["quote"]
             parts.append(
-                f"{MARKET_LABEL[l.market]} {l.display}（{s['date']}）：收 {num(s['close'])} {l.currency}，"
+                f"{MARKET_LABEL[l.market]} {l.display}{tag}（{s['date']}）：收 {num(s['close'])} {l.currency}，"
                 f"1日 {pct(s['ret_1d'])}，5日 {pct(s['ret_5d'])}，20日 {pct(s['ret_20d'])}，"
                 f"20日超额 {pct(s.get('excess_20d'))}，趋势 {s['trend']}，RSI14 {num(s['rsi14'], 0)}，"
                 f"量比 {num(s['vol_ratio'], 1)}，距250日高点 {pct(s['from_high'])}"
@@ -110,10 +130,9 @@ class App:
                 + (f"，南向持股 {q['southbound_ratio']:.2f}%（20日 {q['southbound_chg_20d']:+.2f} 个百分点）"
                    if q.get("southbound_ratio") is not None and q.get("southbound_chg_20d") is not None else "")
             )
-        ah = self.ah_premium(company)
-        if ah:
-            parts.append(f"AH溢价（A相对H）：{pct(ah['current'])}，20日均值 {pct(ah['avg_20'])}，"
-                         f"60日区间 {pct(ah['min_60'])} ~ {pct(ah['max_60'])}")
+        for label, p in self.cross_premiums(company):
+            parts.append(f"{label}：{pct(p['current'])}，20日均值 {pct(p['avg_20'])}，"
+                         f"60日区间 {pct(p['min_60'])} ~ {pct(p['max_60'])}")
         return "\n".join(parts)
 
     def fx_line(self) -> str:
@@ -130,7 +149,8 @@ class App:
         lines = [f"## 公司：{company.title}"]
         if company.sector:
             lines.append(f"- 行业：{company.sector}")
-        lines.append("- 上市：" + "；".join(f"{MARKET_LABEL[l.market]} {l.display}" for l in company.listings))
+        lines.append("- 上市：" + "；".join(f"{MARKET_LABEL[l.market]} {l.display}" for l in company.listings)
+                     + (f"（定价上市地：{company.pricing_listing.display}）" if len(company.listings) > 1 else ""))
         if company.notes:
             lines.append(f"- 研究备注：{company.notes.strip()}")
         if company.watch_items:

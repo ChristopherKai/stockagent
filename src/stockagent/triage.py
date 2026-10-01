@@ -45,6 +45,7 @@ TRIAGE_SYSTEM = """你是一名覆盖港股、A股和美股的买方研究员，
 8. 产业链信息（客户、供应商、竞争对手、下游需求）如果会影响本公司，relevant 为 true，event_type 用 industry_chain。
 9. 定期报告、业绩公告等如果只有标题、看不到具体数字，重要性按 3 处理，在 follow_up 中写明需要阅读原文核实哪些数字；有数字时再按超预期程度打分。
 10. 摘要里带有「[跟踪词：…]」的条目，是按深度报告给出的产业链线索检索到的，要判断它与本公司的关联。
+11. 来源为「一致预期对比」的条目（摘要以「[程序计算]」开头）是程序算好的「实际业绩 vs 发布前一致预期」：数字可直接引用，expectation 以它为准（写明偏离幅度与口径）；event_type 用 earnings 或 guidance。它不是任何公告的重复，duplicate_of 留空。重要性按偏离幅度：年报偏离或中报/季报外推全年偏离 ≥30% → 5；≥15%，或与市场预期方向相反 → 4；±5% 以内且没有其他新信息 → 3；带「样本少」「外推仅供参考」等标注时酌情降一级。
 
 字段说明：
 - event_type：earnings 业绩/财报；guidance 业绩预告/指引；orders_customers 订单/客户；product_tech 产品/技术；capacity 产能/扩产；financing 融资/配售/增发；buyback_dividend 回购/分红；insider_trade 股东/高管增减持；lockup 解禁；index_connect 指数/港股通调整；policy_regulation 政策/监管；litigation 诉讼/合规；governance 治理/人事；mna 并购/分拆；industry_chain 行业/产业链；macro_geo 宏观/地缘；market_move 行情/资金面；analyst 研报/评级；routine 例行公告；other 其他
@@ -138,13 +139,14 @@ def short_id(uid: str) -> str:
 
 
 def _describe(item: dict, i: int) -> str:
-    kind = {"announcement": "公告", "news": "新闻", "data": "数据异动", "manual": "手动录入"}.get(item["kind"], item["kind"])
+    kind = "程序计算" if item["source"] == "consensus" else \
+        {"announcement": "公告", "news": "新闻", "data": "数据异动", "manual": "手动录入"}.get(item["kind"], item["kind"])
     src = SOURCE_LABEL.get(item["source"], item["source"])
     media = item.get("source_name") or ""
     head = f"[{i}] id={short_id(item['uid'])} | {kind} · {src}{' · ' + media if media and media != src else ''} | {fmt_local(item['published_at'])}"
     body = f"标题：{item['title']}"
     if item.get("snippet") and item["snippet"] != item.get("source_name"):
-        body += f"\n    摘要：{item['snippet'][:300]}"
+        body += f"\n    摘要：{item['snippet'][:900 if item['source'] == 'consensus' else 300]}"  # 业绩对比的口径与标注要完整
     return f"{head}\n    {body}"
 
 
@@ -232,6 +234,8 @@ def triage_company(app: App, company: Company) -> tuple[int, list[str]]:
                 continue
             dup = dup_targets.get((r.get("duplicate_of") or "").strip()[:12])
             r["duplicate_of"] = dup["uid"] if dup and dup["uid"] != it["uid"] else ""
+            if it["source"] == "consensus":  # 程序计算的业绩对比：不是公告的重复，必须保留
+                r["duplicate_of"], r["relevant"] = "", True
             app.db.save_triage(it["uid"], r, res.model)
             returned.add(it["uid"])
         missing = [it["uid"] for it in batch if it["uid"] not in returned]
@@ -264,7 +268,7 @@ def direction_label(item: dict) -> str:
 
 
 def listing_market(app: App, company: Company, item: dict) -> str:
-    """事件用哪个上市地的行情衡量价格反应：公告用其所属上市地，新闻用第一上市地。"""
+    """事件用哪个上市地的行情衡量价格反应：公告用其所属上市地，新闻用定价上市地。"""
     if item.get("listing"):
         return item["listing"].split(":")[0]
-    return company.listings[0].market
+    return company.pricing_listing.market

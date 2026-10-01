@@ -291,7 +291,7 @@ def test_answer_saves_trace_and_web_switch(tapp):  # noqa: F811
 def test_trace_column_migration(tmp_path):
     import sqlite3
 
-    from stockagent.db import DB
+    from stockagent.db import DB, SCHEMA_VERSION
 
     path = tmp_path / "old.db"
     conn = sqlite3.connect(path)
@@ -304,7 +304,7 @@ def test_trace_column_migration(tmp_path):
     conn.close()
     db = DB(path)
     cols = {r[1] for r in db.conn.execute("PRAGMA table_info(chat_messages)")}
-    assert "trace_json" in cols and db.conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert "trace_json" in cols and db.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     cid = db.create_chat("x", 1, "t", revision_id=5)
     assert db.chat(cid)["revision_id"] == 5
     mid = db.add_chat_message(cid, "assistant", "答")

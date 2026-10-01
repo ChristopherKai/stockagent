@@ -25,7 +25,7 @@ def collect(app: App, companies: list[Company], days: int = 90) -> list[dict]:
         for e in app.db.items_since(c.id, since, min_materiality=2):
             if e["direction"] not in ("positive", "negative"):
                 continue
-            listing = c.listing(listing_market(app, c, e)) or c.listings[0]
+            listing = c.listing(listing_market(app, c, e)) or c.pricing_listing
             bars, bench = app.bars(app.secid(listing)), app.bars(app.bench_secid(listing))
             row = {"company": c.name, "materiality": e["materiality"], "direction": e["direction"]}
             for h in HORIZONS:

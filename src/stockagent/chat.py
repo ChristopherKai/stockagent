@@ -30,11 +30,13 @@ from .utils import fmt_local, log, to_simplified, today_local
 from .valuation import SCENARIO_LABEL, TARGET_LABEL, describe, fmt, load_model
 
 TOOLS = ["report_notes", "search_filings", "read_filing", "list_filings", "financials", "statements", "market_data", "fcf_yield",
-         "valuation_history", "shareholders", "ccass", "company_events", "manual_data", "calculate", "web_search", "fetch_url"]
+         "valuation_history", "earnings_vs_consensus", "shareholders", "ccass", "company_events", "manual_data", "calculate",
+         "web_search", "fetch_url"]
 TOOL_LABEL = {"report_notes": "查报告与研究笔记", "search_filings": "检索年报等资料", "read_filing": "阅读资料原文",
               "list_filings": "查看资料清单", "financials": "查财务数据", "statements": "查财务报表", "market_data": "查行情",
               "fcf_yield": "计算自由现金流收益率", "shareholders": "查股东结构", "ccass": "查 CCASS 持股",
-              "valuation_history": "查历史估值", "company_events": "查已分级事件", "manual_data": "查补充数据",
+              "valuation_history": "查历史估值", "earnings_vs_consensus": "对比业绩与一致预期",
+              "company_events": "查已分级事件", "manual_data": "查补充数据",
               "calculate": "计算", "web_search": "网页搜索", "fetch_url": "打开网页"}
 MAX_QUESTION = 2000
 MAX_QUOTE = 3000
@@ -186,7 +188,8 @@ def valuation_context(app: App, company: Company, dossier: dict) -> str:
         out.append("报告之后还没有估值修正。")
     s = status(app, company)
     if s and s["revision"]["dossier_id"] == dossier["id"]:
-        out += ["", "当前估值模型（程序计算）：", describe(s["live_model"], app.settings.tracker.target)]
+        out += ["", "当前估值模型（程序计算）：", describe(s["live_model"], app.settings.tracker.target, s["price"],
+                                                      s["revision"].get("stance"), app.settings.tracker.stance_band)]
         if s["fx_note"]:
             out.append(f"（{s['fx_note']}）")
     return "\n".join(out)
@@ -242,7 +245,7 @@ def revision_context(rev: dict) -> str:
             res = str(x.get("result") or "")
             lines.append(f"- T{i} {x.get('tool')}（{json.dumps(x.get('args') or {}, ensure_ascii=False)[:200]}）："
                          + res[:REVISION_TOOL_CHARS] + ("……" if len(res) > REVISION_TOOL_CHARS else ""))
-    lines += ["", "修正后的估值模型（程序计算）：", describe(load_model(rev["model"]))]
+    lines += ["", "修正后的估值模型（程序计算）：", describe(load_model(rev["model"]), price=rev.get("price"), stance=rev.get("stance"))]
     return "\n".join(lines)
 
 

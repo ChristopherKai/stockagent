@@ -238,7 +238,7 @@ def test_dossier_end_to_end_with_mock(app, monkeypatch):
     assert d["card"]["thesis"] and len(notes) == len(dossier.SECTIONS) + 2 and "gapfill" in notes and "snapshot" in notes
     assert json.loads(d["tool_log_json"])  # 模拟 agent 调用过工具
     trig = app.db.triggers("acme")
-    assert trig and trig[0]["kind"] == "price" and trig[0]["listing"] == "A:300001"
+    assert trig and trig[0]["kind"] == "price" and trig[0]["listing"] == "HK:01234"  # 无法识别时归到定价上市地（港股优先）
     assert app.db.plan("acme") is not None
     assert "投资论点" in app.company_context(company)
 
@@ -260,7 +260,7 @@ def test_price_trigger_fires_once_and_alerts(app):
     statuses = {t["description"]: t["status"] for t in app.db.triggers("acme")}
     assert statuses == {"H 股跌破 45 港元": "triggered", "距高点回撤超过 70%": "ok", "失去第一大客户": "ok"}
     out = brief.alerts(app, do_push=False)
-    assert "证伪条件触发·退出" in out[0]
+    assert "证伪条件触发（向下）·退出" in out[0]
     assert app.db.pending_trigger_alerts() == []
 
 
@@ -447,7 +447,8 @@ def test_fcf_snapshot_computes_ev_and_yield(app, monkeypatch):
                     "minority": 0, "liabilities": 50e8}}
     monkeypatch.setattr(tools.emdata, "fcf_data", lambda s, l: data)
     app.db.save_quote("0.300001", {"price": 10.0, "market_cap": 300e8})
-    out = tools.fcf_snapshot(app, app.watchlist.get("acme"), forward_fcf=63, forward_label="2027E")
+    acme = app.watchlist.get("acme").model_copy(update={"pricing": "A"})  # 以 A 股定价；港股没有行情快照，不参与
+    out = tools.fcf_snapshot(app, acme, forward_fcf=63, forward_label="2027E")
     # TTM：经营现金流 30+50−20=60，资本开支 10+20−10=20，FCF 40；EV = 300 + 10 − (80+20) = 210
     assert "EV = 市值 + 有息负债 + 少数股东权益 − 现金及短期投资 = 210.00" in out
     assert "| TTM（截至 2026-06-30） | 60.00 | 20.00 | 40.00 | 19.0% |" in out

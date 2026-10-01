@@ -171,10 +171,11 @@ legend { color: var(--muted); font-size: 12.5px; padding: 0 4px; }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .row4 { display: grid; grid-template-columns: 110px 1fr 1fr 1fr; gap: 8px; margin: 6px 0; }
+.row5 { display: grid; grid-template-columns: 110px 1fr 1fr 1fr 130px; gap: 8px; margin: 6px 0; }
 .hidden-row { display: none; }
 .grid-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0 18px; align-items: start; }
 .grid-routes { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0 16px; }
-@media (max-width: 700px) { .row2, .row3, .row4 { grid-template-columns: 1fr; } }
+@media (max-width: 700px) { .row2, .row3, .row4, .row5 { grid-template-columns: 1fr; } }
 .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .tbl.sched input { width: 100%; }
 details { margin: 6px 0; }

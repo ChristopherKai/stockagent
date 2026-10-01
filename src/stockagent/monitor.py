@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from .app import SOURCE_LABEL, App
 from .config import Company
-from .dossier import ACTION_LABEL, METRIC_LABEL
+from .dossier import ACTION_LABEL, DIRECTION_LABEL, METRIC_LABEL, trigger_label
 from .llm import LLMError
 from .triage import DIRECTIONS
 from .utils import fmt_local, iso, num, pct, utcnow
@@ -21,7 +21,8 @@ from .utils import fmt_local, iso, num, pct, utcnow
 RANK = {"ok": 0, "warning": 1, "triggered": 2}
 
 EVENT_CHECK_SYSTEM = """你是风控研究员。给你一只股票的投资论点、若干条「证伪条件」，以及最近新发生的事件。
-逐条判断：新事件是否表明某条证伪条件已经发生（triggered）、正在接近或出现苗头（warning），还是无关（ok）。
+每条条件标明方向：向下指情况比判断更差，向上指情况比判断更好。
+逐条判断：新事件是否表明某条条件描述的情况已经发生（triggered）、正在接近或出现苗头（warning），还是无关（ok）。
 - 只依据给出的事件，不要推测；证据不足时判 ok 或 warning，不要轻易判 triggered。
 - evidence 写明依据的事件（日期、来源、关键事实），判 ok 时写空字符串。"""
 
@@ -49,8 +50,17 @@ class _Results(BaseModel):
     results: list[_Result]
 
 
+def current_stance(app: App, company: Company) -> str | None:
+    """当前立场：追踪中的公司以最新修正为准，否则用最新深度报告的立场。"""
+    tr = app.db.tracker(company.id)
+    if tr and tr["revision_id"] and (rev := app.db.revision(tr["revision_id"])) and rev.get("stance"):
+        return rev["stance"]
+    d = app.db.latest_dossier(company.id)
+    return d["card"].get("stance") if d else None
+
+
 def _listing(company: Company, key: str | None):
-    return next((l for l in company.listings if l.key == key), company.listings[0])
+    return next((l for l in company.listings if l.key == key), company.pricing_listing)
 
 
 def price_value(app: App, company: Company, trig: dict) -> float | None:
@@ -76,6 +86,7 @@ def _fmt(metric: str, v: float) -> str:
 
 def check_price(app: App, company: Company) -> list[str]:
     msgs = []
+    stance = current_stance(app, company)
     for t in app.db.triggers(company.id):
         if t["kind"] != "price" or t["status"] == "triggered":
             continue
@@ -85,7 +96,7 @@ def check_price(app: App, company: Company) -> list[str]:
         hit = v < t["threshold"] if t["operator"] == "<" else v > t["threshold"]
         evidence = f"{t['listing']} {METRIC_LABEL.get(t['metric'], t['metric'])} 当前 {_fmt(t['metric'], v)}，阈值 {t['operator']} {_fmt(t['metric'], t['threshold'])}"
         if app.db.update_trigger(t["id"], "triggered" if hit else "ok", evidence):
-            msgs.append(f"{company.name}：证伪条件触发【{ACTION_LABEL[t['action']]}】{t['description']}（{evidence}）")
+            msgs.append(f"{company.name}：{trigger_label(stance, t)}【{ACTION_LABEL[t['action']]}】{t['description']}（{evidence}）")
     return msgs
 
 
@@ -103,7 +114,8 @@ def check_events(app: App, company: Company) -> list[str]:
     dossier = app.db.latest_dossier(company.id)
     user = (
         f"投资论点：{dossier['card']['thesis'] if dossier else '（无）'}\n\n证伪条件：\n"
-        + "\n".join(f"- id={t['id']}（{'基本面' if t['kind'] == 'fundamental' else '事件'}）{t['description']}" for t in triggers)
+        + "\n".join(f"- id={t['id']}（{'基本面' if t['kind'] == 'fundamental' else '事件'}·{DIRECTION_LABEL.get(t.get('direction') or 'down')}）"
+                    f"{t['description']}" for t in triggers)
         + "\n\n新事件：\n"
         + "\n".join(f"- {fmt_local(e['published_at'])}｜{SOURCE_LABEL.get(e['source'], e['source'])}｜重要性{e['materiality']}｜"
                     f"{DIRECTIONS.get(e['direction'], '')}｜{e['summary_zh'] or e['title']}" for e in events[:40])
@@ -114,15 +126,16 @@ def check_events(app: App, company: Company) -> list[str]:
     except LLMError as e:
         return [f"✗ {company.name} 事件类条件检查失败：{e}"]
     by_id = {t["id"]: t for t in triggers}
+    stance = current_stance(app, company)
     msgs = []
     for r in res.data["results"]:
         t = by_id.get(r["id"])
         if t is None or r["status"] not in RANK or RANK[r["status"]] <= RANK[t["status"]]:
             continue  # 只升级不回退
         if app.db.update_trigger(t["id"], r["status"], r["evidence"]):
-            msgs.append(f"{company.name}：证伪条件触发【{ACTION_LABEL[t['action']]}】{t['description']}（{r['evidence']}）")
+            msgs.append(f"{company.name}：{trigger_label(stance, t)}【{ACTION_LABEL[t['action']]}】{t['description']}（{r['evidence']}）")
         elif r["status"] == "warning":
-            msgs.append(f"{company.name}：证伪条件出现苗头 · {t['description']}（{r['evidence']}）")
+            msgs.append(f"{company.name}：{trigger_label(stance, t).replace('触发', '出现苗头')} · {t['description']}（{r['evidence']}）")
     app.db.kv_set(key, iso(utcnow()))
     return msgs
 

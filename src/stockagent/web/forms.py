@@ -70,6 +70,13 @@ LABELS: dict[str, tuple[str, str]] = {
     "tracker.redo_materiality": ("自动重跑深度报告的事件重要性", "达到该值且修正判为实质影响时排队重跑"),
     "tracker.redo_on_broken": ("论点失效时自动重跑深度报告", ""),
     "tracker.redo_cooldown_days": ("自动重跑冷却天数", "同一公司在冷却期内不重复排队"),
+    "tracker.stance_band": ("参考立场的空间阈值", "加权空间超过 ±该比例才算偏多 / 偏空，0.15 表示 15%"),
+    # 业绩 vs 一致预期
+    "consensus.enabled": ("业绩对比一致预期", "stock run 时检查新业绩，与发布前的一致预期对比"),
+    "consensus.window_days": ("A 股一致预期窗口（天）", "发布前多少天内的研报计入（每家机构取最新一篇）"),
+    "consensus.lookback_days": ("首次检查回看天数", "第一次检查某家公司时只对比这段时间内发布的业绩"),
+    "consensus.min_estimates": ("样本少的阈值（家）", "机构数少于它时标注「样本少」"),
+    "consensus.stale_days": ("一致预期过时阈值（天）", "最新一篇研报或快照早于发布日这么多天时标注"),
 }
 
 

@@ -97,7 +97,7 @@ companies:
     aliases: [小鵬汽車, 小鹏集团, 小鵬集團, XPENG, XPEV]
     listings:
       - {market: HK, code: "09868", benchmark: "124.HSTECH"}
-      - {market: US, code: "XPEV", exchange: NYSE}
+      - {market: US, code: "XPEV", exchange: NYSE, ads_ratio: 2}
     sector: 智能电动汽车 · 智能驾驶 / 自研芯片 / 人形机器人 / 飞行汽车
     notes: >
       中国智能电动车企业（2014 年成立，创始人何小鹏），港股与纽交所两地上市（1 股 ADS = 2 股 A 类普通股，报表以人民币列示）。
