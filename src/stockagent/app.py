@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -15,7 +15,7 @@ from . import config, technical
 from .config import Company, Listing, Settings, Watchlist
 from .db import DB
 from .llm import LLM
-from .sources import ccass, cninfo, eastmoney, emdata, frankfurter, google_news, hkex, ids, sec, tencent
+from .sources import ccass, cninfo, eastmoney, emdata, frankfurter, google_news, hkex, ids, pubdate, sec, tencent
 from .utils import (days_ago, file_lock, fmt_local, iso, log, make_session, normalize_title, parse_iso, pct, num, sha1,
                     to_simplified, today_local, utcnow)
 
@@ -378,6 +378,43 @@ def _blocked(x: dict, blocked_sources: list[str], patterns: list[re.Pattern]) ->
     return any(p.search(x["title"]) for p in patterns)
 
 
+def _real_published(x: dict) -> datetime | None:
+    """原文站点连不上、解析失败都只意味着沿用 Google 的时间，不能触发 google_news 熔断。"""
+    if "news.google.com" not in (x.get("url") or ""):
+        return None
+    try:
+        return pubdate.real_published(x["url"], x["published_at"])
+    except Exception as e:
+        log.info("读取原文发布时间失败：%s", str(e)[:120])
+        return None
+
+
+def refine_news_dates(app: App, days: int = 14, limit: int = 200) -> list[str]:
+    """回填：已入库的 Google 新闻条目改用原文页声明的发布时间。核对过的（不论读没读到）打上标记，不再重复请求。"""
+    rows = app.db._all(
+        "SELECT uid, url, published_at, raw_json FROM items WHERE source='google_news' AND published_at>=? "
+        "AND raw_json NOT LIKE '%\"date_checked\"%' ORDER BY published_at DESC LIMIT ?", (iso(days_ago(days)), limit))
+    fixed = missed = fails = done = 0
+    for r in rows:
+        if fails >= 30:  # 连续读不到多半是 Google 在限流，下次再来
+            break
+        raw = json.loads(r["raw_json"] or "{}")
+        listed = parse_iso(r["published_at"])
+        real = _real_published({"url": r["url"], "published_at": listed})
+        fails = 0 if real else fails + 1
+        done += 1
+        if real:
+            raw.update(listed_at=r["published_at"], published_at=iso(real))
+            fixed += real < listed - timedelta(hours=1)
+        else:
+            missed += 1
+        app.db._exec("UPDATE items SET published_at=?, raw_json=? WHERE uid=?",
+                     (iso(real) if real else r["published_at"],
+                      json.dumps({**raw, "date_checked": True}, ensure_ascii=False), r["uid"]))
+    return [f"核对 {done}/{len(rows)} 条 Google 新闻的发布时间：{fixed} 条改为更早的真实时间，{missed} 条读不到原文日期（保留原时间）"
+            + ("；连续失败，已提前停止，可稍后重跑" if done < len(rows) else "")]
+
+
 def fetch_news(app: App, company: Company) -> list[str]:
     src = app.settings.sources
     cutoff = days_ago(src.news_lookback_days)
@@ -411,11 +448,21 @@ def fetch_news(app: App, company: Company) -> list[str]:
             found = sorted(found, key=lambda x: x["published_at"], reverse=True)[:15]
             rows += [("google_news", {**x, "snippet": tag}) for x in found]
     kept = new = 0
+    budget, fails = src.google_news_resolve_max, 0
     for source, x in rows:
         if x["published_at"] < cutoff or _blocked(x, src.blocked_news_sources, patterns):
             continue
         if len(normalize_title(x["title"])) < 6:  # 如"新浪网·"之类的残缺标题
             continue
+        if source == "google_news" and budget > 0 and fails < 3 and not _is_down(app, "google_news"):
+            if not app.db.has_item(_item(company, None, "news", source, x, x.get("media"))["uid"]):
+                budget -= 1
+                real = _real_published(x)
+                fails = 0 if real else fails + 1
+                if real:  # Google 的 pubDate 是收录时间；改用原文页声明的发布时间，旧文章也随之被回溯期过滤掉
+                    x = {**x, "listed_at": x["published_at"], "published_at": real, "date_checked": True}
+                    if real < cutoff:
+                        continue
         kept += 1
         new += app.db.add_item(_item(company, None, "news", source, x, x.get("media")))
     return [f"{company.name} 新闻 {kept} 条（新增 {new}）", *errors]

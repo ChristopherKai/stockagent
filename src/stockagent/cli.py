@@ -16,7 +16,7 @@ import requests
 
 from . import app as appmod
 from . import brief, consensus, docs, dossier, evaluate, imafeed, jobs, monitor, newco, notify, profile, tracker, triage
-from .app import SOURCE_LABEL, App
+from .app import SOURCE_LABEL, App, refine_news_dates
 from .config import ConfigError
 from .llm import LLMError
 from .utils import fmt_local, iso, lock_holder, pct, today_local, utcnow
@@ -631,6 +631,12 @@ def cmd_events(args) -> None:
                   f"[{triage.event_label(e)}] {e['summary_zh'] or e['title']}（{SOURCE_LABEL.get(e['source'], e['source'])}）")
 
 
+def cmd_news_dates(args) -> None:
+    app = _load(args)
+    for line in refine_news_dates(app, args.days, args.limit):
+        print(line)
+
+
 def cmd_eval(args) -> None:
     app = _load(args)
     rows = evaluate.collect(app, app.watchlist.select(args.company), days=args.days)
@@ -864,6 +870,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = with_company(sub.add_parser("eval", help="事后检验：事件分级的方向与重要性有没有预测力"))
     sp.add_argument("--days", type=int, default=90)
     sp.set_defaults(func=cmd_eval)
+
+    sp = sub.add_parser("news-dates", help="回填：把已入库 Google 新闻的时间改为原文页声明的真实发布时间（联网）")
+    sp.add_argument("--days", type=int, default=14, help="只处理最近多少天入库时间内的条目")
+    sp.add_argument("--limit", type=int, default=200)
+    sp.set_defaults(func=cmd_news_dates)
 
     sp = sub.add_parser("llm-test", help="测试 LLM 配置（地址、模型、JSON 输出）")
     sp.add_argument("--profile")

@@ -114,6 +114,7 @@ class SourcesConfig(BaseModel):
     google_news: bool = True
     google_news_locales: list[Literal["zh-CN", "zh-HK", "en-US"]] = ["zh-CN", "zh-HK", "en-US"]
     google_news_max_per_query: int = 40
+    google_news_resolve_max: int = 30  # 每家公司每次最多读多少条新条目的原文页取真实发布时间（0=不读，用 Google 的收录时间）
     plan_keywords_max: int = 6  # 深度报告给出的产业链跟踪词，每次最多检索几个
     blocked_news_sources: list[str] = Field(default_factory=list)
     blocked_title_patterns: list[str] = Field(default_factory=list)

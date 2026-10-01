@@ -109,6 +109,7 @@ sources:
   google_news: true                 # 在中国大陆需要能访问 Google，否则改为 false
   google_news_locales: [zh-CN, zh-HK, en-US]
   google_news_max_per_query: 40     # 每个检索词最多保留最新的多少条
+  google_news_resolve_max: 30       # 每家公司每次最多读多少条新条目的原文页，取真实发布时间（Google 给的是收录时间；0=不读）
   plan_keywords_max: 6              # 深度报告给出的产业链跟踪词，每次最多检索几个
   blocked_news_sources: [TradingView]
   blocked_title_patterns: []        # 正则，匹配到的新闻标题直接丢弃

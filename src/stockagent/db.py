@@ -413,6 +413,9 @@ class DB:
         )
         return cur.rowcount > 0
 
+    def has_item(self, uid: str) -> bool:
+        return bool(self._all("SELECT 1 FROM items WHERE uid=?", (uid,)))
+
     def untriaged(self, company_id: str, max_attempts: int = 3) -> list[dict]:
         return self._all(
             "SELECT * FROM items WHERE company_id=? AND triaged_at IS NULL AND triage_attempts < ? ORDER BY published_at",

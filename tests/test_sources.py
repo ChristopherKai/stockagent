@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from stockagent.config import Listing
+from stockagent.utils import iso
 from stockagent.sources import cninfo, eastmoney, google_news, hkex, tencent
 
 
@@ -344,3 +345,36 @@ def test_exa_rest_api_and_rate_limit(monkeypatch):
     with pytest.raises(web.Blocked) as e:
         web._exa("R32 价格", 5)
     assert e.value.seconds == 3600 and "EXA_API_KEY" in str(e.value)
+
+
+def test_pubdate_extract():
+    from stockagent.sources import pubdate
+
+    sohu = '<div><time dateTime="2026/09/07 09:39">2026/09/07 09:39</time></div>'
+    assert pubdate.extract_date(sohu) == datetime(2026, 9, 7, 1, 39, tzinfo=timezone.utc)  # 无时区按北京时间
+    meta = '<meta property="article:published_time" content="2026-09-07T09:39:00+08:00"/><time datetime="2026-10-01">x</time>'
+    assert pubdate.extract_date(meta) == datetime(2026, 9, 7, 1, 39, tzinfo=timezone.utc)
+    ld = '<script type="application/ld+json">{"@graph":[{"datePublished":"2026-09-07T01:39:00Z"}]}</script>'
+    assert pubdate.extract_date(ld) == datetime(2026, 9, 7, 1, 39, tzinfo=timezone.utc)
+    assert pubdate.extract_date("<p>没有日期</p>") is None
+
+
+def test_fetch_news_uses_real_publish_date(app, monkeypatch):
+    from stockagent import app as appmod
+    from stockagent.sources import google_news, pubdate
+
+    app.settings.sources.google_news = True
+    app.settings.sources.eastmoney_news = False
+    company = app.watchlist.companies[0]
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(days=24)
+    rows = [{"source_id": "a", "title": "旧文章被聚合页重新收录了一次", "url": "https://news.google.com/rss/articles/a",
+             "media": "搜狐网", "published_at": now, "snippet": ""},
+            {"source_id": "b", "title": "没有读到原文日期的新闻标题", "url": "https://news.google.com/rss/articles/b",
+             "media": "搜狐网", "published_at": now - timedelta(hours=2), "snippet": ""}]
+    monkeypatch.setattr(google_news, "search", lambda *a, **k: rows)
+    monkeypatch.setattr(pubdate, "real_published", lambda link, listed: old if link.endswith("/a") else None)
+    appmod.fetch_news(app, company)
+    got = {r["title"]: r["published_at"] for r in app.db._all("SELECT title, published_at FROM items WHERE source='google_news'")}
+    assert "旧文章被聚合页重新收录了一次" not in got          # 真实日期超出回溯期，不再收入
+    assert got["没有读到原文日期的新闻标题"] == iso(now - timedelta(hours=2))  # 读不到则沿用 Google 时间
