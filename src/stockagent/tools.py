@@ -18,7 +18,7 @@ from typing import Callable
 
 from . import fcf as fcf_mod
 from . import imafeed, technical
-from .app import FX_HKDCNH, PRICE_SOURCES, SOURCE_LABEL, App, _try, ccass_snapshot, klines
+from .app import FX_HKDCNH, FX_USDCNH, PRICE_SOURCES, SOURCE_LABEL, App, _try, ccass_snapshot, klines
 from .config import Company, Listing
 from .docs import DOC_TYPES, read_document_text
 from .sources import ccass, eastmoney, emdata, ids, ima, nasdaq, sec, tencent, web
@@ -329,9 +329,29 @@ def _payback_years(ev: float, fcf: float, growth: float, cap: int = 50) -> str:
     return f"约 {n} 年" if n <= cap else f"超过 {cap} 年"
 
 
+def _cny_per(app: App, ccy: str) -> float | None:
+    """1 单位 ccy 折合多少人民币（最新收盘；库里没有就抓取）。"""
+    if ccy == "CNY":
+        return 1.0
+    secid = {"HKD": FX_HKDCNH, "USD": FX_USDCNH}.get(ccy)
+    bars = ensure_bars(app, secid) if secid else None
+    return float(bars["close"].iloc[-1]) if bars is not None and not bars.empty else None
+
+
+def convert(app: App, amount: float, from_ccy: str, to_ccy: str) -> tuple[float, str] | None:
+    """按最新汇率换算金额，返回 (换算后金额, 说明)；缺汇率时返回 None。"""
+    if from_ccy == to_ccy:
+        return amount, ""
+    a, b = _cny_per(app, from_ccy), _cny_per(app, to_ccy)
+    if not a or not b:
+        return None
+    return amount * a / b, f"按 1 {from_ccy} = {a / b:.4f} {to_ccy} 换算"
+
+
 def fcf_snapshot(app: App, company: Company, ticker: str | None = None, growth: float = 0.0,
                  forward_fcf: float | None = None, forward_label: str = "") -> str:
-    """EV、自由现金流与 FCF Yield（代码计算；A+H 公司用 A 股报表与 A 股市值）。"""
+    """EV、自由现金流与 FCF Yield（代码计算）。报表优先用 A 股（A+H 公司），市值按定价上市地的股价；
+    多地上市的公司另列其他上市地股价下的 EV 与 FCF Yield（各地股价不同，FCF Yield 也不同）。"""
     ls = listings_for(app, company, ticker)
     if not ls:
         return "EV 与自由现金流只支持 A 股和港股"
@@ -343,22 +363,22 @@ def fcf_snapshot(app: App, company: Company, ticker: str | None = None, growth: 
     if l.market == "HK":
         rows = emdata.financials(app.session, l, 4)
         cur = rows[0].get("币种", "CNY") if rows else "CNY"
-    secid = eastmoney.secid_for(l)
-    q = latest_quote(app, secid)
-    if not q.get("market_cap"):
-        return f"{l.display}：没有取到市值"
-    mcap, note = q["market_cap"], f"总股本 × 最新价 {num(q.get('price'))} {l.currency}"
-    if l.market == "HK" and cur != "HKD":
-        if cur == "CNY":
-            fx = ensure_bars(app, FX_HKDCNH)
-            if fx is None or fx.empty:
-                return f"{l.display}：没有取到港元兑人民币汇率，无法换算市值"
-            rate = float(fx["close"].iloc[-1])
-            mcap *= rate
-            note += f"，按 1 HKD = {rate:.4f} CNY 换算"
-        else:
-            mcap /= 7.8
-            note += "，按 1 USD = 7.8 HKD 换算"
+    target = company if not ticker else app.watchlist.get(ticker)
+    priced = ([target.pricing_listing] + [x for x in target.listings if x.key != target.pricing_listing.key]
+              if target is not None else [l])
+    caps = []  # (上市地, 报告币种市值, 说明)
+    for i, pl in enumerate(priced):
+        secid = eastmoney.secid_for(pl) if pl.market != "US" else app.secid(pl)
+        q = latest_quote(app, secid) if i == 0 else (app.db.quote(secid) or {})  # 其他上市地只用库里的快照（stock run 每天更新）
+        if not q.get("market_cap"):
+            continue
+        conv = convert(app, q["market_cap"], pl.currency, cur)
+        if conv is None:
+            continue
+        caps.append((pl, conv[0], f"{pl.display} 总市值，最新价 {num(q.get('price'))} {pl.currency}" + (f"，{conv[1]}" if conv[1] else "")))
+    if not caps:
+        return f"{l.display}：没有取到市值（或缺少换算汇率）"
+    main, mcap, note = caps[0]
     b = data["balance"]
     m = fcf_mod.metrics(data, mcap)
     ev, flows, avg = m["ev"], m["flows"], m["fcf_avg3"]
@@ -367,7 +387,8 @@ def fcf_snapshot(app: App, company: Company, ticker: str | None = None, growth: 
     def f(v: float) -> str:
         return f"{v / yi:,.2f}"
 
-    lines = [f"{l.display} EV 与自由现金流（程序按东方财富现金流量表/资产负债表计算；金额：亿 {cur}；资产负债表截至 {b['date']}）",
+    lines = [f"{l.display} EV 与自由现金流（程序按东方财富现金流量表/资产负债表计算；金额：亿 {cur}；资产负债表截至 {b['date']}"
+             + (f"；市值按定价上市地 {main.display}" if len(caps) > 1 or main.key != l.key else "") + "）",
              f"- 市值 {f(mcap)}（{note}）",
              f"- 现金及存款 {f(b['cash'])}"
              + (f"（{'、'.join(f'{k} {f(v)}' for k, v in b['cash_items'].items())}）" if len(b.get("cash_items") or {}) > 1 else "")
@@ -388,6 +409,11 @@ def fcf_snapshot(app: App, company: Company, ticker: str | None = None, growth: 
     if m["capex_proxy"]:
         lines.append(f"- 注意：{'、'.join(m['capex_proxy'])} 的资本开支科目缺失或归类异常（标准化报表里接近 0），"
                      "上表按投资活动现金净流出估算资本开支（偏保守），请用年报现金流量表核对")
+    for other, cap2, note2 in caps[1:]:
+        m2 = fcf_mod.metrics(data, cap2)
+        lines.append(f"- 按 {other.display} 股价：市值 {f(cap2)}（{note2}），EV {f(m2['ev'])}，"
+                     + (f"{flows[0]['label']} FCF Yield {pct(m2['fcf_base'] / m2['ev'], sign=False)}"
+                        if flows and m2["ev"] > 0 and m2["fcf_base"] is not None else "FCF Yield 不适用"))
     lines.append("")
     lines.append(f"- FCF 累计覆盖 EV 的年数（FCF 年增速假设 {pct(growth)}）：按 {flows[0]['label'] if flows else '—'} "
                  f"{_payback_years(ev, base, growth)}" + (f"；按 3 年平均 {_payback_years(ev, avg, growth)}" if avg is not None else ""))
@@ -708,6 +734,13 @@ class ToolBox:
                  "（中概股为每 ADS 美元口径）。单家机构的最新目标价请再用 web_search 核实。ticker 不填表示本公司。",
                  _obj({"ticker": {"type": "string"}, "months": {"type": "integer"}}, []),
                  self.broker_research),
+            Tool("earnings_vs_consensus",
+                 "业绩 vs 一致预期（程序计算）：当前各年一致预期与近 30/90 天的修正趋势；近几个报告期「实际 vs 发布前一致预期」"
+                 "（年报看偏差；中报、季报为年初至今累计，看完成全年一致预期的比例，并按近 3 年同期占比外推全年）。"
+                 "A 股（A+H 公司用 A 股口径）按研报库回溯；港股用使用者录入的快照；美股另附 Nasdaq 季度业绩惊喜。"
+                 "用于判断业绩是否超预期、公司历史上是否常超/不及预期。ticker 不填表示本公司；A 股可查任意代码。",
+                 _obj({"ticker": {"type": "string"}, "periods": {"type": "integer"}}, []),
+                 self.earnings_vs_consensus),
             Tool("fcf_yield",
                  "EV 与自由现金流收益率（代码按东方财富现金流量表/资产负债表计算）：市值、现金、有息负债、少数股东权益、EV、"
                  "FCF（经营现金流 − 资本开支；TTM、近 3 个年度、3 年平均）、FCF Yield、净现金占市值、是否 Negative EV、FCF 累计覆盖 EV 的年数，"
@@ -868,9 +901,11 @@ class ToolBox:
                 line += "；" + "，".join(vals)
             out.append(line)
         c = self.app.watchlist.get(ticker)
-        if c is not None and (ah := self.app.ah_premium(c)):
-            out.append(f"AH 溢价（A 相对 H，已按汇率换算）：{pct(ah['current'])}，20日均值 {pct(ah['avg_20'])}，"
-                       f"60日区间 {pct(ah['min_60'])} ~ {pct(ah['max_60'])}")
+        for label, p in self.app.cross_premiums(c) if c is not None else []:
+            out.append(f"{label}，已按汇率{'与换股比例' if 'ADS' in label else ''}换算：{pct(p['current'])}，20日均值 {pct(p['avg_20'])}，"
+                       f"60日区间 {pct(p['min_60'])} ~ {pct(p['max_60'])}")
+        if c is not None and len(c.listings) > 1:
+            out.append(f"定价上市地：{c.pricing_listing.display}（情景价格与目标价按它计算）")
         return "\n".join(out)
 
     def financials(self, ticker: str | None = None, periods: int = 8) -> str:
@@ -927,6 +962,21 @@ class ToolBox:
         if not hk:
             return "CCASS 持股只适用于港股"
         return "\n\n".join(ccass_text(self.app, l) for l in hk)
+
+    def earnings_vs_consensus(self, ticker: str | None = None, periods: int = 6) -> str:
+        from . import consensus  # consensus → valuation → tools：放在函数里避免循环导入
+
+        n = max(1, min(int(periods), 12))
+        if not ticker:
+            if self.company is None:
+                raise ValueError("需要指定 ticker（A 股 6 位代码或自选股名称）")
+            return consensus.report_text(self.app, self.company, n=n)
+        if (c := self.app.watchlist.get(ticker)) is not None:
+            return consensus.report_text(self.app, c, n=n)
+        l = listings_for(self.app, None, ticker, markets=("A", "HK", "US"))[0]
+        if l.market != "A":
+            return f"{l.display}：不在自选股里。港股、美股的一致预期只有自选股的快照；A 股可以直接查任意代码"
+        return consensus.report_text(self.app, None, listing=l, n=n)
 
     def fcf_yield(self, ticker: str | None = None, growth: float = 0.0, forward_fcf: float | None = None,
                   forward_label: str = "") -> str:

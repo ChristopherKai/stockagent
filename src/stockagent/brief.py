@@ -14,7 +14,8 @@ from . import monitor, notify, technical, tracker
 from .app import MARKET_LABEL, SOURCE_LABEL, App
 from .config import Company, Listing
 from .docs import DOC_TYPES
-from .dossier import ACTION_LABEL
+from .dossier import ACTION_LABEL, DIRECTION_LABEL, falsifies, trigger_label
+from .valuation import stats_line
 from .llm import LLMError
 from .profile import needs_profile
 from .triage import DIRECTIONS, event_label, listing_market
@@ -71,7 +72,7 @@ code {{ background:var(--card); border:1px solid var(--line); border-radius:4px;
 class CompanyBrief:
     company: Company
     snaps: list[tuple[Listing, dict | None]]
-    ah: dict | None
+    premiums: list[tuple[str, dict]]   # 上市地之间的价差（AH 溢价、ADS 溢价）
     events: list[dict]
     earlier: list[dict]
     untriaged: int
@@ -84,6 +85,8 @@ class CompanyBrief:
     catalysts: list[dict] = field(default_factory=list)
     related: list[tuple[dict, dict | None]] = field(default_factory=list)
     tracking: dict | None = None     # 标的追踪摘要（目标价由代码计算，只写进简报，不交给研判 LLM）
+    earnings: list[dict] = field(default_factory=list)  # 近 7 天发布的业绩 vs 一致预期（consensus.py 代码计算）
+    stance: str | None = None        # 当前立场（追踪中以最新修正为准）：决定哪些证伪条件是「证伪」、哪些是「印证」
     analysis: str | None = None
     errors: list[str] = field(default_factory=list)
 
@@ -121,7 +124,24 @@ def company_gaps(app: App, company: Company, snaps) -> list[str]:
         gaps.append(f"需要你补充（#{r['id']}）：{r['item']}——{r['ask']}")
     if company.listing("US") and not app.settings.sources.sec_user_agent:
         gaps.append("美股 SEC 文件未抓取：在 config.yaml 设置 sources.sec_user_agent（姓名 + 邮箱）")
+    if consensus_missing(app, company):
+        gaps.append(f"业绩期内还没有一致预期：在公司页「业绩 vs 一致预期」或用 `stock consensus set {company.id} 财年 --eps … --currency …` "
+                    "录入发布前的一致预期（港股没有免费数据源），业绩发布后自动对比")
     return gaps
+
+
+RESULT_SEASONS = (((7, 15), (8, 31)), ((2, 15), (3, 31)))  # 港股中期、全年业绩的集中披露期（法定截止 8 月底、3 月底）
+
+
+def consensus_missing(app: App, company: Company) -> bool:
+    """港股（无 A 股上市地）在业绩期内、90 天内没有录入一致预期。"""
+    if company.listing("A") or not company.listing("HK") or not app.settings.consensus.enabled:
+        return False
+    today = today_local()
+    if not any(start <= (today.month, today.day) <= end for start, end in RESULT_SEASONS):
+        return False
+    recent = (today - timedelta(days=90)).isoformat()
+    return not any(r["taken_on"] >= recent for r in app.db.consensus_rows(company.id, sources=("manual",)))
 
 
 # ---------------------------------------------------------------- 汇总数据
@@ -136,20 +156,21 @@ def gather(app: App, company: Company, since: str) -> CompanyBrief:
     earlier = [e for e in app.db.items_since(company.id, week_ago, min_materiality=4) if e["published_at"] < since][:6]
     for e in events + earlier:
         market = listing_market(app, company, e)
-        listing = company.listing(market) or company.listings[0]
+        listing = company.listing(market) or company.pricing_listing
         e["reaction"] = technical.reaction(
             app.bars(app.secid(listing)), parse_iso(e["published_at"]), listing.market,
             app.bars(app.bench_secid(listing)),
         )
     untriaged = [e for e in app.db.items_since(company.id, since) if e["triaged_at"] is None]
     cb = CompanyBrief(
-        company=company, snaps=snaps, ah=app.ah_premium(company), events=events, earlier=earlier,
+        company=company, snaps=snaps, premiums=app.cross_premiums(company), events=events, earlier=earlier,
         untriaged=len(untriaged), pending_filings=[e for e in untriaged if e["kind"] == "announcement"][:10],
         manual=app.db.manual_data(company.id)[:12], gaps=company_gaps(app, company, snaps),
     )
     if d := app.db.latest_dossier(company.id):
         cb.thesis, cb.thesis_date = d["card"]["thesis"], d["created_at"][:10]
         cb.triggers = sorted(app.db.triggers(company.id), key=lambda t: -monitor.RANK.get(t["status"], 0))
+        cb.stance = monitor.current_stance(app, company)
         cb.catalysts = monitor.upcoming(app, company)
         plan = app.db.plan(company.id) or {}
         cb.related = [(r, technical.snapshot(app.bars(r["secid"]))) for r in plan.get("related_tickers", []) if r.get("secid")]
@@ -159,6 +180,8 @@ def gather(app: App, company: Company, since: str) -> CompanyBrief:
             cb.gaps.append(f"深度报告已超过 {stale} 天：运行 `stock dossier {company.id}` 更新论点与证伪条件")
     else:
         cb.gaps.append(f"还没有深度报告（论点、证伪条件、跟踪计划）：运行 `stock dossier {company.id}`")
+    week = (today_local() - timedelta(days=7)).isoformat()
+    cb.earnings = [r for r in app.db.earnings(company.id, 4) if r["item_uid"] and (r["notice_date"] or "") >= week]
     return cb
 
 
@@ -244,14 +267,22 @@ def _quote_table(app: App, cb: CompanyBrief) -> list[str]:
             f"{num(s['rsi14'], 0)} | {num(s['vol_ratio'], 1)} | {pct(s['atr_pct'], sign=False)} | {pct(s['from_high'])} | "
             f"{num(q.get('pe_ttm'), 1)} | {num(q.get('pb'), 2)} | {big_num(q.get('market_cap'))} |"
         )
-    if cb.ah:
+    if cb.premiums:
         rows.append("")
-        rows.append(f"AH 溢价（A 股相对 H 股）：**{pct(cb.ah['current'])}**，20 日均值 {pct(cb.ah['avg_20'])}，"
-                    f"60 日区间 {pct(cb.ah['min_60'])} ~ {pct(cb.ah['max_60'])}")
+    for label, p in cb.premiums:
+        rows.append(f"{label}：**{pct(p['current'])}**，20 日均值 {pct(p['avg_20'])}，"
+                    f"60 日区间 {pct(p['min_60'])} ~ {pct(p['max_60'])}")
+    if len(cb.company.listings) > 1:
+        rows.append(f"定价上市地：{cb.company.pricing_listing.display}（目标价与价格类证伪条件按它计算）")
     return rows
 
 
 STATUS_LABEL = {"ok": "正常", "warning": "苗头", "triggered": "已触发"}
+
+
+def _direction_cell(stance: str | None, t: dict) -> str:
+    d = t.get("direction") or "down"
+    return f"{DIRECTION_LABEL[d]}（{'证伪' if falsifies(stance, d) else '印证'}）"
 
 
 def _tracking_block(cb: CompanyBrief) -> list[str]:
@@ -268,11 +299,13 @@ def _tracking_block(cb: CompanyBrief) -> list[str]:
                 + f"｜最近{tracker.KIND_LABEL[rev['kind']]}（{fmt_local(rev['created_at'])}{change}）：{rev['summary']}"
                 + (f"｜论点{tracker.THESIS_STATUS[rev['thesis_status']]}" if rev.get("thesis_status") in tracker.THESIS_STATUS else ""),
                 ""]
+        if t.get("stats"):
+            out += [f"情景统计（代码计算）：{stats_line(t['stats'], t.get('stance_check'))}", ""]
     alert = [t for t in cb.triggers if t["status"] != "ok"]
     if alert:
-        out += ["| 状态 | 证伪条件 | 依据 | 预设动作 |", "|---|---|---|---|"]
-        out += [f"| **{STATUS_LABEL[t['status']]}** | {t['description']} | {t['evidence'] or ''} | {ACTION_LABEL[t['action']]} |"
-                for t in alert]
+        out += ["| 状态 | 条件 | 方向 | 依据 | 预设动作 |", "|---|---|---|---|---|"]
+        out += [f"| **{STATUS_LABEL[t['status']]}** | {t['description']} | {_direction_cell(cb.stance, t)} | {t['evidence'] or ''} | "
+                f"{ACTION_LABEL[t['action']]} |" for t in alert]
         out.append("")
     ok = len(cb.triggers) - len(alert)
     if ok:
@@ -371,6 +404,8 @@ def build(app: App, companies: list[Company], use_llm: bool = True) -> tuple[Pat
     for cb in briefs:
         out += ["", f"### {cb.company.title}", "", *_quote_table(app, cb), ""]
         out += _tracking_block(cb)
+        if cb.earnings:
+            out += ["**业绩 vs 一致预期**（程序计算）：" + "；".join(r["data"]["headline"] for r in cb.earnings), ""]
         if cb.analysis:
             out += [cb.analysis, ""]
         if cb.events:
@@ -446,8 +481,8 @@ def alerts(app: App, do_push: bool = True, window_hours: int = 24) -> list[str]:
     trig = monitor.trigger_alerts(app)
     if not fresh and not trig:
         return [f"没有新的重要事件（重要性≥{min_m}）或触发的证伪条件"]
-    lines = [f"[证伪条件触发·{ACTION_LABEL[t['action']]}] {c.name if c else t['company_id']}：{t['description']}（{t['evidence'] or ''}）"
-             for t, c in trig]
+    lines = [f"[{trigger_label(monitor.current_stance(app, c) if c else None, t)}·{ACTION_LABEL[t['action']]}] "
+             f"{c.name if c else t['company_id']}：{t['description']}（{t['evidence'] or ''}）" for t, c in trig]
     for p in fresh:
         c = app.watchlist.get(p["company_id"])
         lines.append(

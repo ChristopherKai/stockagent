@@ -136,12 +136,15 @@ def company_entry(c: dict, existing: CommentedMap | None = None) -> CommentedMap
             item["exchange"] = l["exchange"]
         if l.get("benchmark"):
             item["benchmark"] = DoubleQuotedScalarString(l["benchmark"])
+        if l.get("ads_ratio") and l["market"] == "US":
+            r = float(l["ads_ratio"])
+            item["ads_ratio"] = int(r) if r.is_integer() else r
         listings.append(_flow(item))
     notes = c.get("notes") or None
     values = {
         "id": c["id"], "name": c["name"], "name_en": c.get("name_en") or None,
         "aliases": _flow_seq(c["aliases"]) if c.get("aliases") else None,
-        "listings": listings, "sector": c.get("sector") or None,
+        "listings": listings, "pricing": c.get("pricing") or None, "sector": c.get("sector") or None,
         "notes": LiteralScalarString(notes) if notes and "\n" in notes else notes,
         "watch_items": CommentedSeq(c["watch_items"]) if c.get("watch_items") else None,
         "news_queries": CommentedMap({k: _flow_seq(v) for k, v in c["news_queries"].items() if v}) if c.get("news_queries") else None,

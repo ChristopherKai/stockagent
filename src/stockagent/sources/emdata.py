@@ -1,4 +1,5 @@
-"""东方财富数据中心：结构化财务指标与现金流量表/资产负债表（A 股 / 港股）、卖方研报与盈利预测（A 股）、A 股估值历史。
+"""东方财富数据中心：结构化财务指标与现金流量表/资产负债表（A 股 / 港股）、卖方研报与盈利预测（A 股）、
+A 股一致预期汇总、业绩预告与快报、A 股估值历史。
 
 接口域名（datacenter / reportapi）与行情接口（push2）不同，行情被限流时这里通常仍可用。
 """
@@ -185,27 +186,101 @@ def money_fields(market: str) -> set[str]:
     return {label for _, label, is_money in (A_FIELDS if market == "A" else HK_FIELDS) if is_money}
 
 
-def research_reports(session: requests.Session, a_code: str, months: int = 6, size: int = 40) -> list[dict]:
-    """A 股个股研报（卖方评级与盈利预测）。港股不在该库中。"""
-    end = date.today()
-    begin = end - timedelta(days=int(months * 30.5))
-    r = session.get(REPORTS, params={
-        "industryCode": "*", "pageSize": size, "industry": "*", "rating": "*", "ratingChange": "*",
-        "beginTime": begin.isoformat(), "endTime": end.isoformat(), "pageNo": 1, "fields": "", "qType": 0,
-        "orgCode": "", "code": a_code, "rcode": "",
-    }, timeout=20)
-    r.raise_for_status()
-    out = []
-    for x in (r.json() or {}).get("data") or []:
-        out.append({
-            "date": (x.get("publishDate") or "")[:10], "org": x.get("orgSName") or x.get("orgName"),
-            "title": x.get("title"), "rating": x.get("emRatingName") or x.get("sRatingName") or "",
-            "rating_change": x.get("ratingChange"),
-            "eps": [to_float(x.get(k)) for k in ("predictThisYearEps", "predictNextYearEps", "predictNextTwoYearEps")],
-            "pe": [to_float(x.get(k)) for k in ("predictThisYearPe", "predictNextYearPe", "predictNextTwoYearPe")],
-            "target": to_float(x.get("indvAimPriceT")),
-        })
+REPORT_YEARS = (("predictLastYearEps", -1), ("predictThisYearEps", 0), ("predictNextYearEps", 1), ("predictNextTwoYearEps", 2))
+
+
+def report_years(x: dict) -> dict[int, float]:
+    """一篇研报的 EPS 预测按财年展开：「今年」是研报的发布年（已用 2025、2026 年的真实研报核对），「去年」在年报披露前出现。"""
+    y = int((x.get("publishDate") or "0")[:4] or 0)
+    out = {}
+    for key, offset in REPORT_YEARS:
+        v = to_float(x.get(key))
+        if y and v is not None:
+            out[y + offset] = v
     return out
+
+
+def research_reports(session: requests.Session, a_code: str, months: int = 6, size: int = 40,
+                     begin: date | None = None, end: date | None = None, max_pages: int = 5) -> list[dict]:
+    """A 股个股研报（卖方评级与盈利预测），按发布日倒序。港股不在该库中。
+    不给 begin/end 时取最近 months 个月；给出时按区间翻页取全（每页 size 篇，最多 max_pages 页）。"""
+    end = end or date.today()
+    begin = begin or end - timedelta(days=int(months * 30.5))
+    out = []
+    for page in range(1, max_pages + 1):
+        r = session.get(REPORTS, params={
+            "industryCode": "*", "pageSize": size, "industry": "*", "rating": "*", "ratingChange": "*",
+            "beginTime": begin.isoformat(), "endTime": end.isoformat(), "pageNo": page, "fields": "", "qType": 0,
+            "orgCode": "", "code": a_code, "rcode": "",
+        }, timeout=20)
+        r.raise_for_status()
+        body = r.json() or {}
+        for x in body.get("data") or []:
+            out.append({
+                "date": (x.get("publishDate") or "")[:10], "org": x.get("orgSName") or x.get("orgName"),
+                "title": x.get("title"), "rating": x.get("emRatingName") or x.get("sRatingName") or "",
+                "rating_change": x.get("ratingChange"),
+                "eps": [to_float(x.get(k)) for k in ("predictThisYearEps", "predictNextYearEps", "predictNextTwoYearEps")],
+                "years": report_years(x),
+                "pe": [to_float(x.get(k)) for k in ("predictThisYearPe", "predictNextYearPe", "predictNextTwoYearPe")],
+                "target": to_float(x.get("indvAimPriceT")),
+            })
+        if page >= int(body.get("TotalPage") or 1):
+            break
+    return out
+
+
+def a_consensus(session: requests.Session, a_code: str) -> dict | None:
+    """A 股当前一致预期（东方财富机构预测汇总）：各年 EPS（A 为已披露实际值、E 为预测）、评级机构数与分布、目标价区间。"""
+    rows = _rows(session, DC_WEB, reportName="RPT_WEB_RESPREDICT", columns="ALL", filter=f'(SECURITY_CODE="{a_code}")',
+                 pageNumber=1, pageSize=1)
+    if not rows:
+        return None
+    r = rows[0]
+    years = [{"fy": int(r[f"YEAR{i}"]), "actual": r.get(f"YEAR_MARK{i}") == "A", "eps": to_float(r.get(f"EPS{i}"))}
+             for i in range(1, 5) if r.get(f"YEAR{i}") and to_float(r.get(f"EPS{i}")) is not None]
+    return {"years": years, "orgs": int(r.get("RATING_ORG_NUM") or 0), "buy": int(r.get("RATING_BUY_NUM") or 0),
+            "add": int(r.get("RATING_ADD_NUM") or 0), "target_high": to_float(r.get("DEC_AIMPRICEMAX")),
+            "target_low": to_float(r.get("DEC_AIMPRICEMIN"))}
+
+
+def a_forecasts(session: requests.Session, a_code: str, size: int = 30) -> list[dict]:
+    """A 股业绩预告（按公告日倒序），只取归母净利口径；金额缺失时用上年同期 × (1 + 增幅) 推算。"""
+    rows = _rows(session, DC_WEB, reportName="RPT_PUBLIC_OP_NEWPREDICT", columns="ALL", filter=f'(SECURITY_CODE="{a_code}")',
+                 pageNumber=1, pageSize=size, sortTypes=-1, sortColumns="NOTICE_DATE")
+    out, seen = [], set()
+    for r in rows:
+        name = r.get("PREDICT_FINANCE") or ""
+        if name not in ("归属于上市公司股东的净利润", "净利润") or not r.get("NOTICE_DATE") or not r.get("REPORT_DATE"):
+            continue
+        key = (r["REPORT_DATE"][:10], r["NOTICE_DATE"][:10])
+        low, high = to_float(r.get("PREDICT_AMT_LOWER")), to_float(r.get("PREDICT_AMT_UPPER"))
+        prev = to_float(r.get("PREYEAR_SAME_PERIOD"))
+        if low is None and high is None and prev is not None:
+            lo_amp, hi_amp = to_float(r.get("ADD_AMP_LOWER")), to_float(r.get("ADD_AMP_UPPER"))
+            low = prev * (1 + lo_amp / 100) if lo_amp is not None else None
+            high = prev * (1 + hi_amp / 100) if hi_amp is not None else None
+        if low is None and high is None:
+            continue
+        item = {"period_end": key[0], "notice": key[1], "low": low if low is not None else high,
+                "high": high if high is not None else low, "type": r.get("PREDICT_TYPE") or "", "prev": prev,
+                "content": (r.get("PREDICT_CONTENT") or "")[:200], "finance": name}
+        if key in seen:  # 同一份预告既有「净利润」又有「归母净利润」时保留归母口径
+            if name == "归属于上市公司股东的净利润":
+                out = [x for x in out if (x["period_end"], x["notice"]) != key] + [item]
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def a_express(session: requests.Session, a_code: str, size: int = 8) -> list[dict]:
+    """A 股业绩快报（按公告日倒序）：基本每股收益、归母净利、营业收入（年初至今累计）。"""
+    rows = _rows(session, DC_WEB, reportName="RPT_FCI_PERFORMANCEE", columns="ALL", filter=f'(SECURITY_CODE="{a_code}")',
+                 pageNumber=1, pageSize=size, sortTypes=-1, sortColumns="NOTICE_DATE")
+    return [{"period_end": r["REPORT_DATE"][:10], "notice": r["NOTICE_DATE"][:10], "eps": to_float(r.get("BASIC_EPS")),
+             "profit": to_float(r.get("PARENT_NETPROFIT")), "revenue": to_float(r.get("TOTAL_OPERATE_INCOME"))}
+            for r in rows if r.get("REPORT_DATE") and r.get("NOTICE_DATE")]
 
 
 def valuation_history_a(session: requests.Session, a_code: str, days: int = 1250) -> list[tuple[str, float | None, float | None]]:

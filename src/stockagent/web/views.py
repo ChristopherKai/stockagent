@@ -17,10 +17,11 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from .. import app as appmod
 from .. import chat, docs, jobs, monitor, newco, notify, scheduler, tracker
+from .. import consensus as consensus_mod
 from ..config import Company
 from ..docs import DOC_TYPES, SUPPORTED
-from ..utils import iso, lock_holder, parse_iso, utcnow
-from ..valuation import SCENARIO_LABEL, equivalents, load_model
+from ..utils import iso, lock_holder, parse_iso, today_local, utcnow
+from ..valuation import SCENARIO_LABEL, equivalents, load_model, risk_stats, stance_check
 from . import charts, yamledit
 from .render import safe_url
 from .security import SANDBOX_CSP, verify_csrf
@@ -114,20 +115,26 @@ def _company_from_form(form, cid: str | None = None) -> dict:
         exchange = (form.get(f"listing{i}_exchange") or "").strip() or None
         if market == "US" and exchange not in ("NASDAQ", "NYSE", "AMEX"):
             raise ValueError(f"美股 {code} 需要选择交易所（NASDAQ / NYSE / AMEX）")
+        ratio = (form.get(f"listing{i}_ads_ratio") or "").strip()
+        try:
+            ads_ratio = float(ratio) if ratio and market == "US" else None
+        except ValueError:
+            raise ValueError(f"美股 {code} 的 ADS 换股比例不是数字：{ratio}") from None
         listings.append({"market": market, "code": code, "exchange": exchange,
-                         "benchmark": (form.get(f"listing{i}_benchmark") or "").strip() or None})
+                         "benchmark": (form.get(f"listing{i}_benchmark") or "").strip() or None, "ads_ratio": ads_ratio})
     data = {
         "id": cid or (form.get("id") or "").strip(), "name": (form.get("name") or "").strip(),
         "name_en": (form.get("name_en") or "").strip() or None,
         "aliases": [a.strip() for a in re.split(r"[,，、\n]", form.get("aliases") or "") if a.strip()],
-        "listings": listings, "sector": (form.get("sector") or "").strip() or None,
+        "listings": listings, "pricing": (form.get("pricing") or "").strip() or None,
+        "sector": (form.get("sector") or "").strip() or None,
         "notes": (form.get("notes") or "").strip().replace("\r\n", "\n") or None,
         "watch_items": _lines(form.get("watch_items")),
         "news_queries": {loc: _lines(form.get(f"q_{loc}")) for loc in ("zh-CN", "zh-HK", "en-US") if _lines(form.get(f"q_{loc}"))},
     }
     c = Company.model_validate(data)  # 抛出 ValueError（含 pydantic 校验错误）
     data["listings"] = [{"market": l.market, "code": l.code, "exchange": l.exchange if l.market != "HK" else None,
-                         "benchmark": l.benchmark} for l in c.listings]
+                         "benchmark": l.benchmark, "ads_ratio": l.ads_ratio} for l in c.listings]
     return data
 
 
@@ -281,7 +288,7 @@ def company_page(request: Request, cid: str, span: str = Query("180", alias="ran
     since = iso(utcnow() - timedelta(days=days)) if days else None
     s = tracker.status(app, c)
     model = s["live_model"] if s else None
-    listing = next((l for l in c.listings if model and l.key == model.listing), c.listings[0])
+    listing = next((l for l in c.listings if model and l.key == model.listing), c.pricing_listing)
     bars = app.bars(app.secid(listing), limit=4000)
     if bars is not None and since:
         bars = bars[bars["date"] >= since[:10]]
@@ -305,8 +312,45 @@ def company_page(request: Request, cid: str, span: str = Query("180", alias="ran
                 catalysts=cats, requests=app.db.requests(c.id), plan=app.db.plan(c.id) or {},
                 doc_types=DOC_TYPES, supported=sorted(SUPPORTED), confirmed=tracker.confirmed_refs(app, c),
                 equivalents=equivalents(app, model, c, s["live_target"]) if s else [],
+                earnings=app.db.earnings(c.id, 6), snapshots=_snapshots(app, c), today=today_local(),
+                stance_now=monitor.current_stance(app, c),
                 pending=[(r, i, x) for r in revs if r["id"] > (base_rev["id"] if base_rev else 0)
                          for i, x in enumerate(r["rejected"] or []) if x.get("confirm")])
+
+
+def _snapshots(app, c: Company) -> list[dict]:
+    """一致预期快照（每个来源、财年、指标的最新一份），附展示用的文字。"""
+    return [{**r, "label": consensus_mod.SNAPSHOT_LABEL.get(r["source"], r["source"]),
+             "metric_label": consensus_mod.METRIC_LABEL.get(r["metric"], r["metric"]) + ("（每 ADS）" if r["per_ads"] else ""),
+             "display": consensus_mod.show(r["metric"], r["value"], r["currency"] or "CNY")}
+            for r in app.db.consensus_latest(c.id)]
+
+
+@router.post("/c/{cid}/consensus")
+async def company_consensus(request: Request, cid: str):
+    """录入一致预期（港股没有免费数据源）。自由文本在本进程内处理。"""
+    app = holder(request).app
+    c = company_or_404(app, cid)
+    form = await request.form()
+    try:
+        value = float(str(form.get("value") or "").replace(",", ""))
+        year = int(str(form.get("year") or "0").strip())
+        n_raw = str(form.get("n") or "").strip()
+        msg = consensus_mod.save_manual(app, c, year, str(form.get("metric") or ""), value, str(form.get("currency") or ""),
+                                        str(form.get("date") or "").strip() or None, int(n_raw) if n_raw else None,
+                                        str(form.get("source") or "").strip() or None)
+    except ValueError as e:
+        return back(f"/c/{cid}", err=f"一致预期未保存：{e}")
+    return back(f"/c/{cid}", ok=msg)
+
+
+@router.post("/c/{cid}/consensus/{rid}/delete")
+def company_consensus_delete(request: Request, cid: str, rid: int):
+    app = holder(request).app
+    company_or_404(app, cid)
+    if app.db.delete_consensus(cid, rid):
+        return back(f"/c/{cid}", ok="已删除这条一致预期")
+    return back(f"/c/{cid}", err="没有这条录入（程序记录的快照不能删除）")
 
 
 @router.post("/c/{cid}/track")
@@ -500,7 +544,9 @@ def revision_page(request: Request, cid: str, rid: int):
     model = load_model(r["model"])
     prev_model = load_model(prev["model"]) if prev else None
     evidence = _evidence(r["events"])
+    st = risk_stats(model, r["price"])
     return page(request, "revision.html", c=c, r=r, model=model, prev_model=prev_model, compare=_compare(model, prev_model),
+                st=st, sc=stance_check(r["stance"], st, app.settings.tracker.stance_band),
                 evidence=[e for e in evidence if e.get("impact") != "none"], unaffected=[e for e in evidence if e.get("impact") == "none"],
                 confirmed=tracker.confirmed_refs(app, c), flags=_flags(r["flags"]),
                 chats=[x for x in app.db.chats(cid) if x["revision_id"] == rid], quick=chat.QUICK_REVISION,

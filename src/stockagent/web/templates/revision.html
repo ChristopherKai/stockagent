@@ -25,6 +25,7 @@
     <div class="kpi"><div class="k">立场 / 论点</div><div class="v small">{{ stance_badge(r.stance) }} {{ thesis_badge(r.thesis_status) }}</div>
       <div class="s">{{ THESIS_HELP.get(r.thesis_status, '') }}</div></div>
   </div>
+  {% include "_stance_stats.html" %}
   {% if r.summary %}<p class="rev-lead">{{ r.summary }}</p>{% endif %}
   {% if r.narrative_md %}<div class="md">{{ r.narrative_md | md }}</div>{% endif %}
 </section>

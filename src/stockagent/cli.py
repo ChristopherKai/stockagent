@@ -15,7 +15,7 @@ from pathlib import Path
 import requests
 
 from . import app as appmod
-from . import brief, docs, dossier, evaluate, imafeed, jobs, monitor, newco, notify, profile, tracker, triage
+from . import brief, consensus, docs, dossier, evaluate, imafeed, jobs, monitor, newco, notify, profile, tracker, triage
 from .app import SOURCE_LABEL, App
 from .config import ConfigError
 from .llm import LLMError
@@ -144,6 +144,9 @@ def _run(app: App, args) -> None:
     _print(docs.import_inbox(app.db, app.data_dir, app.watchlist) or ["收件箱为空"])
     print("2/6 抓取行情、公告、新闻…")
     _print(appmod.fetch(app, companies))
+    if app.settings.consensus.enabled:
+        print("   业绩对比一致预期…")
+        _print(consensus.snapshot(app, companies) + consensus.check(app, companies) or ["没有新发布的业绩"])
     if app.settings.sources.auto_download_reports:
         print("3/6 检查定期报告…")
         _print(_ensure_reports(app, companies) or ["定期报告齐全"])
@@ -245,8 +248,11 @@ def cmd_track(args) -> None:
         print(f"{c.title}　{d['created_at'][:10]} 深度报告：{d['card']['thesis']}")
         if line := tracker.status_line(app, c):
             print(f"  标的追踪：{line}")
+        stance = monitor.current_stance(app, c)
         for t in app.db.triggers(c.id):
-            print(f"  [{brief.STATUS_LABEL[t['status']]}] {t['description']}　→ {dossier.ACTION_LABEL[t['action']]}"
+            d = t.get("direction") or "down"
+            role = "证伪" if dossier.falsifies(stance, d) else "印证"
+            print(f"  [{brief.STATUS_LABEL[t['status']]}·{dossier.DIRECTION_LABEL[d]}·{role}] {t['description']}　→ {dossier.ACTION_LABEL[t['action']]}"
                   + (f"\n      依据：{t['evidence']}" if t["evidence"] and t["status"] != "ok" else ""))
         for cat in app.db.catalysts(c.id):
             print(f"  催化剂 {cat['when_text']}：{cat['event']}（KPI：{cat['kpi'] or '—'}）")
@@ -334,7 +340,8 @@ def _target_show(app: App, c, limit: int) -> None:
         print(f"{c.title}：未追踪（stock target add {c.id}）")
         return
     print(f"{c.title}　{tracker.status_line(app, c)}")
-    print(describe(s["live_model"], app.settings.tracker.target))
+    print(describe(s["live_model"], app.settings.tracker.target, s["price"], s["revision"].get("stance"),
+                   app.settings.tracker.stance_band))
     if s["fx_note"]:
         print(f"（按最新汇率重算：{s['fx_note']}）")
     print(f"\n修正记录（最近 {limit} 条）：")
@@ -351,6 +358,30 @@ def _target_show(app: App, c, limit: int) -> None:
         for f in r["flags"] or []:
             print(f"    ⚠ {f}")
     print(f"\n{tracker.DISCLAIMER}")
+
+
+def cmd_consensus(args) -> None:
+    app = _load(args)
+    sub = args.consensus_cmd
+    if sub == "set":
+        c = app.watchlist.select([args.company])[0]
+        given = [(m, v) for m, v in (("eps", args.eps), ("profit", args.profit), ("revenue", args.revenue)) if v is not None]
+        if not given:
+            sys.exit("请用 --eps、--profit 或 --revenue 给出一致预期（归母净利与营收单位为亿）")
+        for metric, value in given:
+            try:
+                print(consensus.save_manual(app, c, args.year, metric, value, args.currency, args.date, args.n, args.source,
+                                            args.high if len(given) == 1 else None, args.low if len(given) == 1 else None))
+            except ValueError as e:
+                sys.exit(f"✗ {e}")
+        return
+    companies = app.watchlist.select(args.company)
+    if sub == "check":
+        _print(consensus.snapshot(app, companies) + consensus.check(app, companies) or ["没有新发布的业绩"])
+        return
+    for c in companies:
+        print(consensus.report_text(app, c, n=args.limit))
+        print()
 
 
 SCREEN_BUSY = "选股器已在运行（另一个 stock screen 进程持有锁，PID {pid}）"
@@ -766,6 +797,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-fetch", action="store_true", help="不抓取，只处理已分级的依据")
     sp.add_argument("--push", action="store_true", help="推送值得关注的修正")
     tp.set_defaults(func=cmd_target)
+
+    cp = sub.add_parser("consensus", help="业绩 vs 一致预期：show 查看当前一致预期与历史对比 / set 录入（港股）/ check 检查新业绩")
+    csub = cp.add_subparsers(dest="consensus_cmd", required=True)
+    sp = with_company(csub.add_parser("show", help="当前一致预期、修正趋势与历史各期的业绩对比（联网）"))
+    sp.add_argument("--limit", type=int, default=6, help="列出最近几个报告期")
+    with_company(csub.add_parser("check", help="记录一致预期快照，检查新发布的业绩（stock run 已包含这一步）"))
+    sp = csub.add_parser("set", help="录入一致预期（港股没有免费数据源），例：stock consensus set xpeng 2026 --eps -2.4 --currency CNY --n 20 --source 富途")
+    sp.add_argument("company")
+    sp.add_argument("year", type=int, help="财年，如 2026")
+    sp.add_argument("--eps", type=float, help="每股收益")
+    sp.add_argument("--profit", type=float, help="归母净利（亿）")
+    sp.add_argument("--revenue", type=float, help="营业收入（亿）")
+    sp.add_argument("--currency", required=True, choices=["CNY", "HKD", "USD"], help="数据来源的币种（内地公司的港股报表多为人民币）")
+    sp.add_argument("--n", type=int, help="机构数")
+    sp.add_argument("--high", type=float, help="最高预测（只录入一个指标时有效）")
+    sp.add_argument("--low", type=float, help="最低预测（只录入一个指标时有效）")
+    sp.add_argument("--source", help="来源，如 富途、彭博")
+    sp.add_argument("--date", help="数据日期 YYYY-MM-DD（默认今天；补录业绩发布前的数据时填当时的日期）")
+    cp.set_defaults(func=cmd_consensus)
 
     sp = with_company(sub.add_parser("requests", help="查看或关闭「需要你补充的数据」请求"))
     sp.add_argument("--done", type=int, metavar="编号", help="标记已补充")

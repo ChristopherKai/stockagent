@@ -143,7 +143,8 @@ CREATE TABLE IF NOT EXISTS triggers (
     description  TEXT NOT NULL,
     kind         TEXT NOT NULL,           -- price（代码判定）| fundamental | event（LLM 判定）
     metric       TEXT, listing TEXT, operator TEXT, threshold REAL,
-    action       TEXT NOT NULL,           -- review 复核 | reduce 减仓 | exit 退出
+    action       TEXT NOT NULL,           -- review 复核 | reduce 减仓 | exit 退出 | upgrade 上调判断
+    direction    TEXT NOT NULL DEFAULT 'down',  -- down 情况比判断更差 | up 情况比判断更好（与立场相反的方向才是证伪）
     active       INTEGER NOT NULL DEFAULT 1,
     status       TEXT NOT NULL DEFAULT 'ok',   -- ok | warning | triggered
     evidence     TEXT,
@@ -286,12 +287,44 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     created_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, id);
+
+CREATE TABLE IF NOT EXISTS consensus (        -- 一致预期快照：程序每天记录（A 股、美股）或使用者录入（港股）；比较时取业绩发布前最近一份
+    id          INTEGER PRIMARY KEY,
+    company_id  TEXT NOT NULL,
+    source      TEXT NOT NULL,                -- em_a 东方财富机构预测（A 股）| nasdaq | manual 使用者录入
+    listing     TEXT,                         -- 数据对应的上市地（A:300308 / US:XPEV / HK:09868）
+    taken_on    TEXT NOT NULL,                -- 数据日期（北京时间 YYYY-MM-DD）；录入时可填数据源上的日期
+    fiscal_year INTEGER NOT NULL,
+    metric      TEXT NOT NULL,                -- eps 每股收益 | profit 归母净利（元）| revenue 营业收入（元）
+    value       REAL NOT NULL,
+    currency    TEXT,                         -- CNY / HKD / USD
+    per_ads     INTEGER NOT NULL DEFAULT 0,   -- 1 = 每 ADS 口径（Nasdaq 的中概股）
+    n           INTEGER,                      -- 机构数
+    high        REAL,
+    low         REAL,
+    note        TEXT,                         -- 来源说明（如「富途」「彭博」）
+    created_at  TEXT NOT NULL,
+    UNIQUE (company_id, source, taken_on, fiscal_year, metric)
+);
+CREATE INDEX IF NOT EXISTS idx_consensus_company ON consensus(company_id, fiscal_year, metric, taken_on);
+
+CREATE TABLE IF NOT EXISTS earnings (         -- 业绩 vs 发布前一致预期（consensus.py 代码计算）
+    company_id  TEXT NOT NULL,
+    period      TEXT NOT NULL,                -- 报告期截止日（YYYY-MM-DD）
+    stage       TEXT NOT NULL,                -- forecast 业绩预告 | express 业绩快报 | report 定期报告
+    notice_date TEXT,                         -- 发布日（北京时间）
+    data_json   TEXT NOT NULL,                -- 对比结果（含所用一致预期的来源、家数、日期与标注）
+    item_uid    TEXT,                         -- 生成的「一致预期对比」条目；没有可比的一致预期时为空
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (company_id, period, stage)
+);
 """
 
-SCHEMA_VERSION = 3  # PRAGMA user_version；以后给已有表加列时在 DB.__init__ 里按版本号执行 ALTER
+SCHEMA_VERSION = 4  # PRAGMA user_version；以后给已有表加列时在 DB.__init__ 里按版本号执行 ALTER
 MIGRATIONS = {  # 版本号 → 升到该版本要补的列（表, 列, 定义）；新库由 SCHEMA 直接建好，已有的列跳过
     2: [("chat_messages", "trace_json", "TEXT NOT NULL DEFAULT '[]'")],
     3: [("chats", "revision_id", "INTEGER")],
+    4: [("triggers", "direction", "TEXT NOT NULL DEFAULT 'down'")],
 }
 
 TRIAGE_FIELDS = (
@@ -535,6 +568,77 @@ class DB:
             (company_id or "", metric, period, value, unit, note, source or "manual", iso(utcnow())),
         )
 
+    # ------------------------------------------------------------ 一致预期与业绩对比
+
+    def save_consensus(self, company_id: str, source: str, taken_on: str, rows: list[dict], listing: str | None = None) -> int:
+        """保存一致预期快照；同一来源、日期、财年、指标的旧值被覆盖。rows：[{fiscal_year, metric, value, currency, per_ads, n, high, low, note}]"""
+        now = iso(utcnow())
+        with self.lock:
+            self.conn.executemany(
+                "INSERT INTO consensus(company_id, source, listing, taken_on, fiscal_year, metric, value, currency, per_ads, n, high, low, "
+                "note, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(company_id, source, taken_on, fiscal_year, metric) DO UPDATE SET listing=excluded.listing, "
+                "value=excluded.value, currency=excluded.currency, per_ads=excluded.per_ads, n=excluded.n, high=excluded.high, "
+                "low=excluded.low, note=excluded.note, created_at=excluded.created_at",
+                [(company_id, source, listing, taken_on, int(r["fiscal_year"]), r["metric"], float(r["value"]), r.get("currency"),
+                  int(bool(r.get("per_ads"))), r.get("n"), r.get("high"), r.get("low"), r.get("note"), now) for r in rows],
+            )
+            self.conn.commit()
+        return len(rows)
+
+    def consensus_rows(self, company_id: str, *, fiscal_year: int | None = None, metric: str | None = None,
+                       on_or_before: str | None = None, sources: tuple[str, ...] | None = None) -> list[dict]:
+        """一致预期快照，按日期倒序。"""
+        sql, params = "SELECT * FROM consensus WHERE company_id=?", [company_id]
+        if fiscal_year is not None:
+            sql += " AND fiscal_year=?"
+            params.append(int(fiscal_year))
+        if metric:
+            sql += " AND metric=?"
+            params.append(metric)
+        if on_or_before:
+            sql += " AND taken_on<=?"
+            params.append(on_or_before)
+        if sources:
+            sql += f" AND source IN ({','.join('?' * len(sources))})"
+            params += list(sources)
+        return self._all(sql + " ORDER BY taken_on DESC, id DESC", tuple(params))
+
+    def consensus_latest(self, company_id: str) -> list[dict]:
+        """每个（来源、财年、指标）的最新一份快照。"""
+        out, seen = [], set()
+        for r in self.consensus_rows(company_id):
+            key = (r["source"], r["fiscal_year"], r["metric"])
+            if key not in seen:
+                seen.add(key)
+                out.append(r)
+        return sorted(out, key=lambda r: (r["fiscal_year"], r["metric"], r["source"]))
+
+    def delete_consensus(self, company_id: str, row_id: int) -> bool:
+        """删除一条使用者录入的一致预期（程序记录的快照不删）。"""
+        cur = self._exec("DELETE FROM consensus WHERE id=? AND company_id=? AND source='manual'", (row_id, company_id))
+        return cur.rowcount > 0
+
+    def save_earnings(self, company_id: str, period: str, stage: str, notice_date: str | None, data: dict,
+                      item_uid: str | None) -> None:
+        self._exec(
+            "INSERT INTO earnings(company_id, period, stage, notice_date, data_json, item_uid, created_at) VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(company_id, period, stage) DO UPDATE SET notice_date=excluded.notice_date, data_json=excluded.data_json, "
+            "item_uid=excluded.item_uid, created_at=excluded.created_at",
+            (company_id, period, stage, notice_date, json.dumps(data, ensure_ascii=False, default=str), item_uid, iso(utcnow())),
+        )
+
+    def has_earnings(self, company_id: str, period: str, stage: str) -> bool:
+        return self._one("SELECT 1 AS x FROM earnings WHERE company_id=? AND period=? AND stage=?", (company_id, period, stage)) is not None
+
+    def earnings(self, company_id: str, limit: int = 8) -> list[dict]:
+        """业绩对比记录，按发布日倒序。"""
+        rows = self._all("SELECT * FROM earnings WHERE company_id=? ORDER BY COALESCE(notice_date, created_at) DESC, created_at DESC LIMIT ?",
+                         (company_id, limit))
+        for r in rows:
+            r["data"] = json.loads(r.pop("data_json") or "{}")
+        return rows
+
     def manual_data(self, company_id: str | None) -> list[dict]:
         return self._all(
             "SELECT * FROM manual_data WHERE company_id=? ORDER BY metric, period DESC", (company_id or "",)
@@ -572,10 +676,10 @@ class DB:
             did = cur.lastrowid
             self.conn.execute("UPDATE triggers SET active=0 WHERE company_id=?", (company_id,))
             self.conn.executemany(
-                "INSERT INTO triggers(company_id, dossier_id, description, kind, metric, listing, operator, threshold, action) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO triggers(company_id, dossier_id, description, kind, metric, listing, operator, threshold, action, "
+                "direction) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 [(company_id, did, t["description"], t["kind"], t.get("metric"), t.get("listing"), t.get("operator"),
-                  t.get("threshold"), t["action"]) for t in triggers],
+                  t.get("threshold"), t["action"], t.get("direction") or "down") for t in triggers],
             )
             self.conn.execute("DELETE FROM catalysts WHERE company_id=?", (company_id,))
             self.conn.executemany(

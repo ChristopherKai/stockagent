@@ -209,6 +209,7 @@ def test_schedule_and_section_settings(web):
     r = post(web, "/settings/section/tracker", {"tracker.min_materiality": "4", "tracker.max_events": "10", "tracker.max_steps": "6",
                                                 "tracker.target": "base", "tracker.notify_min_change": "0.1", "tracker.flag_change": "0.3",
                                                 "tracker.redo_materiality": "5", "tracker.redo_cooldown_days": "5", "tracker.web_search": "on",
+                                                "tracker.stance_band": "0.15",
                                                 "etag": yamledit.digest(before)})
     assert r.status_code == 303
     t = web.holder.app.settings.tracker

@@ -179,6 +179,19 @@ class TrackerConfig(BaseModel):
     redo_materiality: int = 5           # 重要性达到该值且修正判为实质影响的事件，自动排队重跑深度报告
     redo_on_broken: bool = True         # 论点被判失效时自动排队重跑深度报告
     redo_cooldown_days: int = 3         # 同一公司自动重跑深度报告的冷却天数
+    stance_band: float = 0.15           # 参考立场：加权空间超过 ±该比例才算偏多 / 偏空（见 valuation.reference_stance）
+
+
+class ConsensusConfig(BaseModel):
+    """业绩 vs 一致预期（consensus.py，代码计算）：A 股按研报还原发布前的一致预期，美股每天存快照，港股靠手动录入。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    window_days: int = 120      # A 股：发布前多少天内的研报计入一致预期（每家机构取最新一篇）
+    lookback_days: int = 10     # 第一次检查某家公司时，只对比多少天内发布的业绩（避免把历史业绩一次性推进分级）
+    min_estimates: int = 3      # 少于几家机构时标注「样本少」
+    stale_days: int = 90        # 一致预期（最新一篇研报或快照）早于发布日多少天时标注「可能过时」
 
 
 class ChatConfig(BaseModel):
@@ -287,6 +300,7 @@ class Settings(BaseModel):
     report: ReportConfig = Field(default_factory=ReportConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
+    consensus: ConsensusConfig = Field(default_factory=ConsensusConfig)
     chat: ChatConfig = Field(default_factory=ChatConfig)
     screen: ScreenConfig = Field(default_factory=ScreenConfig)
     web: WebConfig = Field(default_factory=WebConfig)
@@ -295,14 +309,23 @@ class Settings(BaseModel):
 
 # ---------------------------------------------------------------- 自选股
 
+PRICING_ORDER = ("HK", "A", "US")  # 未指定 pricing 时的定价上市地优先级（A+H、港美两地均以港股定价）
+
+
 class Listing(BaseModel):
     market: Literal["HK", "A", "US"]
     code: str
     exchange: str | None = None  # A: SH/SZ/BJ；US: NASDAQ/NYSE/AMEX
     benchmark: str | None = None  # 计算超额收益用的指数 secid；不填用该市场的第一个基准
+    ads_ratio: float | None = None  # 美股 ADS：每 1 份 ADS 对应的普通股数（如小鹏 XPEV 为 2）；用于 ADS 溢价与平价折算
 
     @model_validator(mode="after")
     def _normalize(self) -> "Listing":
+        if self.ads_ratio is not None:
+            if self.market != "US":
+                raise ValueError(f"ads_ratio 只适用于美股：{self.market} {self.code}")
+            if self.ads_ratio <= 0:
+                raise ValueError(f"ads_ratio 必须为正：{self.code}")
         code = str(self.code).strip().upper()
         if self.market == "HK":
             code = code.removesuffix(".HK").zfill(5)
@@ -347,6 +370,8 @@ class Company(BaseModel):
     name_en: str | None = None
     aliases: list[str] = Field(default_factory=list)
     listings: list[Listing]
+    # 定价上市地：情景价格、目标价、价格类证伪条件按它计算；不填时按 PRICING_ORDER（港股优先）取
+    pricing: Literal["HK", "A", "US"] | None = None
     sector: str | None = None
     notes: str | None = None
     watch_items: list[str] = Field(default_factory=list)
@@ -360,8 +385,21 @@ class Company(BaseModel):
             raise ValueError(f"company id 只能包含字母、数字、-、_，且以字母或数字开头：{v}")
         return v
 
+    @model_validator(mode="after")
+    def _pricing_ok(self) -> "Company":
+        if self.pricing and self.listing(self.pricing) is None:
+            raise ValueError(f"{self.id}：定价上市地 {self.pricing} 不在 listings 中")
+        return self
+
     def listing(self, market: str) -> Listing | None:
         return next((l for l in self.listings if l.market == market), None)
+
+    @property
+    def pricing_listing(self) -> Listing:
+        """定价上市地：pricing 指定的市场，否则按港股、A 股、美股的顺序取第一个存在的上市地。"""
+        if self.pricing and (l := self.listing(self.pricing)):
+            return l
+        return next(l for m in PRICING_ORDER for l in self.listings if l.market == m)
 
     @property
     def title(self) -> str:

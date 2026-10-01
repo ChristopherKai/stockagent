@@ -47,6 +47,12 @@ def _no_external_search(monkeypatch):
     from stockagent.sources import emdata
 
     monkeypatch.setattr(emdata, "fcf_data", lambda *a, **k: None)  # 报表数据需要联网；需要的测试自行替换
+    # 业绩 vs 一致预期（stock run 的一步）用到的东方财富接口同理
+    monkeypatch.setattr(emdata, "financials", lambda *a, **k: [])
+    monkeypatch.setattr(emdata, "research_reports", lambda *a, **k: [])
+    monkeypatch.setattr(emdata, "a_consensus", lambda *a, **k: None)
+    monkeypatch.setattr(emdata, "a_forecasts", lambda *a, **k: [])
+    monkeypatch.setattr(emdata, "a_express", lambda *a, **k: [])
     from stockagent.sources import ccass, nasdaq, sec
 
     monkeypatch.setattr(ccass, "holdings", lambda *a, **k: None)  # 港交所 CCASS、SEC XBRL、Nasdaq 同理

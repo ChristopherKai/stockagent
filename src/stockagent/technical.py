@@ -165,13 +165,37 @@ def ah_premium(a_bars: pd.DataFrame, h_bars: pd.DataFrame, fx_bars: pd.DataFrame
     m = m.dropna(subset=["fx"])
     if m.empty:
         return None
-    prem = m["a"] / (m["h"] * m["fx"]) - 1
+    return _premium_stats(m["date"], m["a"] / (m["h"] * m["fx"]) - 1)
+
+
+def _premium_stats(dates: pd.Series, prem: pd.Series) -> dict:
     tail = prem.tail(60)
     return {
-        "date": m["date"].iloc[-1],
+        "date": dates.iloc[-1],
         "current": float(prem.iloc[-1]),
         "avg_20": float(prem.tail(20).mean()),
         "min_60": float(tail.min()),
         "max_60": float(tail.max()),
         "samples": len(prem),
     }
+
+
+def adr_premium(us_bars: pd.DataFrame, hk_bars: pd.DataFrame, usdcnh: pd.DataFrame, hkdcnh: pd.DataFrame,
+                ratio: float) -> dict | None:
+    """美股 ADS 相对港股的溢价：ADS 价 ÷（港股价 × 每 ADS 股数 ÷ 美元兑港元）− 1。
+    美元兑港元由 USDCNH ÷ HKDCNH 推算；同一日历日的美股收盘晚于港股收盘，按惯例按日期对齐。"""
+    if not ratio or any(x is None or x.empty for x in (us_bars, hk_bars, usdcnh, hkdcnh)):
+        return None
+    m = (us_bars[["date", "close"]].rename(columns={"close": "us"})
+         .merge(hk_bars[["date", "close"]].rename(columns={"close": "hk"}), on="date"))
+    if m.empty:
+        return None
+    fx = (usdcnh[["date", "close"]].rename(columns={"close": "usd"})
+          .merge(hkdcnh[["date", "close"]].rename(columns={"close": "hkd"}), on="date"))
+    fx["usdhkd"] = fx["usd"] / fx["hkd"]
+    m["_d"], fx["_d"] = pd.to_datetime(m["date"]), pd.to_datetime(fx["date"])
+    m = pd.merge_asof(m.sort_values("_d"), fx[["_d", "usdhkd"]].sort_values("_d"), on="_d", direction="backward")
+    m = m.dropna(subset=["usdhkd"])
+    if m.empty:
+        return None
+    return _premium_stats(m["date"], m["us"] / (m["hk"] * ratio / m["usdhkd"]) - 1)

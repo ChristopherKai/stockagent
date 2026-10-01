@@ -22,10 +22,10 @@
     <label>行业<input name="sector" value="{{ val('sector', company.sector or '' if company else '') }}"></label>
 
     <fieldset><legend>上市地</legend>
-      <p class="muted small">港股 5 位数字、A 股 6 位数字、美股代码；美股须选交易所。对比基准填东方财富 secid（如 100.HSI、124.HSTECH），不填用该市场的第一个基准。</p>
+      <p class="muted small">港股 5 位数字、A 股 6 位数字、美股代码；美股须选交易所。对比基准填东方财富 secid（如 100.HSI、124.HSTECH），不填用该市场的第一个基准。美股 ADS 请填换股比例（1 份 ADS 对应的普通股数，如小鹏 XPEV 为 2），用于计算 ADS 相对港股的溢价。</p>
       {% set ls = company.listings if company else [] %}
       {% for i in range(6) %}{% set l = ls[i] if i < ls | length else none %}
-      <div class="row4 {{ 'hidden-row' if not l and i > 0 and not (f and f.get('listing' ~ i ~ '_code')) }}" data-row>
+      <div class="row5 {{ 'hidden-row' if not l and i > 0 and not (f and f.get('listing' ~ i ~ '_code')) }}" data-row>
         <select name="listing{{ i }}_market">
           {% for m in ['HK', 'A', 'US'] %}<option value="{{ m }}" {{ 'selected' if (val('listing' ~ i ~ '_market', l.market if l else 'HK')) == m }}>{{ MARKET_LABEL[m] }}</option>{% endfor %}
         </select>
@@ -36,9 +36,15 @@
           {% for e in ['NASDAQ', 'NYSE', 'AMEX'] %}<option value="{{ e }}" {{ 'selected' if ex == e }}>{{ e }}</option>{% endfor %}
         </select>
         <input name="listing{{ i }}_benchmark" placeholder="对比基准 secid（可空）" value="{{ val('listing' ~ i ~ '_benchmark', l.benchmark or '' if l else '') }}">
+        <input name="listing{{ i }}_ads_ratio" inputmode="decimal" placeholder="ADS 换股比例（美股）" value="{{ val('listing' ~ i ~ '_ads_ratio', ('%g' | format(l.ads_ratio)) if l and l.ads_ratio else '') }}">
       </div>
       {% endfor %}
       <button type="button" class="btn tiny ghost" data-show-row>+ 添加上市地</button>
+      {% set pr = val('pricing', company.pricing or '' if company else '') %}
+      <label>定价上市地<select name="pricing">
+        <option value="">自动（港股优先，其次 A 股、美股）</option>
+        {% for m in ['HK', 'A', 'US'] %}<option value="{{ m }}" {{ 'selected' if pr == m }}>{{ MARKET_LABEL[m] }}</option>{% endfor %}
+      </select><small>多地上市时，情景价格、目标价与价格类证伪条件按它计算；改动从下一份深度报告起生效</small></label>
     </fieldset>
 
     <label>研究备注<textarea name="notes" rows="4" placeholder="业务、产业链、关键变量……（作为 LLM 的研究背景）">{{ val('notes', company.notes or '' if company else '') }}</textarea></label>

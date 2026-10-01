@@ -29,6 +29,7 @@ from .config import Company
 from .llm import LLMError
 from .sources.web import search_failed
 from .tools import ToolBox, fcf_snapshot, hk_consensus, resolve_ticker, tool_log_markdown
+from .valuation import card_stats, stats_line
 from .utils import CST, big_num, fmt_local, iso, log, num, pct, today_local, utcnow
 
 DISCLAIMER = "本报告由程序调用大模型与公开数据自动生成，仅供研究参考，不构成投资建议。数字以原始公告为准；未披露或未查到的内容已尽量标注。"
@@ -65,14 +66,14 @@ SECTIONS: list[tuple[str, str, str]] = [
 1. 用 market_data 查询本公司各上市地的价格、市值、PE/PB、250 日高低点；A+H 公司看 AH 溢价。
 2. 选 3–5 家可比公司（同业或产业链相近），用 market_data 查询它们的估值，整理成可比表（名称、代码、市值、PE、PB、近 20 日涨跌）。
 3. 反向 DCF：用 reverse_dcf 计算当前市值隐含的增长率（利润或现金流须为正，注意币种和单位一致）；亏损公司说明不适用，改用收入口径。
-4. 敏感性矩阵：选最关键的驱动指标（如下一年净利润或收入），给 4–6 个取值和 4–6 个倍数，用 valuation_matrix 计算隐含股价（股本、净现金、汇率要准确，current_price 填当前股价），原样保留工具输出的表格。
+4. 敏感性矩阵：选最关键的驱动指标（如下一年净利润或收入），给 4–6 个取值和 4–6 个倍数，用 valuation_matrix 计算隐含股价（股本、净现金、汇率要准确；股价、汇率与 current_price 一律用定价上市地，倍数要与定价上市地的市场一致——A+H 公司以 H 股定价时参照 H 股自身历史估值与港股可比，或按当前 AH 溢价折算），原样保留工具输出的表格。
 5. 历史估值分位：用 valuation_history 看当前 PE/PB 处于过去 3–5 年的什么位置（同业也可以查）。
 6. 适用时补充：有上市子公司或多元业务的用 sotp 做分部加总；稳定分红的用 ddm 做股息贴现。
-7. 卖方观点：用 broker_research 取一致预期（A 股为评级分布与盈利预测中位数，港股为目标价均值与区间），再用 web_search 查主要机构最新的目标价和盈利预测（注明机构与日期）；查不到就写「未查到」。
+7. 卖方观点：用 broker_research 取一致预期（A 股为评级分布与盈利预测中位数，港股为目标价均值与区间），再用 web_search 查主要机构最新的目标价和盈利预测（注明机构与日期）；查不到就写「未查到」。用 earnings_vs_consensus 看一致预期近 30/90 天的修正方向，以及公司历史上业绩是否常超/不及预期。
 8. EV 与自由现金流：用 fcf_yield 取 EV、FCF Yield（TTM、近 3 个年度、3 年平均）、净现金占市值、是否 Negative EV、FCF 累计覆盖 EV 的年数；周期股以多年平均为准；FCF 为负或处于扩产期时，用卖方盈利预测或情景估算前瞻 FCF，传入 forward_fcf 计算前瞻 FCF Yield。可比公司也可以查。
 9. 股东回报与「免费期权」：分红、回购的历史、意愿与触发条件（如母公司偿债需求、港股通纳入、董事会政策）；主业估值能否覆盖市值，新业务是否被市场零估值。"""),
     ("recent", "近期动态、催化剂与风险", """研究问题：
-1. 用 company_events 查看近 90 天（days=90）的重要事件，概括最重要的 5–8 件及其影响；关键公告可用 fetch_url 读原文。港股用 southbound 看南向资金的增减持，用 ccass 看近 20 日有无大额转仓或集中度变化。
+1. 用 company_events 查看近 90 天（days=90）的重要事件，概括最重要的 5–8 件及其影响；关键公告可用 fetch_url 读原文。最近一次业绩相对一致预期如何，用 earnings_vs_consensus（程序计算）。港股用 southbound 看南向资金的增减持，用 ccass 看近 20 日有无大额转仓或集中度变化。
 2. 未来 12 个月可能的催化剂：业绩披露、新产品或产能投产、解禁、指数或港股通调整、政策节点等，尽量给出时间和可检验的指标。
 3. 主要风险：政策监管、竞争、客户、供应链、诉讼、地缘政治，按重要性排序。
 4. 最值得持续跟踪的外部变量（行业价格、需求数据、竞争对手动态、宏观），以及可以获取的数据来源。"""),
@@ -114,7 +115,7 @@ WRITER_PART2 = """前半部分已经写好（附在后面，供你保持观点�
 ## § 股权、控制与解禁
 ## § 监管与结构
 ## § 证伪条件：什么情况说明判断错了
-（5–8 条红旗，每条必须可观察、可检验，最好带阈值）
+（5–8 条，每条必须可观察、可检验，最好带阈值，并标明方向：向下＝情况比判断更差，向上＝情况比判断更好。证伪的方向取决于立场：偏多被向下的情况证伪，偏空被向上的情况证伪，中性两个方向都会被证伪。偏多至少写 3 条向下的；偏空至少写 3 条向上的（例如交付、毛利率好于预期）；中性两个方向各至少 2 条）
 ## § 值得记住的数字
 （5 个：数字加一句解释）
 ## § 催化剂日历
@@ -123,12 +124,13 @@ WRITER_PART2 = """前半部分已经写好（附在后面，供你保持观点�
 （2–3 条简短洞见，各带小标题）"""
 
 CARD_SYSTEM = """你是风控研究员。根据深度报告整理一张可由程序自动跟踪的「跟踪卡」，只输出 JSON。
-- thesis：一句话核心判断；stance：bullish / neutral / bearish。
+- thesis：一句话核心判断；stance：bullish / neutral / bearish，按 12 个月情景定义——bullish 偏多 = 概率加权价格比现价高 {band} 以上，且跌破现价的概率低于 50%；bearish 偏空 = 概率加权价格比现价低 {band} 以上，或基准情景低于现价且跌破现价的概率高于 50%；其余为 neutral 中性。报告的判断与这个定义不一致时，按报告的判断填，但必须在 thesis 里写明理由（程序会按情景数字核对并标注）。
 - scenarios：bull / base / bear 三种情景。price_low、price_high 用报告中的价格（第一上市地 {price_listing} 的股价，单位 {currency}）；probability 用 0–1 的小数，三者合计为 1；drivers 写关键驱动。
-- kill_criteria：5–8 条证伪条件（一旦发生说明判断可能错了）。
+- kill_criteria：5–8 条证伪条件（一旦发生说明判断可能错了）。direction：down 向下（情况比判断更差）/ up 向上（情况比判断更好）。
+  证伪的方向取决于立场：bullish 被 down 证伪、bearish 被 up 证伪、neutral 两个方向都会。bullish 至少 3 条 down；bearish 至少 3 条 up；neutral 两个方向各至少 2 条。与立场同向的条件（如偏空公司的「交付不及预期」）可以保留，作为风险加剧或印证的信号。
   · 能用价格衡量的写 kind=price，并给出 metric：close（收盘价）/ drawdown_from_high（距 250 日高点的回撤比例，0.3 表示 30%）/ ret_20d（20 日涨跌幅，小数）/ ah_premium（A 相对 H 的溢价，小数，仅 A+H 公司）；listing 取值 {listings}；operator 为 < 或 >；threshold 为数字。
   · 其余写 kind=fundamental（财报指标，如毛利率连续两季下滑）或 kind=event（事件，如失去大客户、被列入实体清单），此时 metric=none、operator=none、threshold=0、listing 为空字符串。
-  · action：review 复核 / reduce 减仓 / exit 退出。
+  · action：down 方向用 review 复核 / reduce 减仓 / exit 退出；up 方向用 review 复核 / upgrade 上调判断（研究动作，重新评估立场，不是买入建议）。
 - catalysts：未来 12 个月的催化剂；when 尽量写成 YYYY-MM-DD、YYYY-MM 或 2026Q4；event 与可检验的 kpi。
 - watch_metrics：需要持续跟踪的量化指标（name、current 当前值、threshold 警戒阈值、source 数据来源、manual 是否需要使用者手动补充）。
 - related_tickers：产业链相关的上市公司（客户、供应商、竞争对手），code 用港股 5 位数字、A 股 6 位数字或美股代码，market 为 HK / A / US，relation 写关系；只列报告中出现过的。
@@ -209,7 +211,25 @@ GAP_WORDS = ("未披露", "未查到", "未找到", "未能获取", "无法获�
 FAILED_MARK = "（本部分研究失败："
 
 METRIC_LABEL = {"close": "收盘价", "drawdown_from_high": "距250日高点回撤", "ret_20d": "20日涨跌幅", "ah_premium": "AH溢价"}
-ACTION_LABEL = {"review": "复核", "reduce": "减仓", "exit": "退出"}
+ACTION_LABEL = {"review": "复核", "reduce": "减仓", "exit": "退出", "upgrade": "上调判断"}
+DIRECTION_LABEL = {"down": "向下", "up": "向上"}
+
+
+def falsifies(stance: str | None, direction: str | None) -> bool:
+    """这个方向的情况会不会证伪该立场：偏多被向下证伪、偏空被向上证伪、中性两个方向都会（没有立场时按偏多处理）。"""
+    direction = direction or "down"
+    if stance == "neutral":
+        return True
+    return direction == ("up" if stance == "bearish" else "down")
+
+
+def trigger_label(stance: str | None, t: dict) -> str:
+    """推送与列表里的条件标签：证伪条件触发（方向）或与立场同向的「印证」。"""
+    d = t.get("direction") or "down"
+    if falsifies(stance, d):
+        return f"证伪条件触发（{DIRECTION_LABEL[d]}）"
+    kind = "风险条件" if d == "down" else "利好条件"
+    return f"{kind}触发（与{ {'bullish': '偏多', 'bearish': '偏空'}.get(stance, '报告') }判断同向，属印证）"
 KIND_LABEL = {"price": "价格", "fundamental": "基本面", "event": "事件"}
 
 
@@ -230,7 +250,8 @@ class KillCriterion(BaseModel):
     listing: str = ""
     operator: Literal["<", ">", "none"] = "none"
     threshold: float = 0.0
-    action: Literal["review", "reduce", "exit"] = "review"
+    direction: Literal["down", "up"] = "down"   # down：情况比判断更差；up：情况比判断更好（旧卡没有这个字段，按 down 处理）
+    action: Literal["review", "reduce", "exit", "upgrade"] = "review"
 
     @model_validator(mode="after")
     def _consistent(self) -> "KillCriterion":
@@ -239,6 +260,11 @@ class KillCriterion(BaseModel):
             self.kind = "event"
         if self.kind != "price":
             self.metric, self.operator, self.threshold, self.listing = "none", "none", 0.0, ""
+        # 动作与方向一致：向上的情况只能复核或上调判断，向下的情况不能「上调判断」
+        if self.direction == "up" and self.action in ("reduce", "exit"):
+            self.action = "review"
+        if self.direction == "down" and self.action == "upgrade":
+            self.action = "review"
         return self
 
 
@@ -273,6 +299,8 @@ class Card(BaseModel):
     related_tickers: list[Related] = []
     news_keywords: list[str] = []
     data_gaps: list[str] = []
+    # 以下由代码填写，不在 CARD_SCHEMA 里
+    price_listing: str = ""   # 情景价格所用的定价上市地（Listing.key）；旧卡为空，按第一个上市地处理
 
     @field_validator("scenarios")
     @classmethod
@@ -302,7 +330,7 @@ CARD_SCHEMA = _obj({
         "description": _str_schema(), "kind": _str_schema(["price", "fundamental", "event"]),
         "metric": _str_schema(["close", "drawdown_from_high", "ret_20d", "ah_premium", "none"]),
         "listing": _str_schema(), "operator": _str_schema(["<", ">", "none"]), "threshold": {"type": "number"},
-        "action": _str_schema(["review", "reduce", "exit"])})},
+        "direction": _str_schema(["down", "up"]), "action": _str_schema(["review", "reduce", "exit", "upgrade"])})},
     "catalysts": {"type": "array", "items": _obj({"when": _str_schema(), "event": _str_schema(), "kpi": _str_schema()})},
     "watch_metrics": {"type": "array", "items": _obj({
         "name": _str_schema(), "current": _str_schema(), "threshold": _str_schema(), "source": _str_schema(),
@@ -343,7 +371,7 @@ def normalize_listing(company: Company, value: str) -> str:
     for l in company.listings:
         if v in (l.key, l.display, l.code, l.code.lstrip("0"), f"{l.market}:{l.code.lstrip('0')}"):
             return l.key
-    return company.listings[0].key
+    return company.pricing_listing.key
 
 
 # ---------------------------------------------------------------- 生成
@@ -362,9 +390,19 @@ def _header(app: App, company: Company) -> tuple[str, str]:
                  f"PE(TTM) {num(q['pe_ttm'], 1)}" if q.get("pe_ttm") is not None else "",
                  f"PB {num(q['pb'], 2)}" if q.get("pb") is not None else ""]
         parts.append(seg + "".join(f" · {x}" for x in extra if x))
-    if ah := app.ah_premium(company):
-        parts.append(f"AH 溢价 {pct(ah['current'])}")
-    return "　｜　".join(parts), company.listings[0].currency
+    for label, p in app.cross_premiums(company):
+        parts.append(f"{label.split('（')[0]} {pct(p['current'])}")
+    return "　｜　".join(parts), company.pricing_listing.currency
+
+
+def pricing_note(company: Company) -> str:
+    """多地上市的公司：告诉模型以哪个上市地定价（情景价格、敏感性矩阵、价格类证伪条件都按它计算）。"""
+    if len(company.listings) < 2:
+        return ""
+    l = company.pricing_listing
+    others = "、".join(x.display for x in company.listings if x.key != l.key)
+    return (f"定价上市地：{l.display}（{l.currency}）——情景价格、敏感性矩阵与价格类证伪条件均以此为准；"
+            f"{others} 按当前溢价折算后单独说明，不要混用不同上市地的股价与倍数。")
 
 
 def previous_alerts(app: App, company: Company) -> str:
@@ -402,7 +440,9 @@ def research(app: App, company: Company, key: str, title: str, questions: str, m
         system.append(imafeed.AGENT_HINT)
     alerts = previous_alerts(app, company)
     revs = previous_revisions(app, company)
-    user = (f"{questions}\n\n当前行情：\n{market}\n{app.fx_line()}（涉及币种换算时只用这里的汇率）\n\n"
+    note = pricing_note(company)
+    user = (f"{questions}\n\n当前行情：\n{market}\n{app.fx_line()}（涉及币种换算时只用这里的汇率）\n"
+            + (f"{note}\n" if note else "") + "\n"
             + (f"{alerts}\n\n" if alerts else "") + (f"{revs}\n\n" if revs else "")
             + "先规划要查什么，再调用工具逐项查证，最后输出本部分的研究笔记。")
     try:
@@ -671,7 +711,9 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
         progress(f"  {company.name}：提取关键事实失败（跳过覆盖检查）：{e}")
     must = ("=== 报告必须覆盖的关键事实（写入括号中的章节）===\n" + "\n".join(f"- {f['fact']}（{f['section']}）" for f in facts)
             if facts else "")
-    material = (f"公司：{company.title}\n今天：{today_local()}\n行情：{header}\n{app.fx_line()}\n\n"
+    note = pricing_note(company)
+    material = (f"公司：{company.title}\n今天：{today_local()}\n行情：{header}\n{app.fx_line()}\n"
+                + (f"{note}\n" if note else "") + "\n"
                 + (f"{alerts}\n\n" if alerts else "") + (f"{revs}\n\n" if revs else "") + notes_text
                 + (f"\n\n{asked}" if asked else "")
                 + (f"\n\n{must}" if must else ""))
@@ -701,11 +743,16 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
 
     progress(f"  {company.name}：抽取跟踪卡…")
     listings = " / ".join(l.key for l in company.listings)
-    card_system = CARD_SYSTEM.format(price_listing=company.listings[0].display, currency=currency, listings=listings)
+    band = app.settings.tracker.stance_band
+    card_system = CARD_SYSTEM.format(price_listing=company.pricing_listing.display, currency=currency, listings=listings,
+                                     band=f"{band:.0%}")
     card = app.llm.complete(
         "dossier", [card_system], f"公司：{company.title}\n\n{report}", schema=CARD_SCHEMA,
         validate=lambda d: Card.model_validate(d).model_dump(), max_tokens=16000,
     ).data
+    card["price_listing"] = company.pricing_listing.key
+    bars = app.bars(app.secid(company.pricing_listing), limit=5)
+    card["stats"] = card_stats(card, float(bars["close"].iloc[-1]) if bars is not None else None, band)
     if card["data_gaps"]:  # 跟踪卡里的「待补充数据」同样与笔记核对，笔记里有答案的去掉
         try:
             wrong = audit(app, notes_text, card["data_gaps"])
@@ -813,15 +860,21 @@ def _card_markdown(company: Company, card: dict) -> str:
         out += [f"| {names[s['name']]} | {num(s['price_low'])} – {num(s['price_high'])} | {pct(s['probability'], 0, sign=False)} | {s['drivers']} |"
                 for s in card["scenarios"]]
         out.append("")
+        if st := card.get("stats"):
+            out += [f"**情景统计**（程序按区间中点与现价 {num(st['price'])} 计算）：{stats_line(st, st.get('check'))}", ""]
     if card["kill_criteria"]:
-        out += ["**证伪条件与动作**", "", "| # | 条件 | 类型 | 判定方式 | 动作 |", "|---|---|---|---|---|"]
+        out += ["**证伪条件与动作**（方向：向下＝比判断更差，向上＝比判断更好；与立场相反的方向才是证伪）", "",
+                "| # | 条件 | 方向 | 类型 | 判定方式 | 动作 |", "|---|---|---|---|---|---|"]
         for i, k in enumerate(card["kill_criteria"], 1):
             if k["kind"] == "price":
                 thr = pct(k["threshold"], 1, sign=False) if k["metric"] != "close" else num(k["threshold"])
                 how = f"代码每日判定：{k['listing']} {METRIC_LABEL[k['metric']]} {k['operator']} {thr}"
             else:
                 how = "LLM 对照新事件与财报判断"
-            out.append(f"| {i} | {k['description']} | {KIND_LABEL[k['kind']]} | {how} | {ACTION_LABEL[k['action']]} |")
+            d = k.get("direction") or "down"
+            role = "证伪" if falsifies(card.get("stance"), d) else "印证"
+            out.append(f"| {i} | {k['description']} | {DIRECTION_LABEL[d]}（{role}） | {KIND_LABEL[k['kind']]} | {how} | "
+                       f"{ACTION_LABEL[k['action']]} |")
         out.append("")
     if card["catalysts"]:
         out += ["**催化剂日历**", "", "| 时间 | 事件 | 可检验指标 |", "|---|---|---|"]
@@ -884,7 +937,7 @@ def render(app: App, company: Company, dossier_id: int, report: str, card: dict,
 <style>{DOSSIER_CSS}</style></head><body><main>
 <div class="masthead"><div class="org">自 选 股 研 究</div><div class="title">深 度 报 告</div>
 <div class="date">{now:%Y年%m月%d日} · 第 {dossier_id} 期 · {' / '.join(l.display for l in company.listings)}</div></div>
-<div class="kicker">DEEP DOSSIER · {MARKET_LABEL[company.listings[0].market]}</div>
+<div class="kicker">DEEP DOSSIER · {MARKET_LABEL[company.pricing_listing.market]}</div>
 {html_body}
 <div class="appendix">{html_appendix}</div>
 <div class="footer">{DISCLAIMER}<br>生成模型：{app.llm.describe('dossier')} · 研究模型：{app.llm.describe('research')} · 生成时间 {now:%Y-%m-%d %H:%M}</div>

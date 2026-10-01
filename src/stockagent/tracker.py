@@ -24,12 +24,13 @@ from .app import SOURCE_LABEL, App
 from .config import Company
 from .docs import DOC_TYPES
 from .llm import LLMError
+from .dossier import DIRECTION_LABEL, falsifies
 from .tools import ToolBox, dossier_running
 from .triage import DIRECTIONS, event_label, listing_market, short_id
 from .utils import fmt_local, iso, log, parse_iso, pct, sha1, today_local, utcnow
 from .valuation import (
     FACT_PATHS, TARGET_LABEL, ValuationModel, apply_op, build_baseline, check_value, describe, fmt, get_values,
-    load_model, path_label, paths, refresh_fx, set_value,
+    load_model, path_label, paths, refresh_fx, risk_stats, set_value, stance_check,
 )
 
 THESIS_STATUS = {"intact": "完好", "strengthened": "加强", "weakened": "削弱", "broken": "失效"}
@@ -50,7 +51,8 @@ DISCLAIMER = "目标价（情景加权估值）由程序按估值假设计算，
 
 # 修正 agent 可用的工具（ToolBox 白名单）；web_search 由 tracker.web_search 控制，深度报告运行期间自动去掉
 TOOLS = ["calculate", "company_events", "web_search", "fetch_url", "list_filings", "search_filings", "read_filing",
-         "market_data", "financials", "statements", "fcf_yield", "broker_research", "shareholders", "ccass", "manual_data",
+         "market_data", "financials", "statements", "fcf_yield", "broker_research", "earnings_vs_consensus", "shareholders",
+         "ccass", "manual_data",
          "valuation_matrix", "ima_search", "ima_read"]
 # 修正时附给 agent 的报告章节（论证逻辑），按顺序截取
 REPORT_SECTIONS = ["核心洞见", "关键经营变量", "估值：框架与可比", "12 个月情景", "证伪条件"]
@@ -77,7 +79,8 @@ RESEARCH_SYSTEM = """你是买方研究员，负责跟踪「{company}」的投�
 - 发现估值口径或报告内部不一致的问题，单列「口径问题」一节（不作为修改建议）。
 - 最后写论点状态与理由，以及接下来要验证的问题。论点状态指深度报告的核心判断（跟踪卡的「核心论点」与立场）是否仍然成立，
   与公司好坏无关：新依据支持这个判断为「加强」（报告偏空时，新的利空证据也是加强），与之相左但不足以推翻为「削弱」，
-  证伪条件触发或核心前提被推翻为「失效」，没有实质影响为「完好」。"""
+  「证伪」方向的条件触发或核心前提被推翻为「失效」，没有实质影响为「完好」。条件标明了方向与「证伪 / 印证」：
+  与立场同向的条件触发（如偏空公司「交付不及预期」）属印证，是加强而不是失效。"""
 
 ASSESS_SYSTEM = """你是研究主管。根据修正研究笔记，把估值修正整理成结构化结果，只输出 JSON。
 - events：逐条给出每个依据编号（id 原样返回，包括 K、D、M 开头的编号）的影响：none 不影响估值 / minor 轻微（不改假设）/ material 实质影响（需要修改假设）；note 用一句话说明。
@@ -92,9 +95,12 @@ ASSESS_SYSTEM = """你是研究主管。根据修正研究笔记，把估值修�
 - catalysts：已经发生或确认落空的催化剂（ref 用 C 编号）：hit 达成 / miss 落空 / partial 部分达成 / pending 尚未发生。
 - summary：一句话结论，不要写目标价或股价数字（程序会按修改后的假设计算）。
 - thesis_status：深度报告核心判断（给出的「核心论点」与立场）的状态，与公司基本面好坏无关——
-  strengthened 新依据支持该判断（报告偏空时，新的利空证据属于加强）；weakened 新依据与该判断相左、但不足以推翻；
-  broken 证伪条件触发或核心前提被推翻；intact 没有实质影响。
-- stance：修正后的立场 bullish 偏多 / neutral 中性 / bearish 偏空（没有充分理由不要改变报告的立场）。
+  strengthened 新依据支持该判断（报告偏空时，新的利空证据属于加强；与立场同向的「印证」条件触发也是加强）；
+  weakened 新依据与该判断相左、但不足以推翻；broken「证伪」方向的条件触发（偏多遇向下、偏空遇向上、中性任一方向）
+  或核心前提被推翻；intact 没有实质影响。
+- stance：修正后的立场 bullish 偏多 / neutral 中性 / bearish 偏空（没有充分理由不要改变报告的立场）。立场按 12 个月情景定义：
+  偏多 = 概率加权价格比现价高出阈值以上且跌破现价的概率低于 50%；偏空 = 概率加权价格比现价低出阈值以上，或基准情景低于现价且跌破现价的概率高于 50%；
+  其余中性。估值模型说明里的「情景统计」给出了程序算好的这些数字与参考立场；你的判断与之不一致时，在 summary 里写明理由。
 - narrative：修正说明（Markdown，300 字以内）：发生了什么、为什么改或不改、接下来要验证什么；不要写具体股价或目标价。"""
 
 
@@ -154,7 +160,7 @@ def _origin(default: str) -> str:
 
 def pricing_close(app: App, company: Company, listing_key: str | None = None) -> tuple[float | None, str | None]:
     """定价上市地的最新收盘价（只读库，不联网）。"""
-    listing = next((l for l in company.listings if l.key == listing_key), company.listings[0])
+    listing = next((l for l in company.listings if l.key == listing_key), company.pricing_listing)
     bars = app.bars(app.secid(listing), limit=5)
     if bars is None:
         return None, None
@@ -245,7 +251,9 @@ def status(app: App, company: Company) -> dict | None:
     price, price_date = pricing_close(app, company, model.listing)
     since = iso(utcnow() - timedelta(days=app.settings.tracker.redo_cooldown_days))
     redo = app.db.recent_job("dossier", company.id, since)
+    stats = risk_stats(live_model, price)
     return {
+        "stats": stats, "stance_check": stance_check(rev.get("stance"), stats, app.settings.tracker.stance_band),
         "enabled": bool(tr["enabled"]), "tracker": tr, "revision": rev, "model": model, "live_model": live_model,
         "currency": model.price_currency, "target": rev["target"], "live_target": live, "fx_note": fx_note,
         "price": price, "price_date": price_date, "upside": live / price - 1 if price and live else None,
@@ -261,6 +269,9 @@ def status_line(app: App, company: Company) -> str | None:
     rev = s["revision"]
     line = (f"{TARGET_LABEL} {fmt(s['live_target'])} {s['currency']}（牛 {fmt(rev['bull'])} / 基准 {fmt(rev['base'])} / 熊 {fmt(rev['bear'])}）"
             + (f"｜现价 {fmt(s['price'])}，空间 {pct(s['upside'])}" if s["upside"] is not None else "")
+            + (f"｜跌破现价概率约 {s['stats']['p_below']:.0%}" if s["stats"] else "")
+            + (f"｜立场{STANCE_LABEL.get(rev.get('stance'), '—')}（参考立场{STANCE_LABEL[s['stance_check']['ref']]}"
+               + (" ⚠" if s["stance_check"]["mismatch"] else "") + "）" if s["stance_check"] else "")
             + f"｜最近{KIND_LABEL[rev['kind']]} {fmt_local(rev['created_at'])}：{rev['summary']}")
     if s["redo"]:
         line += f"｜深度报告重跑任务 #{s['redo']['id']} {'排队中' if s['redo']['status'] == 'queued' else '运行中'}"
@@ -270,7 +281,7 @@ def status_line(app: App, company: Company) -> str | None:
 # ---------------------------------------------------------------- 收集依据
 
 def _reaction(app: App, company: Company, item: dict) -> str:
-    listing = company.listing(listing_market(app, company, item)) or company.listings[0]
+    listing = company.listing(listing_market(app, company, item)) or company.pricing_listing
     r = technical.reaction(app.bars(app.secid(listing)), parse_iso(item["published_at"]), listing.market,
                            app.bars(app.bench_secid(listing)))
     if not r or r["days"] == 0 or r["ret"] is None:
@@ -301,13 +312,15 @@ def collect(app: App, company: Company, dossier: dict, last: dict | None) -> tup
                             it["materiality"] or 0, it.get("url")))
     linked = app.db.refs(company.id)
     snap = (last or {}).get("triggers") or {}
+    stance = (last or {}).get("stance") or dossier["card"].get("stance")
     for t in app.db.triggers(company.id):
         before = snap.get(str(t["id"]), "ok")
         ref = f"trig:{t['id']}:{t['status']}"
         if TRIGGER_RANK.get(t["status"], 0) > TRIGGER_RANK.get(before, 0) and ref not in linked:
+            role = _role(stance, t)
             out.append(Evidence(ref, f"K{t['id']}", "trigger",
-                                f"K{t['id']}｜证伪条件由「{TRIGGER_LABEL.get(before, before)}」升级为「{TRIGGER_LABEL[t['status']]}」："
-                                f"{t['description']}（依据：{t['evidence'] or '—'}）", f"证伪条件{TRIGGER_LABEL[t['status']]}：{t['description']}"))
+                                f"K{t['id']}｜{role}条件由「{TRIGGER_LABEL.get(before, before)}」升级为「{TRIGGER_LABEL[t['status']]}」："
+                                f"{t['description']}（依据：{t['evidence'] or '—'}）", f"{role}条件{TRIGGER_LABEL[t['status']]}：{t['description']}"))
     since = dossier["created_at"]
     for doc in app.db.documents_added_since(company.id, since):
         ref = f"doc:{doc['id']}"
@@ -325,6 +338,12 @@ def collect(app: App, company: Company, dossier: dict, last: dict | None) -> tup
                                 f"M{m['id']}｜使用者补充数据（{scope}）：{data}{('，' + m['note']) if m['note'] else ''}"
                                 f"（来源：{m['source'] or '使用者'}）", f"补充数据：{data}"))
     return out, overflow
+
+
+def _role(stance: str | None, t: dict) -> str:
+    """条件相对立场的角色：向下 / 向上，证伪 / 印证。"""
+    d = t.get("direction") or "down"
+    return f"{DIRECTION_LABEL[d]}·{'证伪' if falsifies(stance, d) else '印证'}"
 
 
 # ---------------------------------------------------------------- 报告上下文
@@ -347,8 +366,8 @@ def card_context(app: App, company: Company, dossier: dict) -> str:
              f"（立场：{STANCE_LABEL.get(card.get('stance'), card.get('stance') or '—')}）"]
     trigs = app.db.triggers(company.id)
     if trigs:
-        lines += ["", "证伪条件（状态由程序每日检查）："] + [
-            f"- K{t['id']} [{TRIGGER_LABEL.get(t['status'], t['status'])}] {t['description']}"
+        lines += ["", "证伪条件（状态由程序每日检查；方向：向下＝比判断更差，向上＝比判断更好；与立场相反的方向才是证伪）："] + [
+            f"- K{t['id']} [{TRIGGER_LABEL.get(t['status'], t['status'])}·{_role(card.get('stance'), t)}] {t['description']}"
             + (f"（依据：{t['evidence']}）" if t["evidence"] and t["status"] != "ok" else "") for t in trigs]
     cats = catalyst_snapshot(app, company, dossier)
     if cats:
@@ -649,9 +668,12 @@ def check(app: App, company: Company, *, origin: str = "cli", use_llm: bool = Tr
 
     live, fx_note = refresh_fx(app, model)
     cats = catalyst_snapshot(app, company, dossier)
+    price, _ = pricing_close(app, company, live.listing)
+    stance = last.get("stance") or dossier["card"].get("stance")
+    model_text = describe(live, cfg.target, price, stance, cfg.stance_band)
     head = "\n\n".join(x for x in [
         f"公司：{company.title}\n今天：{today_local()}\n当前行情：\n{app.market_line(company)}\n{app.fx_line()}",
-        f"=== 当前估值模型 ===\n{describe(live, cfg.target)}" + (f"\n（{fx_note}）" if fx_note else ""),
+        f"=== 当前估值模型 ===\n{model_text}" + (f"\n（{fx_note}）" if fx_note else ""),
         f"=== 跟踪卡 ===\n{card_context(app, company, dossier)}",
         revisions_context(app, company, since_id=(app.db.latest_revision(company.id, kind="baseline") or {}).get("id", 0)),
         f"=== 深度报告的相关章节 ===\n{report_sections(dossier['report_md'], REPORT_SECTIONS)}",
@@ -671,7 +693,7 @@ def check(app: App, company: Company, *, origin: str = "cli", use_llm: bool = Tr
         card = dossier["card"]
         user = (f"=== 深度报告的核心论点（判断论点状态的对象）===\n{card.get('thesis', '')}"
                 f"（立场：{STANCE_LABEL.get(card.get('stance'), card.get('stance') or '—')}）\n\n"
-                f"=== 当前估值模型 ===\n{describe(live, cfg.target)}\n\n=== 依据清单 ===\n"
+                f"=== 当前估值模型 ===\n{model_text}\n\n=== 依据清单 ===\n"
                 + "\n".join(f"- {e.text}" for e in evidence)
                 + (f"\n\n=== 催化剂 ===\n{catalog}" if catalog else "")
                 + (f"\n\n=== 工具结果（T 编号）===\n{tools_list}" if tools_list else "")
@@ -700,7 +722,7 @@ def check(app: App, company: Company, *, origin: str = "cli", use_llm: bool = Tr
     cat_rows = [{**cat_by_code[_code(c.ref)], "status": c.status, "note": c.note} for c in cat_results
                 if _code(c.ref) in cat_by_code]
     refs = [(e["ref"], e["impact"]) for e in events] + [(c["ref"], c["status"]) for c in cat_rows if c["status"] != "pending"]
-    sources = [notes, *tool_texts.values(), *codes.values(), describe(live, cfg.target)]
+    sources = [notes, *tool_texts.values(), *codes.values(), model_text]
     texts = "\n".join([head_data["summary"], head_data["narrative"], *(c["reason"] for c in applied)])
     unverified = verify.check(texts, sources).unverified
     kind = "revision" if any(c["source"] == "模型" for c in applied) else "review"

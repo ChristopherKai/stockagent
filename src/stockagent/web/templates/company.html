@@ -35,6 +35,7 @@
       <div class="s">{{ THESIS_HELP.get(rev.thesis_status, '') }}</div></div>
   </div>
   {% for e in equivalents %}<div class="muted small">{{ e }}</div>{% endfor %}
+  {% include "_stance_stats.html" %}
   {% if s.redo %}<div class="flash warn">深度报告重跑任务 <a href="/jobs/{{ s.redo.id }}">#{{ s.redo.id }}</a> {{ '排队中' if s.redo.status == 'queued' else '运行中' }}：{{ s.redo.note or '' }}</div>{% endif %}
   {% if not s.enabled %}<div class="flash warn">已停止追踪：数据保留，重新开始追踪会沿用原基线（深度报告没有更新时）。</div>{% endif %}
   {% for f in rev.flags or [] %}<div class="flash warn small">⚠ {{ f }}</div>{% endfor %}
@@ -149,8 +150,10 @@
   <div>
     <section class="card">
       <h2>证伪条件</h2>
+      <p class="muted small">方向：向下＝情况比判断更差，向上＝情况比判断更好；与当前立场相反的方向才是证伪，同向的属印证。</p>
       {% for t in triggers %}
-        <div class="item small">{{ trigger_badge(t.status) }} {{ t.description }}
+        <div class="item small">{{ trigger_badge(t.status) }}
+          <span class="badge">{{ DIRECTION_LABEL.get(t.direction or 'down') }}·{{ '证伪' if falsifies(stance_now, t.direction) else '印证' }}</span> {{ t.description }}
           {% if t.evidence and t.status != 'ok' %}<div class="muted">依据：{{ t.evidence }}</div>{% endif %}</div>
       {% else %}<p class="muted small">没有证伪条件（生成深度报告后才有）。</p>{% endfor %}
     </section>
@@ -161,6 +164,35 @@
           {% if x.assessed %}<span class="badge {{ 'ok' if x.assessed.status == 'hit' else 'warn' }}">{{ IMPACT_LABEL.get(x.assessed.status, x.assessed.status) }}</span>
             <div class="muted">{{ x.assessed.note }}</div>{% endif %}</div>
       {% else %}<p class="muted small">没有催化剂。</p>{% endfor %}
+    </section>
+    <section class="card">
+      <h2>业绩 vs 一致预期</h2>
+      <p class="muted small">程序计算：实际业绩与发布前的一致预期对比。{% if c.listing('A') %}A 股按研报库自动还原{% elif c.listing('US') %}美股 ADS 每天记录 Nasdaq 快照（每 ADS 口径，按换股比例换成每股）；也可以录入其他来源的港股口径数据{% else %}港股没有免费数据源，请在业绩发布前录入{% endif %}。</p>
+      {% for r in earnings %}
+        <div class="item small"><b>{{ r.data.headline }}</b>
+          {% if r.data.flags %}<div class="muted">{{ r.data.flags | join('；') }}</div>{% endif %}</div>
+      {% else %}<p class="muted small">还没有业绩对比记录。</p>{% endfor %}
+      {% if snapshots %}
+      <table class="small">
+        <tr><th>来源</th><th>财年</th><th>指标</th><th>一致预期</th><th>家数</th><th>日期</th><th></th></tr>
+        {% for x in snapshots %}<tr><td>{{ x.label }}{% if x.note %}·{{ x.note }}{% endif %}</td><td>{{ x.fiscal_year }}</td>
+          <td>{{ x.metric_label }}</td><td>{{ x.display }}</td><td>{{ x.n or '' }}</td><td>{{ x.taken_on }}</td>
+          <td>{% if x.source == 'manual' %}<form method="post" action="/c/{{ c.id }}/consensus/{{ x.id }}/delete" class="inline" data-confirm="删除这条录入？">{{ csrf_field }}
+            <button class="btn tiny ghost">删除</button></form>{% endif %}</td></tr>{% endfor %}
+      </table>
+      {% endif %}
+      <details><summary>录入一致预期</summary>
+        <form method="post" action="/c/{{ c.id }}/consensus" class="form">{{ csrf_field }}
+          <div class="row2"><label>财年<input name="year" required inputmode="numeric" value="{{ today.year }}"></label>
+            <label>指标<select name="metric"><option value="eps">EPS（每股）</option><option value="profit">归母净利（亿）</option>
+              <option value="revenue">营业收入（亿）</option></select></label></div>
+          <div class="row2"><label>一致预期<input name="value" required inputmode="decimal"></label>
+            <label>币种<select name="currency"><option>CNY</option><option>HKD</option><option>USD</option></select></label></div>
+          <div class="row2"><label>机构数<input name="n" inputmode="numeric"></label>
+            <label>数据日期<input name="date" type="date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}"></label></div>
+          <label>来源<input name="source" maxlength="60" placeholder="如 富途、彭博"></label>
+          <p class="muted small">按数据来源的币种填写（内地公司的港股报表多为人民币）。业绩发布后，程序用发布日之前最近的一份对比；补录旧数据时把日期填成当时的日期。</p>
+          <button class="btn small">保存</button></form></details>
     </section>
     <section class="card">
       <h2>需要你补充的数据</h2>
