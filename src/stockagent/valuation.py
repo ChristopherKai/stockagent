@@ -1,7 +1,7 @@
 """结构化估值模型：把深度报告的敏感性矩阵重建成可修正的情景模型，目标价全部由代码计算。
 
 深度报告里跟踪卡的情景价格区间来自研究 agent 调用 valuation_matrix 算出的格点
-（隐含股价 =（倍数 × 驱动指标 + 净现金）÷ 股本 × 汇率）。这里从工具日志中找回那次调用，
+（股权口径：隐含股价 = 倍数 × 驱动指标 ÷ 股本 × 汇率；EV 口径再加净现金）。这里从工具日志中找回那次调用，
 为每个情景定出（驱动指标, 倍数）点，使代码算出的情景股价恰好等于卡片区间中值——
 基线不经过 LLM，之后的修正也只改假设，股价与目标价始终由代码重算。
 """
@@ -17,7 +17,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from .tools import matrix_price
+from .tools import MATRIX_BASES, infer_basis, matrix_price
 
 ScenarioName = Literal["bull", "base", "bear"]
 SCENARIOS = ("bull", "base", "bear")
@@ -42,10 +42,13 @@ class ScenarioPoint(BaseModel):
 
 
 class ValuationModel(BaseModel):
-    """method=matrix：情景股价 =（倍数 × 驱动 + 净现金）÷ 股本 × 汇率；
+    """method=matrix：情景股价 = 倍数 × 驱动 ÷ 股本 × 汇率（basis=equity，PE、PB 等股权倍数）
+    或（倍数 × 驱动 + 净现金）÷ 股本 × 汇率（basis=ev，EV 倍数）；
     method=range：没有可用矩阵时的退路，driver 即情景价格，只能按比例修正。"""
 
     method: Literal["matrix", "range"] = "matrix"
+    # 旧基线（区分口径之前）一律按「加净现金」算出卡片区间，缺省 ev 使其数值不变
+    basis: Literal["equity", "ev"] = "ev"
     driver_label: str
     multiple_label: str
     shares: float                  # 亿股
@@ -56,6 +59,7 @@ class ValuationModel(BaseModel):
     listing: str                   # 定价上市地（跟踪卡的第一上市地）
     source: str = ""
     scenarios: list[ScenarioPoint] = Field(min_length=1)
+    anchor: dict | None = None     # 深度报告写作时的程序参考价（anchor.compute），只用于提示偏离，不参与计算
 
     def scenario(self, name: str) -> ScenarioPoint | None:
         return next((s for s in self.scenarios if s.name == name), None)
@@ -63,7 +67,7 @@ class ValuationModel(BaseModel):
     def price(self, s: ScenarioPoint) -> float:
         if self.method == "range":
             return max(0.0, s.driver)
-        return max(0.0, matrix_price(s.driver, s.multiple, self.shares, self.net_cash, self.fx))
+        return max(0.0, matrix_price(s.driver, s.multiple, self.shares, self.net_cash, self.fx, self.basis))
 
     def prices(self) -> dict[str, float]:
         return {s.name: self.price(s) for s in self.scenarios}
@@ -179,7 +183,23 @@ def refresh_fx(app, model: ValuationModel, on: date | None = None) -> tuple[Valu
 
 # ---------------------------------------------------------------- 从深度报告重建基线
 
-def _cells(args: dict) -> dict[tuple[float, float], float] | None:
+def effective_args(entry: dict) -> dict:
+    """工具日志里一次 valuation_matrix 调用实际计算用的参数：模型传入的参数，加上工具记录的口径与（程序补上行列后的）全部格点。"""
+    return {**(entry.get("args") or {}), **(entry.get("meta") or {})}
+
+
+def basis_options(args: dict) -> list[str]:
+    """这次矩阵调用可能的口径。工具明确记录了口径就只用它；区分口径之前的旧调用一律加了净现金（ev），
+    但新调用在模型没填 basis 时按倍数名称推断——两种都试，按命中卡片端点的多少选，推断的口径排在后面（并列时优先）。"""
+    if args.get("basis") in MATRIX_BASES:
+        return [args["basis"]]
+    guess = infer_basis(args.get("multiple_label", ""))
+    if not float(args.get("net_cash") or 0):
+        return [guess]
+    return [b for b in MATRIX_BASES if b != guess] + [guess]
+
+
+def _cells(args: dict, basis: str = "ev") -> dict[tuple[float, float], float] | None:
     try:
         shares, net_cash, fx = float(args["shares"]), float(args.get("net_cash") or 0), float(args.get("fx") or 1)
         drivers = [float(d) for d in args["driver_values"]]
@@ -188,7 +208,7 @@ def _cells(args: dict) -> dict[tuple[float, float], float] | None:
         return None
     if shares <= 0 or not drivers or not multiples:
         return None
-    return {(d, m): matrix_price(d, m, shares, net_cash, fx) for d in drivers for m in multiples}
+    return {(d, m): matrix_price(d, m, shares, net_cash, fx, basis) for d in drivers for m in multiples}
 
 
 def _year(label: str) -> int | None:
@@ -214,18 +234,20 @@ def matrix_candidates(tool_log: list[dict], shares_ref: float | None) -> tuple[l
         if str(x.get("result", "")).startswith("错误"):
             skipped.append(f"{tag}：工具报错")
             continue
-        cells = _cells(x.get("args") or {})
+        args = effective_args(x)
+        options = basis_options(args)
+        cells = _cells(args, options[-1])
         if not cells:
             skipped.append(f"{tag}：参数不完整")
             continue
         if max(abs(v) for v in cells.values()) < 0.01:
-            skipped.append(f"{tag}：格点全为 0（股本 {x['args'].get('shares')} 可能写成了股数而不是亿股）")
+            skipped.append(f"{tag}：格点全为 0（股本 {args.get('shares')} 可能写成了股数而不是亿股）")
             continue
-        shares = float(x["args"]["shares"])
+        shares = float(args["shares"])
         if shares_ref and abs(shares / shares_ref - 1) > SHARES_TOL:
             skipped.append(f"{tag}：股本 {shares:g} 亿股与行情推算的 {shares_ref:.2f} 亿股不符")
             continue
-        out.append({"index": i, "args": x["args"], "cells": cells})
+        out += [{"index": i, "args": args, "basis": b, "cells": _cells(args, b)} for b in options]
     return out, skipped
 
 
@@ -337,7 +359,7 @@ def build_baseline(app, company, dossier: dict) -> tuple[ValuationModel, list[st
         flags.append(f"未找到能解释情景价格的估值矩阵（{why}），改用区间模型：只能按比例修正情景价格")
         return _range_model(scen, listing.key, price_ccy, f"深度报告 #{did} · 跟踪卡情景区间"), flags
 
-    a = best["args"]
+    a, basis = best["args"], best["basis"]
     shares, net_cash, fx = float(a["shares"]), float(a.get("net_cash") or 0), float(a.get("fx") or 1)
     created = str(dossier.get("created_at", ""))[:10]
     on = date.fromisoformat(created) if created else date.today()
@@ -352,18 +374,21 @@ def build_baseline(app, company, dossier: dict) -> tuple[ValuationModel, list[st
         mid = (s["price_low"] + s["price_high"]) / 2
         driver = chosen[s["name"]]
         # 反解倍数，使情景股价恰好等于区间中值
-        multiple = (mid / fx * shares - net_cash) / driver if driver else float("nan")
+        multiple = (mid / fx * shares - (net_cash if basis == "ev" else 0.0)) / driver if driver else float("nan")
         if not math.isfinite(multiple) or multiple <= 0:
             flags.append(f"{SCENARIO_LABEL[s['name']]}情景反解出的倍数不合理（{multiple:.2f}），改用区间模型")
             return _range_model(scen, listing.key, price_ccy, f"深度报告 #{did} · 跟踪卡情景区间"), flags
         points.append(ScenarioPoint(name=s["name"], driver=driver, multiple=multiple, probability=s.get("probability") or 0,
                                     low=s["price_low"], high=s["price_high"], drivers_text=s.get("drivers", "")))
     model = ValuationModel(
-        method="matrix", driver_label=a.get("driver_label", "驱动指标"), multiple_label=a.get("multiple_label", "倍数"),
+        method="matrix", basis=basis, driver_label=a.get("driver_label", "驱动指标"), multiple_label=a.get("multiple_label", "倍数"),
         shares=shares, net_cash=net_cash, fx=fx, report_currency=report_ccy, price_currency=price_ccy, listing=listing.key,
         source=f"深度报告 #{did} · 第 {best['index'] + 1} 次工具调用 valuation_matrix（命中 {n_hits}/{2 * len(scen)} 个情景端点）",
-        scenarios=points,
+        scenarios=points, anchor=card.get("anchor"),
     ).normalized()
+    if basis == "ev" and net_cash and infer_basis(model.multiple_label) == "equity":
+        flags.append(f"矩阵对 {model.multiple_label} 这类股权倍数也加了净现金 {net_cash:g}（区分口径之前的旧算法），"
+                     "情景价格按报告原样保留；重跑深度报告后按股权口径计算")
     if (y := _year(model.driver_label)) and y <= date.today().year:
         flags.append(f"驱动指标年份（{y}）已到，披露年报后应重跑深度报告，把驱动滚动到下一年")
     return model, flags
@@ -379,7 +404,7 @@ def paths(model: ValuationModel) -> list[str]:
     names = [s.name for s in model.scenarios]
     out = [f"{n}.driver" for n in names] + ["all.driver"]
     if model.method == "matrix":
-        out += [f"{n}.multiple" for n in names] + ["all.multiple", "g.shares", "g.net_cash"]
+        out += [f"{n}.multiple" for n in names] + ["all.multiple", "g.shares"] + (["g.net_cash"] if model.basis == "ev" else [])
     out += [f"prob.{n}" for n in names]
     return out
 
@@ -561,13 +586,12 @@ def fmt(v: float | None, digits: int = 2) -> str:
 
 
 def describe(model: ValuationModel, target_mode: str = "expected", price: float | None = None, stance: str | None = None,
-             band: float = 0.15) -> str:
+             band: float = 0.15, anchor_band: float = 0.25) -> str:
     """估值模型的 Markdown 表（提示词、CLI 与报告附录共用）。给出现价时附上情景统计与参考立场。"""
     ccy = model.price_currency
     probs = model.probabilities()
     if model.method == "matrix":
-        head = (f"估值方法：（{model.multiple_label} × {model.driver_label} + 净现金 {fmt(model.net_cash)}）÷ 总股本 "
-                f"{fmt(model.shares, 4)} 亿股 × 汇率 {fmt(model.fx, 4)}"
+        head = (f"估值方法：{formula(model)}"
                 + (f"（1 {CURRENCY_LABEL.get(model.report_currency, model.report_currency)} 折合 "
                    f"{fmt(model.fx, 4)} {CURRENCY_LABEL.get(ccy, ccy)}）" if model.report_currency else ""))
         rows = [f"| 情景 | {model.driver_label} | {model.multiple_label} | 股价（{ccy}） | 概率 | 报告原区间 | 关键驱动 |",
@@ -584,7 +608,20 @@ def describe(model: ValuationModel, target_mode: str = "expected", price: float 
     out = [head, "", *rows, "", tail]
     if stats := risk_stats(model, price):
         out.append(f"情景统计（现价 {fmt(price)} {ccy}，代码计算）：{stats_line(stats, stance_check(stance, stats, band))}")
+    if model.anchor and (base := model.scenario("base")):
+        from . import anchor  # anchor → tools、consensus → valuation：放在函数里避免循环导入
+
+        if ac := anchor.check(model.anchor, model.price(base), anchor_band):
+            out.append(f"程序参考价（深度报告写作时，代码计算）：{ac['note']}")
     return "\n".join(out)
+
+
+def formula(model: ValuationModel) -> str:
+    """估值公式的一行说明（describe、WebUI 共用）。"""
+    if model.basis == "ev":
+        return (f"（{model.multiple_label} × {model.driver_label} + 净现金 {fmt(model.net_cash)}）÷ 总股本 "
+                f"{fmt(model.shares, 4)} 亿股 × 汇率 {fmt(model.fx, 4)}")
+    return f"{model.multiple_label} × {model.driver_label} ÷ 总股本 {fmt(model.shares, 4)} 亿股 × 汇率 {fmt(model.fx, 4)}（股权口径，不加减净现金）"
 
 
 def _last_close(app, listing) -> float | None:

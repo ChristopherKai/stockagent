@@ -53,6 +53,7 @@ def _no_external_search(monkeypatch):
     monkeypatch.setattr(emdata, "a_consensus", lambda *a, **k: None)
     monkeypatch.setattr(emdata, "a_forecasts", lambda *a, **k: [])
     monkeypatch.setattr(emdata, "a_express", lambda *a, **k: [])
+    monkeypatch.setattr(emdata, "valuation_history_a", lambda *a, **k: [])  # 程序参考价（anchor.py）的历史 PE
     from stockagent.sources import ccass, nasdaq, sec
 
     monkeypatch.setattr(ccass, "holdings", lambda *a, **k: None)  # 港交所 CCASS、SEC XBRL、Nasdaq 同理

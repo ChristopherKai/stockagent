@@ -71,6 +71,7 @@ LABELS: dict[str, tuple[str, str]] = {
     "tracker.redo_on_broken": ("论点失效时自动重跑深度报告", ""),
     "tracker.redo_cooldown_days": ("自动重跑冷却天数", "同一公司在冷却期内不重复排队"),
     "tracker.stance_band": ("参考立场的空间阈值", "加权空间超过 ±该比例才算偏多 / 偏空，0.15 表示 15%"),
+    "tracker.anchor_band": ("程序参考价的偏离阈值", "基准情景较「一致预期 EPS × 历史中位 PE」偏离超过 ±该比例时标注 ⚠，0.25 表示 25%"),
     # 业绩 vs 一致预期
     "consensus.enabled": ("业绩对比一致预期", "stock run 时检查新业绩，与发布前的一致预期对比"),
     "consensus.window_days": ("A 股一致预期窗口（天）", "发布前多少天内的研报计入（每家机构取最新一篇）"),

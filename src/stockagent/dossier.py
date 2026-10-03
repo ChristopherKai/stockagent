@@ -23,7 +23,7 @@ import markdown as md
 from pydantic import BaseModel, field_validator, model_validator
 from requests import RequestException
 
-from . import imafeed, verify
+from . import anchor, imafeed, verify
 from .app import MARKET_LABEL, App
 from .config import Company
 from .llm import LLMError
@@ -66,7 +66,7 @@ SECTIONS: list[tuple[str, str, str]] = [
 1. 用 market_data 查询本公司各上市地的价格、市值、PE/PB、250 日高低点；A+H 公司看 AH 溢价。
 2. 选 3–5 家可比公司（同业或产业链相近），用 market_data 查询它们的估值，整理成可比表（名称、代码、市值、PE、PB、近 20 日涨跌）。
 3. 反向 DCF：用 reverse_dcf 计算当前市值隐含的增长率（利润或现金流须为正，注意币种和单位一致）；亏损公司说明不适用，改用收入口径。
-4. 敏感性矩阵：选最关键的驱动指标（如下一年净利润或收入），给 4–6 个取值和 4–6 个倍数，用 valuation_matrix 计算隐含股价（股本、净现金、汇率要准确；股价、汇率与 current_price 一律用定价上市地，倍数要与定价上市地的市场一致——A+H 公司以 H 股定价时参照 H 股自身历史估值与港股可比，或按当前 AH 溢价折算），原样保留工具输出的表格。
+4. 敏感性矩阵：选最关键的驱动指标（如下一年净利润或收入），给 4–6 个取值和 4–6 个倍数，用 valuation_matrix 计算隐含股价（股本、净现金、汇率要准确；股价、汇率与 current_price 一律用定价上市地，倍数要与定价上市地的市场一致——A+H 公司以 H 股定价时参照 H 股自身历史估值与港股可比，或按当前 AH 溢价折算），原样保留工具输出的表格。口径：PE、PB 等股权倍数用 basis=equity（倍数 × 净利润已是股权价值，不再加减净现金）；EV/EBITDA、EV/Sales 等企业价值倍数用 basis=ev 并填净现金（净负债为负数）。驱动指标的取值要覆盖一致预期，倍数要覆盖定价上市地自身的历史分位（见「程序参考价」；工具也会自动补上缺的行列）。
 5. 历史估值分位：用 valuation_history 看当前 PE/PB 处于过去 3–5 年的什么位置（同业也可以查）。
 6. 适用时补充：有上市子公司或多元业务的用 sotp 做分部加总；稳定分红的用 ddm 做股息贴现。
 7. 卖方观点：用 broker_research 取一致预期（A 股为评级分布与盈利预测中位数，港股为目标价均值与区间），再用 web_search 查主要机构最新的目标价和盈利预测（注明机构与日期）；查不到就写「未查到」。用 earnings_vs_consensus 看一致预期近 30/90 天的修正方向，以及公司历史上业绩是否常超/不及预期。
@@ -111,7 +111,7 @@ WRITER_PART2 = """前半部分已经写好（附在后面，供你保持观点�
 ## § 估值：框架与可比
 （可比公司表、EV 与 FCF Yield 表（注明 TTM 与多年平均的差异）、反向 DCF 结论、敏感性矩阵原样引用；股东回报意愿与市场给新业务的隐含估值）
 ## § 12 个月情景
-（牛市/基准/熊市：价格区间、相对现价涨跌幅、主观概率（合计 100%）、关键驱动；价格区间必须来自敏感性矩阵或笔记中的计算）
+（牛市/基准/熊市：价格区间、相对现价涨跌幅、主观概率（合计 100%）、关键驱动；价格区间必须来自敏感性矩阵或笔记中的计算。笔记里有「程序参考价」时，写出基准情景相对参考价的偏离；偏离超过 ±{anchor_band} 的，必须说明是盈利假设还是倍数与一致预期、历史估值不同，依据是什么）
 ## § 股权、控制与解禁
 ## § 监管与结构
 ## § 证伪条件：什么情况说明判断错了
@@ -441,8 +441,9 @@ def research(app: App, company: Company, key: str, title: str, questions: str, m
     alerts = previous_alerts(app, company)
     revs = previous_revisions(app, company)
     note = pricing_note(company)
+    anc = anchor.text(anchor.get(app, company), app.settings.tracker.anchor_band) if key == "valuation" else ""
     user = (f"{questions}\n\n当前行情：\n{market}\n{app.fx_line()}（涉及币种换算时只用这里的汇率）\n"
-            + (f"{note}\n" if note else "") + "\n"
+            + (f"{note}\n" if note else "") + "\n" + (f"{anc}\n\n" if anc else "")
             + (f"{alerts}\n\n" if alerts else "") + (f"{revs}\n\n" if revs else "")
             + "先规划要查什么，再调用工具逐项查证，最后输出本部分的研究笔记。")
     try:
@@ -638,6 +639,8 @@ def generate(app: App, company: Company, progress=print, reuse_notes: bool = Fal
                 tool_log = [x for x in tool_log if x.get("section") != title] + log_
     else:
         data = {"created_at": datetime.now(CST).isoformat()}
+        progress(f"  {company.name}：计算程序参考价（一致预期 × 历史 PE）…")
+        anchor.get(app, company)  # 研究子任务共用当天的结果
         workers = len(SECTIONS) if app.settings.agent.parallel_sections else 1
         progress(f"  {company.name}：{len(SECTIONS)} 个研究子任务（{app.llm.describe('research')}）…")
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -694,12 +697,16 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
     asked = ("=== 已请使用者补充的数据（补缺检索后仍未找到）===\n" + "\n".join(f"- {r['item']}：{r['why']}" for r in requests)
              if requests else "")
     # 程序计算的 EV / 自由现金流与港股一致预期：每次撰写都按最新行情重算，复用旧笔记时也不会缺
+    anchor_band = app.settings.tracker.anchor_band
+    anc = anchor.get(app, company)
     try:
         snap = fcf_snapshot(app, company)
         hk = [hk_consensus(app, l) for l in company.listings if l.market == "HK"]
-        notes["snapshot"] = {"title": "EV、自由现金流与一致预期（程序计算）", "text": "\n\n".join([snap, *hk])}
+        notes["snapshot"] = {"title": "EV、自由现金流与一致预期（程序计算）", "text": "\n\n".join([snap, *hk, anchor.text(anc, anchor_band)]).strip()}
     except (RequestException, ValueError, KeyError) as e:
         progress(f"  {company.name}：计算 EV 与自由现金流失败：{e}")
+        if anc:
+            notes["snapshot"] = {"title": "程序参考价（程序计算）", "text": anchor.text(anc, anchor_band)}
     notes_text = _notes_text(notes)
     supplied = supplied_block(app, company)
     if supplied:
@@ -720,7 +727,8 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
     # 分两段撰写；单段超出输出上限时 LLM 层会自动续写；输出不完整（例如只剩推理过程）就重写
     part1 = _write_part(app, company, [WRITER_RULES, WRITER_PART1], material, PART1_SECTIONS, "前半部分", progress, title=True)
     progress(f"  {company.name}：前半部分完成，撰写后半部分…")
-    part2 = _write_part(app, company, [WRITER_RULES, WRITER_PART2], f"{material}\n\n=== 已写好的前半部分 ===\n{part1}",
+    part2 = _write_part(app, company, [WRITER_RULES, WRITER_PART2.replace("{anchor_band}", f"{anchor_band:.0%}")],
+                        f"{material}\n\n=== 已写好的前半部分 ===\n{part1}",
                         PART2_SECTIONS, "后半部分", progress)
     report = part1.rstrip() + "\n\n" + part2.lstrip()
 
@@ -753,6 +761,10 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
     card["price_listing"] = company.pricing_listing.key
     bars = app.bars(app.secid(company.pricing_listing), limit=5)
     card["stats"] = card_stats(card, float(bars["close"].iloc[-1]) if bars is not None else None, band)
+    card["anchor"] = anc
+    base = next((x for x in card["scenarios"] if x["name"] == "base" and x.get("price_low") and x.get("price_high")), None)
+    if card["stats"] and base:
+        card["stats"]["anchor"] = anchor.check(anc, (base["price_low"] + base["price_high"]) / 2, anchor_band)
     if card["data_gaps"]:  # 跟踪卡里的「待补充数据」同样与笔记核对，笔记里有答案的去掉
         try:
             wrong = audit(app, notes_text, card["data_gaps"])
@@ -862,6 +874,8 @@ def _card_markdown(company: Company, card: dict) -> str:
         out.append("")
         if st := card.get("stats"):
             out += [f"**情景统计**（程序按区间中点与现价 {num(st['price'])} 计算）：{stats_line(st, st.get('check'))}", ""]
+            if ac := st.get("anchor"):
+                out += [f"**程序参考价**{' ⚠' if ac['flag'] else ''}：{ac['note']}", ""]
     if card["kill_criteria"]:
         out += ["**证伪条件与动作**（方向：向下＝比判断更差，向上＝比判断更好；与立场相反的方向才是证伪）", "",
                 "| # | 条件 | 方向 | 类型 | 判定方式 | 动作 |", "|---|---|---|---|---|---|"]

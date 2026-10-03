@@ -1,8 +1,10 @@
 {% set st = st if st is defined else (s.stats if s is defined and s else none) %}
 {% set sc = sc if sc is defined else (s.stance_check if s is defined and s else none) %}
+{% set ac = ac if ac is defined else (s.anchor_check if s is defined and s else none) %}
 {% if st %}
 <div class="small">情景统计（代码计算）：加权空间 {{ st.upside | pct }}｜基准情景 {{ st.base_upside | pct }}｜跌破现价概率约 {{ st.p_below | pct(0, false) }}
   {%- if st.ratio %}｜上行/下行 {{ st.ratio | num }}{% endif %}
   {%- if sc %}｜参考立场 {{ STANCE_LABEL.get(sc.ref, sc.ref) }}{% endif %}</div>
 {% if sc and sc.note %}<div class="{{ 'flash warn small' if sc.mismatch else 'muted small' }}">{{ '⚠ ' if sc.mismatch }}{{ sc.note }}</div>{% endif %}
 {% endif %}
+{% if ac %}<div class="{{ 'flash warn small' if ac.flag else 'muted small' }}">{{ '⚠ ' if ac.flag }}程序参考价：{{ ac.note }}</div>{% endif %}

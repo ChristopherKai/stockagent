@@ -8,7 +8,9 @@
 - 港股：没有免费的盈利预测，由使用者录入（WebUI 公司页或 stock consensus set），同样存快照、取发布前最近一份。
 
 怎么比：年报直接比（偏差 = 实际 ÷ 一致预期 − 1）；中报、季报是年初至今累计，看完成全年一致预期的比例，
-并用近 3 年同期占比外推全年。一致预期为亏损或接近零时不算百分比，只给差额。
+并用近 3 年同期占比外推全年——只在历史占比稳定（至少 2 年可比、最高与最低相差不超过 NORM_SPREAD）时外推；
+周期股等占比忽高忽低时只给完成率和历史区间，不给外推的偏差百分比（模型会把它当成硬证据）。
+一致预期为亏损或接近零时不算百分比，只给差额。
 
 结果存 earnings 表，并生成一条「一致预期对比」数据条目（摘要以「[程序计算]」开头）进入分级，
 之后与新闻公告一样流向证伪条件检查、标的追踪与简报。
@@ -35,7 +37,7 @@ METRIC_LABEL = {"eps": "EPS", "profit": "归母净利", "revenue": "营业收入
 SNAPSHOT_LABEL = {"em_a": "东方财富机构预测", "nasdaq": "Nasdaq", "manual": "使用者录入"}
 CCY_UNIT = {"CNY": "元", "HKD": "港元", "USD": "美元"}
 PENDING_DAYS = 30   # 港股业绩已发布但缺少发布前一致预期时，最多等使用者补录多少天
-NORM_SPREAD = 0.2   # 历史同期占比的最高与最低相差超过它时，外推只作参考
+NORM_SPREAD = 0.2   # 历史同期占比的最高与最低相差超过它（或只有 1 年可比）时，不按季节性外推全年
 # 与业绩对应的公告（标题 + 类别，先转简体再匹配）。港股的业绩以「[中期業績] / [末期業績] / [季度業績]」类别的公告发布，
 # 一个月后才刊发的「中期報告 / 年報」全文不是业绩发布；A 股的定期报告本身就是业绩发布
 NOTICE_TITLES = {"forecast": r"业绩预告|盈利预告|盈利警告", "express": r"业绩快报",
@@ -243,12 +245,13 @@ def compare(actual: dict, cons: dict | None, history: list[dict], stage: str, mi
             norm = seasonal_norm(history, fy, month, metric)
             res["norm"] = norm
             if norm and norm["mean"] > 0:
-                res["implied_fy"] = v / norm["mean"]
-                res["implied_gap"] = res["implied_fy"] / c - 1
                 if len(norm["years"]) < 2:
-                    res["flags"].append("历史同期只有 1 年可比，外推仅供参考")
-                if norm["max"] - norm["min"] > NORM_SPREAD:
-                    res["flags"].append(f"历史同期占比波动大（{norm['min']:.0%}–{norm['max']:.0%}），外推仅供参考")
+                    res["flags"].append("历史同期只有 1 年可比，不按季节性外推全年")
+                elif norm["max"] - norm["min"] > NORM_SPREAD:
+                    res["flags"].append("历史同期占比波动大，季节性不稳定，不外推全年")
+                else:
+                    res["implied_fy"] = v / norm["mean"]
+                    res["implied_gap"] = res["implied_fy"] / c - 1
             else:
                 res["flags"].append("缺少历史同期数据，无法按季节性外推全年")
             if v < 0:
@@ -281,8 +284,10 @@ def describe(res: dict) -> tuple[str, list[str]]:
                     f"意味着余下期间 {show(m, res['rest'], ccy)}")
     else:
         headline = f"{head} {name} {actual}，完成全年一致预期（{show(m, cons['value'], ccy)}）的 {res['completion']:.0%}"
-        if res.get("norm"):
-            headline += f"（近 {len(res['norm']['years'])} 年同期平均 {res['norm']['mean']:.0%}）"
+        if (nm := res.get("norm")) and "implied_fy" in res:
+            headline += f"（近 {len(nm['years'])} 年同期平均 {nm['mean']:.0%}）"
+        elif nm:
+            headline += f"（近 {len(nm['years'])} 年同期占比 " + (f"{nm['min']:.0%}–{nm['max']:.0%}）" if len(nm["years"]) > 1 else f"{nm['mean']:.0%}）")
         if "implied_fy" in res:
             headline += f"，按季节性外推全年 {show(m, res['implied_fy'], ccy)}，较一致预期 {pct(res['implied_gap'])}"
     lines = [f"实际：{res['label']}{res['stage_label']}（{res['notice'] or '发布日未知'} 发布），{name} {actual}（年初至今累计）"
@@ -594,5 +599,5 @@ def report_text(app: App, company: Company | None, listing: Listing | None = Non
                     + (f"，惊喜 {s['surprise_pct']:+.1f}%" if s["surprise_pct"] is not None else "") for s in known]
     out.append("")
     out.append("说明：A 股按研报库还原发布前 120 天内每家机构最新一篇的 EPS 中位数；中报、季报为年初至今累计，"
-               "看完成全年一致预期的比例并按近 3 年同期占比外推。")
+               "看完成全年一致预期的比例；近 3 年同期占比稳定时才按它外推全年，占比忽高忽低（如周期股）时只列历史区间。")
     return "\n".join(out)

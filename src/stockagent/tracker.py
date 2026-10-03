@@ -19,7 +19,7 @@ from datetime import timedelta
 
 from pydantic import BaseModel, field_validator
 
-from . import imafeed, technical, verify
+from . import anchor, imafeed, technical, verify
 from .app import SOURCE_LABEL, App
 from .config import Company
 from .docs import DOC_TYPES
@@ -252,8 +252,10 @@ def status(app: App, company: Company) -> dict | None:
     since = iso(utcnow() - timedelta(days=app.settings.tracker.redo_cooldown_days))
     redo = app.db.recent_job("dossier", company.id, since)
     stats = risk_stats(live_model, price)
+    base = live_model.scenario("base")
     return {
         "stats": stats, "stance_check": stance_check(rev.get("stance"), stats, app.settings.tracker.stance_band),
+        "anchor_check": anchor.check(model.anchor, live_model.price(base), app.settings.tracker.anchor_band) if base else None,
         "enabled": bool(tr["enabled"]), "tracker": tr, "revision": rev, "model": model, "live_model": live_model,
         "currency": model.price_currency, "target": rev["target"], "live_target": live, "fx_note": fx_note,
         "price": price, "price_date": price_date, "upside": live / price - 1 if price and live else None,
@@ -272,6 +274,7 @@ def status_line(app: App, company: Company) -> str | None:
             + (f"｜跌破现价概率约 {s['stats']['p_below']:.0%}" if s["stats"] else "")
             + (f"｜立场{STANCE_LABEL.get(rev.get('stance'), '—')}（参考立场{STANCE_LABEL[s['stance_check']['ref']]}"
                + (" ⚠" if s["stance_check"]["mismatch"] else "") + "）" if s["stance_check"] else "")
+            + (f"｜基准情景较程序参考价 {pct(s['anchor_check']['gap'])} ⚠" if s["anchor_check"] and s["anchor_check"]["flag"] else "")
             + f"｜最近{KIND_LABEL[rev['kind']]} {fmt_local(rev['created_at'])}：{rev['summary']}")
     if s["redo"]:
         line += f"｜深度报告重跑任务 #{s['redo']['id']} {'排队中' if s['redo']['status'] == 'queued' else '运行中'}"
@@ -670,7 +673,7 @@ def check(app: App, company: Company, *, origin: str = "cli", use_llm: bool = Tr
     cats = catalyst_snapshot(app, company, dossier)
     price, _ = pricing_close(app, company, live.listing)
     stance = last.get("stance") or dossier["card"].get("stance")
-    model_text = describe(live, cfg.target, price, stance, cfg.stance_band)
+    model_text = describe(live, cfg.target, price, stance, cfg.stance_band, cfg.anchor_band)
     head = "\n\n".join(x for x in [
         f"公司：{company.title}\n今天：{today_local()}\n当前行情：\n{app.market_line(company)}\n{app.fx_line()}",
         f"=== 当前估值模型 ===\n{model_text}" + (f"\n（{fx_note}）" if fx_note else ""),

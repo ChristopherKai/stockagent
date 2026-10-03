@@ -142,13 +142,33 @@ def implied_growth(market_value: float, fcf: float, discount_rate: float, termin
     return (lo + hi) / 2
 
 
-def matrix_price(driver: float, multiple: float, shares: float, net_cash: float = 0.0, fx: float = 1.0) -> float:
-    """敏感性矩阵的一个格点：隐含股价 =（倍数 × 驱动指标 + 净现金）÷ 股本 × 汇率。估值模型（valuation.py）用同一公式。"""
-    return (multiple * driver + net_cash) / shares * fx
+MATRIX_BASES = ("equity", "ev")
+
+
+def infer_basis(multiple_label: str) -> str:
+    """倍数口径：名称里有 EV / 企业价值的是 EV 倍数（倍数 × 驱动 = 企业价值，要加净现金），其余（PE、PB、PS）是股权倍数。"""
+    return "ev" if re.search(r"EV|企业价值", multiple_label or "", re.I) else "equity"
+
+
+def matrix_price(driver: float, multiple: float, shares: float, net_cash: float = 0.0, fx: float = 1.0,
+                 basis: str = "ev") -> float:
+    """敏感性矩阵的一个格点。EV 口径：隐含股价 =（倍数 × 驱动指标 + 净现金）÷ 股本 × 汇率；
+    股权口径（PE、PB 等）：倍数 × 驱动指标已是股权价值，不再加减净现金。估值模型（valuation.py）用同一公式。"""
+    return (multiple * driver + (net_cash if basis == "ev" else 0.0)) / shares * fx
+
+
+def matrix_formula(driver_label: str, basis: str, net_cash: float, shares: float, fx: float) -> str:
+    if basis == "ev":
+        return (f"隐含股价 =（倍数 × {driver_label} + 净现金 {fmt_number(net_cash)}）÷ 股本 {fmt_number(shares)} × 汇率 {fmt_number(fx)}"
+                "（EV 口径：倍数 × 驱动指标 = 企业价值，加净现金得股权价值）")
+    return (f"隐含股价 = 倍数 × {driver_label} ÷ 股本 {fmt_number(shares)} × 汇率 {fmt_number(fx)}"
+            "（股权口径：PE、PB 等倍数 × 驱动指标已是股权价值，净负债已体现在倍数里，不再加减净现金"
+            + (f"；传入的净现金 {fmt_number(net_cash)} 未计入" if net_cash else "") + "）")
 
 
 def matrix_table(driver_label: str, driver_values: list[float], multiple_label: str, multiples: list[float],
-                 shares: float, net_cash: float = 0.0, fx: float = 1.0, current_price: float | None = None) -> str:
+                 shares: float, net_cash: float = 0.0, fx: float = 1.0, current_price: float | None = None,
+                 basis: str = "ev") -> str:
     if shares <= 0:
         raise ValueError("shares 必须为正")
     head = f"| {driver_label} ↓ / {multiple_label} → | " + " | ".join(fmt_number(m) + "×" for m in multiples) + " |"
@@ -156,13 +176,13 @@ def matrix_table(driver_label: str, driver_values: list[float], multiple_label: 
     for d in driver_values:
         cells = []
         for m in multiples:
-            price = matrix_price(d, m, shares, net_cash, fx)
+            price = matrix_price(d, m, shares, net_cash, fx, basis)
             cell = f"{price:,.2f}"
             if current_price:
                 cell += f"（{pct(price / current_price - 1, 0)}）"
             cells.append(cell)
         rows.append(f"| {fmt_number(d)} | " + " | ".join(cells) + " |")
-    note = f"隐含股价 =（倍数 × {driver_label} + 净现金 {fmt_number(net_cash)}）÷ 股本 {fmt_number(shares)} × 汇率 {fmt_number(fx)}"
+    note = matrix_formula(driver_label, basis, net_cash, shares, fx)
     if current_price:
         note += f"；括号内为相对现价 {fmt_number(current_price)} 的涨跌幅"
     return "\n".join(rows) + "\n" + note
@@ -598,7 +618,72 @@ def ccass_text(app: App, l: Listing) -> str:
     return "\n".join(lines)
 
 
+def valuation_series(app: App, l: Listing, years: int) -> tuple[list[float], list[float], float | None, float | None]:
+    """A 股、港股近 years 年的每日 PE(TTM) 与 PB 序列（只保留正值）及当前值：(PE, PB, 当前 PE, 当前 PB)。"""
+    if l.market == "A":
+        rows = emdata.valuation_history_a(app.session, l.code, days=years * 250)
+        pe = [v for _, v, _ in rows if v is not None and v > 0]
+        pb = [v for _, _, v in rows if v is not None and v > 0]
+        return pe, pb, (rows[-1][1] if rows else None), (rows[-1][2] if rows else None)
+    if l.market == "HK":
+        return hk_valuation_series(app, l, years)
+    return [], [], None, None
+
+
+def hk_valuation_series(app: App, l: Listing, years: int):
+    """港股：日收盘价 ÷ 最近已披露 EPS(TTM)/每股净资产（半年报滞后 60 天、年报滞后 90 天视为可得；人民币报表按汇率换算）。"""
+    reports = emdata.financials(app.session, l, periods=years * 2 + 3)
+    if not reports:
+        return [], [], None, None
+    secid = eastmoney.secid_for(l)
+    bars = ensure_bars(app, secid, min_bars=years * 250)
+    if bars is None:
+        return [], [], None, None
+    fx = ensure_bars(app, FX_HKDCNH, min_bars=years * 250 + 30)
+    fx_map = dict(zip(fx["date"], fx["close"])) if fx is not None else {}
+    points = []  # (可得日期, EPS_TTM, BPS, 币种)
+    for r in reports:
+        d = date.fromisoformat(r["_report_date"])
+        lag = 90 if d.month == 12 else 60
+        points.append(((d + timedelta(days=lag)).isoformat(), r.get("EPS(TTM)"), r.get("每股净资产"), r.get("币种")))
+    points.sort()
+    pe, pb, last_fx = [], [], None
+    cur_pe = cur_pb = None
+    for d, close in zip(bars["date"], bars["close"]):
+        last_fx = fx_map.get(d, last_fx)
+        known = [p for p in points if p[0] <= d]
+        if not known:
+            continue
+        _, eps, bps, cur = known[-1]
+        rate = 1.0
+        if cur == "CNY":  # 报表为人民币、股价为港元：人民币金额 ÷ (港元兑人民币汇率)
+            if not last_fx:
+                continue
+            rate = 1 / last_fx
+        elif cur == "USD":  # 港元联系汇率
+            rate = 7.8
+        cur_pe = close / (eps * rate) if eps and eps > 0 else None
+        cur_pb = close / (bps * rate) if bps and bps > 0 else None
+        if cur_pe:
+            pe.append(cur_pe)
+        if cur_pb:
+            pb.append(cur_pb)
+    return pe, pb, cur_pe, cur_pb
+
+
 # ---------------------------------------------------------------- 工具箱
+
+class MetaStr(str):
+    """工具返回给模型的文本，另带一份写进工具日志的结构化信息（meta，模型看不到）：
+    例如估值矩阵实际计算用的口径与（程序补上行列之后的）全部格点，供估值基线重建时使用。"""
+
+    meta: dict
+
+    def __new__(cls, text: str, meta: dict) -> "MetaStr":
+        s = super().__new__(cls, text)
+        s.meta = meta
+        return s
+
 
 class ToolBox:
     def __init__(self, app: App, company: Company | None, allow: list[str] | None = None):
@@ -630,9 +715,14 @@ class ToolBox:
                     result = tool.fn(**{k: v for k, v in args.items() if k in allowed})
                 except Exception as e:  # 工具出错也要告诉模型，让它换个方式
                     result = f"错误：{type(e).__name__}: {str(e)[:300]}"
+        meta = getattr(result, "meta", None)
+        result = str(result)
         if len(result) > self.max_chars:
             result = result[: self.max_chars] + f"\n……（结果过长已截断，共 {len(result):,} 字）"
-        self.log.append({"tool": name, "args": args, "result": result, "at": iso(utcnow())})
+        entry = {"tool": name, "args": args, "result": result, "at": iso(utcnow())}
+        if meta:
+            entry["meta"] = meta
+        self.log.append(entry)
         return result
 
     # ------------------------------------------------------------ 工具实现
@@ -678,12 +768,16 @@ class ToolBox:
                       ["market_value", "fcf", "discount_rate", "terminal_growth"]),
                  self.reverse_dcf),
             Tool("valuation_matrix",
-                 "敏感性矩阵：隐含股价 =（倍数 × 驱动指标 + 净现金）÷ 股本 × 汇率。例如驱动指标取 2027 年净利润、倍数取 PE；"
-                 "亏损公司可取收入、倍数取 EV/Sales。fx 把财报货币换成股价货币，必须使用上下文给出的最新汇率（不要凭记忆），current_price 用于算相对现价涨跌。",
+                 "敏感性矩阵。basis 决定口径：equity 股权倍数（PE、PB、PS）——隐含股价 = 倍数 × 驱动指标 ÷ 股本 × 汇率，"
+                 "倍数 × 净利润已是股权价值，不再加减净现金；ev 企业价值倍数（EV/EBITDA、EV/Sales）——隐含股价 =（倍数 × 驱动指标 + 净现金）÷ 股本 × 汇率，"
+                 "净负债填负数。不填 basis 时按倍数名称判断（含 EV 为 ev，否则 equity）。例如驱动指标取 2027 年净利润、倍数取 PE（equity）；"
+                 "亏损公司可取收入、倍数取 EV/Sales（ev）。股本与驱动指标用同一数量级（如亿股与亿元）。"
+                 "fx 把财报货币换成股价货币，必须使用上下文给出的最新汇率（不要凭记忆），current_price 用于算相对现价涨跌。"
+                 "程序会自动补上缺少的一致预期净利行与定价上市地历史 PE 分位列（能取到数据时）。",
                  _obj({"driver_label": {"type": "string"}, "driver_values": {"type": "array", "items": {"type": "number"}},
                        "multiple_label": {"type": "string"}, "multiples": {"type": "array", "items": {"type": "number"}},
                        "shares": {"type": "number"}, "net_cash": {"type": "number"}, "fx": {"type": "number"},
-                       "current_price": {"type": "number"}},
+                       "current_price": {"type": "number"}, "basis": {"type": "string", "enum": list(MATRIX_BASES)}},
                       ["driver_label", "driver_values", "multiple_label", "multiples", "shares"]),
                  self.valuation_matrix),
             Tool("list_filings", "列出本公司已入库的资料（年报、中期报告、研报、笔记等）及编号、页数。", _obj({}, []), self.list_filings),
@@ -819,9 +913,21 @@ class ToolBox:
                 f"（折现率 {pct(discount_rate, 1, sign=False)}，永续增长 {pct(terminal_growth, 1, sign=False)}，净现金 {fmt_number(net_cash)}）")
 
     def valuation_matrix(self, driver_label, driver_values, multiple_label, multiples, shares, net_cash=0.0, fx=1.0,
-                         current_price=None) -> str:
-        return matrix_table(driver_label, [float(x) for x in driver_values], multiple_label, [float(x) for x in multiples],
-                            float(shares), float(net_cash), float(fx), float(current_price) if current_price else None)
+                         current_price=None, basis=None) -> str:
+        basis = basis if basis in MATRIX_BASES else infer_basis(multiple_label)
+        drivers, mults = [float(x) for x in driver_values], [float(x) for x in multiples]
+        shares, net_cash, fx = float(shares), float(net_cash or 0), float(fx or 1)
+        added: list[str] = []
+        if self.company is not None and shares > 0:
+            from . import anchor  # anchor → tools：放在函数里避免循环导入
+
+            anc = anchor.get(self.app, self.company)
+            if anc:
+                drivers, mults, added = anchor.augment(anc, driver_label, drivers, multiple_label, mults, shares, fx, basis)
+        table = matrix_table(driver_label, drivers, multiple_label, mults, shares, net_cash, fx,
+                             float(current_price) if current_price else None, basis)
+        return MetaStr(table + "".join(f"\n{x}" for x in added),
+                       {"basis": basis, "driver_values": drivers, "multiples": mults})
 
     def _docs(self) -> list[dict]:
         return self.app.db.documents(self.company.id)
@@ -1004,59 +1110,13 @@ class ToolBox:
         years = max(1, min(int(years), 8))
         out = []
         for l in listings_for(self.app, self.company, ticker):
-            if l.market == "A":
-                rows = emdata.valuation_history_a(self.app.session, l.code, days=years * 250)
-                pe = [v for _, v, _ in rows if v is not None and v > 0]
-                pb = [v for _, _, v in rows if v is not None and v > 0]
-                cur_pe = rows[-1][1] if rows else None
-                cur_pb = rows[-1][2] if rows else None
-                src = "东方财富估值历史"
-            else:
-                pe, pb, cur_pe, cur_pb = self._hk_valuation_series(l, years)
-                src = "日收盘价 ÷ 最近已披露 EPS(TTM)/每股净资产（半年报滞后 60 天、年报滞后 90 天视为可得；已按汇率换算）"
+            pe, pb, cur_pe, cur_pb = valuation_series(self.app, l, years)
+            src = ("东方财富估值历史" if l.market == "A" else
+                   "日收盘价 ÷ 最近已披露 EPS(TTM)/每股净资产（半年报滞后 60 天、年报滞后 90 天视为可得；已按汇率换算）")
             cur_pe = cur_pe if cur_pe is not None and cur_pe > 0 else None
             out.append(f"{l.display} 近 {years} 年估值（{src}）：\n  " + _stats_line("PE(TTM)", pe, cur_pe)
                        + ("（当前亏损，PE 不适用）" if cur_pe is None else "") + "\n  " + _stats_line("PB", pb, cur_pb))
         return "\n".join(out)
-
-    def _hk_valuation_series(self, l: Listing, years: int):
-        reports = emdata.financials(self.app.session, l, periods=years * 2 + 3)
-        if not reports:
-            return [], [], None, None
-        secid = eastmoney.secid_for(l)
-        bars = ensure_bars(self.app, secid, min_bars=years * 250)
-        if bars is None:
-            return [], [], None, None
-        fx = ensure_bars(self.app, FX_HKDCNH, min_bars=years * 250 + 30)
-        fx_map = dict(zip(fx["date"], fx["close"])) if fx is not None else {}
-        points = []  # (可得日期, EPS_TTM, BPS, 币种)
-        for r in reports:
-            d = date.fromisoformat(r["_report_date"])
-            lag = 90 if d.month == 12 else 60
-            points.append(((d + timedelta(days=lag)).isoformat(), r.get("EPS(TTM)"), r.get("每股净资产"), r.get("币种")))
-        points.sort()
-        pe, pb, last_fx = [], [], None
-        cur_pe = cur_pb = None
-        for d, close in zip(bars["date"], bars["close"]):
-            last_fx = fx_map.get(d, last_fx)
-            known = [p for p in points if p[0] <= d]
-            if not known:
-                continue
-            _, eps, bps, cur = known[-1]
-            rate = 1.0
-            if cur == "CNY":  # 报表为人民币、股价为港元：人民币金额 ÷ (港元兑人民币汇率)
-                if not last_fx:
-                    continue
-                rate = 1 / last_fx
-            elif cur == "USD":  # 港元联系汇率
-                rate = 7.8
-            cur_pe = close / (eps * rate) if eps and eps > 0 else None
-            cur_pb = close / (bps * rate) if bps and bps > 0 else None
-            if cur_pe:
-                pe.append(cur_pe)
-            if cur_pb:
-                pb.append(cur_pb)
-        return pe, pb, cur_pe, cur_pb
 
     def southbound(self, ticker: str | None = None) -> str:
         hk = [l for l in listings_for(self.app, self.company, ticker) if l.market == "HK"]
