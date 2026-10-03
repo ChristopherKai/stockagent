@@ -301,6 +301,8 @@ def _tracking_block(cb: CompanyBrief) -> list[str]:
                 ""]
         if t.get("stats"):
             out += [f"情景统计（代码计算）：{stats_line(t['stats'], t.get('stance_check'))}", ""]
+        if (ac := t.get("anchor_check")) and ac["flag"]:
+            out += [f"程序参考价 ⚠：{ac['note']}", ""]
     alert = [t for t in cb.triggers if t["status"] != "ok"]
     if alert:
         out += ["| 状态 | 条件 | 方向 | 依据 | 预设动作 |", "|---|---|---|---|---|"]

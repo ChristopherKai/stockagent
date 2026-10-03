@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from .. import app as appmod
-from .. import chat, docs, jobs, monitor, newco, notify, scheduler, tracker
+from .. import anchor, chat, docs, jobs, monitor, newco, notify, scheduler, tracker
 from .. import consensus as consensus_mod
 from ..config import Company
 from ..docs import DOC_TYPES, SUPPORTED
@@ -545,8 +545,10 @@ def revision_page(request: Request, cid: str, rid: int):
     prev_model = load_model(prev["model"]) if prev else None
     evidence = _evidence(r["events"])
     st = risk_stats(model, r["price"])
+    base = model.scenario("base")
     return page(request, "revision.html", c=c, r=r, model=model, prev_model=prev_model, compare=_compare(model, prev_model),
                 st=st, sc=stance_check(r["stance"], st, app.settings.tracker.stance_band),
+                ac=anchor.check(model.anchor, model.price(base), app.settings.tracker.anchor_band) if base else None,
                 evidence=[e for e in evidence if e.get("impact") != "none"], unaffected=[e for e in evidence if e.get("impact") == "none"],
                 confirmed=tracker.confirmed_refs(app, c), flags=_flags(r["flags"]),
                 chats=[x for x in app.db.chats(cid) if x["revision_id"] == rid], quick=chat.QUICK_REVISION,

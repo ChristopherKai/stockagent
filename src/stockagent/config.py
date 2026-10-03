@@ -181,6 +181,7 @@ class TrackerConfig(BaseModel):
     redo_on_broken: bool = True         # 论点被判失效时自动排队重跑深度报告
     redo_cooldown_days: int = 3         # 同一公司自动重跑深度报告的冷却天数
     stance_band: float = 0.15           # 参考立场：加权空间超过 ±该比例才算偏多 / 偏空（见 valuation.reference_stance）
+    anchor_band: float = 0.25           # 程序参考价：基准情景较「一致预期 EPS × 历史中位 PE」偏离超过 ±该比例时标注 ⚠（见 anchor.py）
 
 
 class ConsensusConfig(BaseModel):

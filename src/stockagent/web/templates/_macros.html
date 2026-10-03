@@ -49,7 +49,11 @@
 </div>
 <p class="formula">
   {% if model.method == 'matrix' %}
+  {%- if model.basis == 'ev' %}
   股价 =（{{ model.multiple_label }} × {{ model.driver_label }} + 净现金 {{ model.net_cash | num }}）÷ 总股本 {{ model.shares | num(4) }} 亿股 × 汇率 {{ model.fx | num(4) }}
+  {%- else %}
+  股价 = {{ model.multiple_label }} × {{ model.driver_label }} ÷ 总股本 {{ model.shares | num(4) }} 亿股 × 汇率 {{ model.fx | num(4) }}（股权口径，不加减净现金）
+  {%- endif %}
   {% else %}
   区间模型：报告没有可用的估值矩阵，情景价格取报告区间中值，只能按比例修正。
   {% endif %}
