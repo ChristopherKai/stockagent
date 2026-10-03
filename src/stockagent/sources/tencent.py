@@ -68,4 +68,6 @@ def fetch_quote(session: requests.Session, secid: str) -> dict | None:
     }
     if sym.startswith(("sh", "sz", "bj")) and len(f) > 53:
         out.update(pe_ttm=to_float(f[39]), pe_dynamic=to_float(f[52]), pe_static=to_float(f[53]))
+    if sym.startswith("hk") and len(f) > 60:  # 每手股数（已核对 00700=100、00005=400、00939=1000、02800=500）
+        out["lot"] = to_float(f[60])
     return out

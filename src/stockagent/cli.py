@@ -533,6 +533,82 @@ def _screen_push(app: App, runs: dict[str, int]) -> None:
                            "\n".join(lines) + f"\n（{tracker.DISCLAIMER}）") or ["未配置推送渠道"])
 
 
+FUND_BUSY = "已有模拟基金任务在运行（进程 {pid}），等它结束后再运行"
+
+
+def cmd_fund(args) -> None:
+    """模拟基金（模拟组合信号，非投资建议）：sync 同步定义 / refresh 晚间刷新日线 / plan 盘前计划 / alert 盘中提醒 /
+    close 盘后结算 / weekly 周报 / status 查看 / resume 恢复熔断暂停的基金。--dry-run 不写库、不推送。"""
+    from datetime import datetime
+
+    from .fund import config as fcfg
+    from .fund import engine, report, store
+    from .utils import CST
+
+    app = _load(args)
+    try:
+        cfg = fcfg.load(app)
+    except fcfg.FundsError as e:
+        sys.exit(str(e))
+    sub = args.fund_cmd
+    day = date.fromisoformat(args.date) if getattr(args, "date", None) else today_local()
+    dry = getattr(args, "dry_run", False)
+
+    def send(msgs: list[tuple[str, str]]) -> None:
+        for title, text in msgs:
+            print(f"\n{title}\n{text}")
+        if getattr(args, "push", False):
+            if dry:
+                print("\n（--dry-run：以上为将推送的内容，没有发送）")
+                return
+            for title, text in msgs:
+                _print(notify.push(app.settings, title, text) or ["未配置推送渠道（见 config.yaml notify）"])
+
+    if sub == "status":
+        store.ensure(app.db)
+        print(report.status_text(app, engine.fund_defs(app, cfg)))
+        return
+    with app.lock("fund") as ok:
+        if not ok:
+            sys.exit(FUND_BUSY.format(pid=lock_holder(app.lock_path("fund")) or "?"))
+        if sub == "sync":
+            _print(store.sync(app.db, cfg.funds, day.isoformat(), dry_run=dry))
+            if dry:
+                print("（--dry-run：没有写入）")
+        elif sub == "refresh":
+            _print(engine.refresh(app, cfg, [args.market] if args.market else None, limit=args.limit, dry_run=dry, progress=print))
+        elif sub == "plan":
+            plans, msgs = engine.plan(app, cfg, day, args.fund or None, dry_run=dry)
+            if not plans:
+                _print(msgs or ["今日没有需要出计划的基金"])
+                return
+            send(report.plan_messages(plans, day, msgs))
+        elif sub == "alert":
+            now = datetime.now(CST)
+            alerts, msgs = engine.alert(app, cfg, now, dry_run=dry)
+            if not alerts:
+                _print(msgs + ["没有新的触发"])
+                return
+            send(report.alert_messages(alerts, now))
+        elif sub == "close":
+            results, msgs = engine.close(app, cfg, day, args.fund or None, dry_run=dry)
+            if not results:
+                _print(msgs or ["今日没有需要结算的基金"])
+                return
+            send(report.close_messages(app, results, day, msgs))
+        elif sub == "weekly":
+            send(report.weekly_messages(app, engine.fund_defs(app, cfg), day))
+        elif sub == "resume":
+            f = store.fund(app.db, args.fund_id)
+            if f is None:
+                sys.exit(f"没有基金 {args.fund_id}")
+            if dry:
+                print(f"（--dry-run）将把 {f['name']} 的熔断从「{f['breaker']}」恢复为 0")
+                return
+            store.set_fund(app.db, f["id"], breaker=0, halted_at=None)
+            print(f"{f['name']} 已恢复：熔断清零，下一次盘前计划起恢复开新仓（回撤仍按历史最高净值计算）")
+
+
 def cmd_web(args) -> None:
     from .web.server import serve  # noqa: PLC0415 - 只有 stock web 需要 FastAPI
 
@@ -922,6 +998,34 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--accept", type=int, metavar="ID", help="采纳一条建议（写入 themes.yaml）")
     sp.add_argument("--dismiss", type=int, metavar="ID", help="忽略一条建议")
     scp.set_defaults(func=cmd_screen)
+
+    fp = sub.add_parser("fund", help="模拟基金：按策略生成盘前计划、盘中提醒、盘后复盘（模拟组合信号，非投资建议；不对接券商、不下单）")
+    fsub = fp.add_subparsers(dest="fund_cmd", required=True)
+    sp = fsub.add_parser("sync", help="把 funds.yaml 的基金定义同步到数据库（新基金按初始资金建账）")
+    sp.add_argument("--dry-run", action="store_true", help="只显示会做的变更")
+    sp = fsub.add_parser("refresh", help="晚间：刷新指数、汇率与股票池日线（逐只限速，可中断续跑）、港股每手股数")
+    sp.add_argument("--market", choices=["HK", "A"])
+    sp.add_argument("--limit", type=int, help="本次最多请求多少只（试跑用）")
+    sp.add_argument("--dry-run", action="store_true", help="只估算请求数，不联网")
+    for name, hlp in (("plan", "盘前计划：按收盘数据计算当日操作建议（只读库，不联网）"),
+                      ("close", "盘后：按当日日线模拟成交、扣费，记净值与回撤熔断")):
+        sp = fsub.add_parser(name, help=hlp)
+        sp.add_argument("fund", nargs="*", help="基金 id，不填表示全部")
+        sp.add_argument("--date", help="日期 YYYY-MM-DD（默认今天，北京时间）")
+        sp.add_argument("--push", action="store_true", help="推送")
+        sp.add_argument("--dry-run", action="store_true", help="不写库、不推送，只打印")
+    sp = fsub.add_parser("alert", help="盘中：只查持仓与当天条件单的快照报价，止损、突破、跳空、证伪条件触发时提醒")
+    sp.add_argument("--push", action="store_true", help="推送")
+    sp.add_argument("--dry-run", action="store_true", help="不记录已提醒、不推送")
+    sp = fsub.add_parser("weekly", help="周报：净值、超额收益、回撤、胜率与盈亏比")
+    sp.add_argument("--date", help="日期 YYYY-MM-DD（默认今天）")
+    sp.add_argument("--push", action="store_true", help="推送")
+    sp.add_argument("--dry-run", action="store_true", help="不推送，只打印")
+    fsub.add_parser("status", help="查看基金净值、持仓、待执行建议与最近打分")
+    sp = fsub.add_parser("resume", help="恢复因回撤三档熔断而暂停的基金")
+    sp.add_argument("fund_id")
+    sp.add_argument("--dry-run", action="store_true")
+    fp.set_defaults(func=cmd_fund)
 
     sp = sub.add_parser("web", help="WebUI（只监听 127.0.0.1）：事件与估值修正时间线、观察清单、追踪、模型与日程配置；内置调度器")
     sp.add_argument("--port", type=int, help="端口（默认 config.yaml 的 web.port，8765）")
