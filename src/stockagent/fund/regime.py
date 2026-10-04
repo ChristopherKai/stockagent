@@ -69,14 +69,15 @@ def compute(app: App, cfg: RegimeConfig, market: str, universe_bars: dict[str, p
     out["breadth_n"] = n
     out["breadth"] = b if n >= cfg.min_breadth_n else None
     state, weak = classify(above, out["breadth"], out.get("vol_pct"), cfg)
-    out.update(state=state, signals={"above_ma": above, "weak": weak, "breadth_sample": n})
+    out.update(state=state, signals={"above_ma": above, "weak": weak, "breadth_sample": n, "ma": cfg.ma})
     return out
 
 
 def describe(r: dict, cap: float) -> str:
     bits = []
     if r.get("index_close") and r.get("index_ma"):
-        bits.append(f"指数{'在' if r['index_close'] > r['index_ma'] else '跌破'} 200 日线")
+        ma = (r.get("signals") or {}).get("ma", 200)
+        bits.append(f"指数{'在' if r['index_close'] > r['index_ma'] else '跌破'} {ma} 日线")
     if r.get("breadth") is not None:
         bits.append(f"宽度 {r['breadth']:.0%}")
     if r.get("vol_pct") is not None:

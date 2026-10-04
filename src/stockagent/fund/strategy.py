@@ -235,7 +235,7 @@ class HKQualityValue(Strategy):
             else:
                 if r["cheap_pct"] > self.p.cheap_quantile:
                     continue
-                gate = f"便宜程度在港股通有报表的 {len(df)} 只中排前 {r['cheap_pct']:.0%}"
+                gate = f"便宜程度在港股通有报表的 {len(df)} 只中排前 {max(r['cheap_pct'], 0.01):.0%}"
                 bonus = 0.0
             reason = (f"ROE {r['roe']:.1f}%，盈利收益率 {r['ey']:.1%}，保守 FCF Yield {r['fcf_yield']:.1%}，"
                       f"股息率 {r['dividend_yield']:.1%}；{gate}")
@@ -425,15 +425,16 @@ class ASectorTrend(Strategy):
                 continue                                             # 价格在突破位上方但没放量：不追
             stop = self.stop_for(level, ind.get("atr"))
             weight = min(self.p.risk_per_trade / max(1 - stop / level, 1e-6), self.p.max_weight)
-            sp_txt = f"，行业动量前 {1 - sp:.0%}" if not pd.isna(sp) else ""
+            sp_txt = f"，行业动量前 {max(1 - sp, 0.01):.0%}" if not pd.isna(sp) else ""
             score = 100 * (0.7 * rp + 0.3 * (sp if not pd.isna(sp) else 0.5))
             out.append(Target(secid=u["secid"], code=u["code"], name=u["name"], market="A", score=round(score, 1),
                               weight=round(weight, 4), price=close, stop=stop, entry=entry, tranches=2,
-                              reason=f"第二阶段上升趋势，相对强度前 {1 - rp:.0%}{sp_txt}；{how}", sector=u.get("industry"),
+                              reason=f"第二阶段上升趋势，相对强度前 {max(1 - rp, 0.01):.0%}{sp_txt}；{how}", sector=u.get("industry"),
                               org_code=u.get("org_code"),
                               metrics={"rs_pct": rp, "sector_pct": None if pd.isna(sp) else sp, "pivot": pivot, "vol_ratio": vr,
                                        "atr": ind.get("atr"), "ma50": ind.get("ma50"), "ma200": ind.get("ma200")}))
-        ctx.notes.append(f"{self.label}：日线股票池 {len(pool)} 只，符合趋势模板 {trend_n} 只，入选 {len(out)} 只")
+        ctx.notes.append(f"{self.label}：日线股票池 {len(pool)} 只，符合趋势模板 {trend_n} 只，入选 {len(out)} 只"
+                         + (f"（保留得分最高的 {self.p.candidates} 只）" if len(out) > self.p.candidates else ""))
         out.sort(key=lambda t: -t.score)
         return out[:self.p.candidates]
 
