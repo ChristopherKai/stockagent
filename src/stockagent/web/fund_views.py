@@ -124,8 +124,11 @@ def _suggestion_rows(app, rows: list[dict]) -> list[dict]:
     return out
 
 
+SUPERSEDED = "被新计划取代"
+
+
 @router.get("/funds/suggestions")
-def suggestions_page(request: Request, days: int = 7, fund: str | None = None):
+def suggestions_page(request: Request, days: int = 7, fund: str | None = None, old: int = 0):
     app = holder(request).app
     store.ensure(app.db)
     days = max(1, min(days, 90))
@@ -134,13 +137,17 @@ def suggestions_page(request: Request, days: int = 7, fund: str | None = None):
     if first and first["d"]:
         since = (date.fromisoformat(first["d"]) - timedelta(days=days)).isoformat()
         rows = [s for s in store.suggestions(app.db, fund) if s["date"] >= since]
+    hidden = sum(1 for s in rows if s["status"] == "expired" and s.get("note") == SUPERSEDED)
+    if not old:  # 同一天重新出过计划时，旧计划的建议默认不显示
+        rows = [s for s in rows if not (s["status"] == "expired" and s.get("note") == SUPERSEDED)]
     rows.sort(key=lambda s: (s["date"], s.get("priority") or 9), reverse=False)
     rows = _suggestion_rows(app, rows)
     by_day: dict[str, list[dict]] = {}
     for s in sorted(rows, key=lambda s: s["date"], reverse=True):
         by_day.setdefault(s["date"], []).append(s)
     names = {f["id"]: f["name"] for f in store.funds(app.db)}
-    return page(request, "fund_suggestions.html", **_ctx(by_day=by_day, days=days, fund=fund, names=names, TRADE_ACTIONS=TRADE_ACTIONS))
+    return page(request, "fund_suggestions.html", **_ctx(by_day=by_day, days=days, fund=fund, names=names, TRADE_ACTIONS=TRADE_ACTIONS,
+                                                          hidden=hidden, show_all=bool(old)))
 
 
 @router.get("/funds/actual")

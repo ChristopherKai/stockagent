@@ -310,6 +310,9 @@ def test_exposure_cap_trims_and_drift_tolerance():
     plan = risk.build(book, RC, limits(regime_cap=0.3), [], [], [], "d", "defend")        # 趋势基金防守：30%
     trims = [s for s in plan.suggestions if s["action"] == "trim"]
     assert len(trims) == 5 and all(s["shares"] == 4000 and s["priority"] == 3 for s in trims)
+    assert "市场状态防守上限 30%" in trims[0]["reason"]
+    why = risk.build(book, RC, limits(regime_cap=0.6, breaker=2), [], [], [], "d", "defend").suggestions[0]["reason"]
+    assert "市场状态防守上限 30%（取较低者）" in why and "回撤二档上限 50%" in why
     assert plan.cap == 0.3
     # 中性 60%：现仓位 50% 在上限内，不动
     assert not [s for s in risk.build(book, RC, limits(), [], [], [], "d", "neutral").suggestions if s["action"] == "trim"]
@@ -339,6 +342,8 @@ def test_replacement_buffer_and_sells_before_buys():
     plan = risk.build(book, RC, limits(), [], [], [strong, weak], "d", "attack")
     acts = [(s["action"], s["code"]) for s in plan.suggestions]
     assert ("sell", "000001") in acts and ("buy", "000008") in acts and ("buy", "000009") not in acts
+    why = next(x["reason"] for x in plan.suggestions if x["action"] == "sell")
+    assert "70 分" in why and "51 分" in why and "高 19 分（+37%）" in why and "替换门槛" in why
     assert acts.index(("sell", "000001")) < acts.index(("buy", "000008"))
     # 非调仓日不替换；条件单（可能不触发）也不替换
     plan = risk.build(book, RC, limits(rebalance_day=False), [], [], [strong], "d", "attack")

@@ -181,3 +181,15 @@ def test_create_edit_and_delete_fund_through_the_form(funded, project, monkeypat
     r = post(c, "/funds/hk_div/delete", {"confirm": "yes"})
     assert r.headers["location"].startswith("/funds?ok=") and store.fund(app.db, "hk_div") is None
     assert "hk_div" not in path.read_text(encoding="utf-8") and "# 我的基金配置（注释要保留）" in path.read_text(encoding="utf-8")
+
+
+def test_superseded_suggestions_are_hidden_by_default(traded, project, monkeypatch, app):
+    cfg, as_of = traded
+    engine.plan(app, cfg, as_of)                    # 同一天再出一次计划：上一版建议被取代
+    old = [s for s in store.suggestions(app.db) if s.get("note") == "被新计划取代"]
+    assert old
+    c = client_for(project, monkeypatch)
+    page = c.get("/funds/suggestions?days=30").text
+    assert f"已隐藏被新计划取代的 {len(old)} 条旧建议" in page
+    page = c.get("/funds/suggestions?days=30&old=1").text
+    assert "正在显示被新计划取代的" in page and f'/funds/suggestions/{old[0]["id"]}/execute' not in page

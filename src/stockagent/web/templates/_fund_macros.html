@@ -15,12 +15,12 @@
     {% if s.stop and s.action in ('buy', 'add') %}<div>止损 {{ s.stop | num(2) }}</div>{% endif %}
     {% if t.tranche %}<div class="muted">{{ t.tranche }}</div>{% endif %}
   </td>
-  <td class="small clip">{{ s.reason }}{% if t.flag %}<div class="down">⚑ {{ t.flag }}</div>{% endif %}</td>
+  <td class="small clip" title="{{ s.reason }}">{{ s.reason }}{% if t.flag %}<div class="down">⚑ {{ t.flag }}</div>{% endif %}</td>
   <td class="small nowrap"><span class="badge {{ 'ok' if s.status == 'filled' else 'warn' if s.status == 'pending' else '' }}">{{ STATUS_LABEL.get(s.status, s.status) }}</span>
     {% if s.model_trade %}<div class="muted">模拟 {{ s.model_trade.shares | num(0) }} 股 @ {{ s.model_trade.price | num(3) }}</div>{% endif %}
     {% if s.note and s.status != 'pending' %}<div class="muted">{{ s.note }}</div>{% endif %}</td>
   <td class="small">
-    {% if s.action in TRADE_ACTIONS %}
+    {% if s.action in TRADE_ACTIONS and not (s.status == 'expired' and s.note == '被新计划取代') %}
       {% if s.user %}
         <span class="badge {{ 'ok' if s.user.status == 'executed' else '' }}">{{ USER_LABEL[s.user.status] }}</span>
         {% if s.user.status == 'executed' %}<div>{{ s.user.shares | num(0) }} 股 @ {{ s.user.price | num(3) }}{{ '（推算）' if s.user.estimated }}</div>{% endif %}

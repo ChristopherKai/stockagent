@@ -32,7 +32,7 @@
       <div class="s">基准 {{ s.bench_ret | pct(2) }}{% if s.excess is not none %} · 超额 <span class="{{ s.excess | dirclass }}">{{ s.excess | pct(2) }}</span>{% endif %}</div></div>
     <div class="kpi"><div class="k">回撤</div><div class="v">{{ s.drawdown | pct(1, false) }}</div><div class="s">最大回撤 {{ s.max_dd | pct(1, false) }}</div></div>
     <div class="kpi"><div class="k">仓位</div><div class="v">{{ s.exposure | pct(0, false) }}</div>
-      <div class="s">{% if s.cap is not none %}上限 {{ s.cap | pct(0, false) }}{% endif %} · 现金 {{ s.cash | num(0) }}</div></div>
+      <div class="s">{% if s.cap is not none %}上限 {{ s.cap | pct(0, false) }} · {% endif %}现金 {{ s.cash | num(0) }}</div></div>
     <div class="kpi"><div class="k">持仓</div><div class="v">{{ s.holdings | length }} / {{ f.max_holdings }}</div>
       <div class="s">最近计划 {{ s.last_plan or '—' }}</div></div>
     <div class="kpi"><div class="k">市场状态</div><div class="v small">{% if s.regime %}{{ REGIME_LABEL[s.regime.state] }}{% else %}—{% endif %}</div>
