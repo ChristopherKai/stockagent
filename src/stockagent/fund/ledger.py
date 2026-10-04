@@ -149,12 +149,12 @@ def settle(state: State, pending: list[dict], bars: dict[str, dict], prev_close:
 
 
 def nav_row(state: State, closes: dict[str, float], day: str, prev: dict | None, bench_close: float | None,
-            bench_base: float | None) -> dict:
-    """当日净值。closes 为持仓的收盘价（缺失时沿用成本价并在调用方提示）。"""
+            bench_base: float | None, units: float | None = None) -> dict:
+    """当日净值。closes 为持仓的收盘价（缺失时沿用成本价并在调用方提示）。units 为总份额（有资金进出时不等于初始资金）。"""
     f = state.fund
     mv = sum(p["shares"] * closes.get(s, p["avg_cost"]) for s, p in state.positions.items())
     equity = state.cash + mv
-    nav = equity / f["initial_capital"]
+    nav = equity / (units or f["initial_capital"])
     peak = max(prev["peak"] if prev else 1.0, nav)
     return {"fund_id": f["id"], "date": day, "nav": nav, "equity": equity, "cash": state.cash,
             "exposure": mv / equity if equity > 0 else 0.0, "peak": peak, "drawdown": 1 - nav / peak if peak > 0 else 0.0,

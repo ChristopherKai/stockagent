@@ -161,9 +161,15 @@ def test_sync_creates_updates_and_refuses_capital_change(app):
     cfg.funds[0].max_holdings = 12
     assert any("更新 hk_value：max_holdings" in m for m in store.sync(app.db, cfg.funds, "2026-10-06"))
     assert store.fund(app.db, "hk_value")["cash"] == 123.0          # 同步不动现金
-    cfg.funds[0].initial_capital = 2e6
-    assert any("不能修改" in m for m in store.sync(app.db, cfg.funds, "2026-10-06"))
-    assert store.fund(app.db, "hk_value")["initial_capital"] == 1e6
+    cfg.funds[0].initial_capital = 2e6                               # 还没有记录：可以改，现金重置
+    store.sync(app.db, cfg.funds, "2026-10-06")
+    assert store.fund(app.db, "hk_value")["initial_capital"] == 2e6 and store.fund(app.db, "hk_value")["cash"] == 2e6
+    store.add_flow(app.db, store.fund(app.db, "hk_value"), 1000, 1.0, "2026-10-06")
+    cfg.funds[0].initial_capital = 3e6
+    cfg.funds[0].max_holdings = 13
+    assert any("不能修改" in m for m in store.sync(app.db, cfg.funds, "2026-10-07"))
+    f = store.fund(app.db, "hk_value")
+    assert f["initial_capital"] == 2e6 and f["max_holdings"] == 13          # 初始资金不变，其他修改照常同步
 
 
 # ---------------------------------------------------------------- 交易日历
@@ -304,6 +310,9 @@ def test_exposure_cap_trims_and_drift_tolerance():
     plan = risk.build(book, RC, limits(regime_cap=0.3), [], [], [], "d", "defend")        # 趋势基金防守：30%
     trims = [s for s in plan.suggestions if s["action"] == "trim"]
     assert len(trims) == 5 and all(s["shares"] == 4000 and s["priority"] == 3 for s in trims)
+    assert "市场状态防守上限 30%" in trims[0]["reason"]
+    why = risk.build(book, RC, limits(regime_cap=0.6, breaker=2), [], [], [], "d", "defend").suggestions[0]["reason"]
+    assert "市场状态防守上限 30%（取较低者）" in why and "回撤二档上限 50%" in why
     assert plan.cap == 0.3
     # 中性 60%：现仓位 50% 在上限内，不动
     assert not [s for s in risk.build(book, RC, limits(), [], [], [], "d", "neutral").suggestions if s["action"] == "trim"]
@@ -333,6 +342,8 @@ def test_replacement_buffer_and_sells_before_buys():
     plan = risk.build(book, RC, limits(), [], [], [strong, weak], "d", "attack")
     acts = [(s["action"], s["code"]) for s in plan.suggestions]
     assert ("sell", "000001") in acts and ("buy", "000008") in acts and ("buy", "000009") not in acts
+    why = next(x["reason"] for x in plan.suggestions if x["action"] == "sell")
+    assert "70 分" in why and "51 分" in why and "高 19 分（+37%）" in why and "替换门槛" in why
     assert acts.index(("sell", "000001")) < acts.index(("buy", "000008"))
     # 非调仓日不替换；条件单（可能不触发）也不替换
     plan = risk.build(book, RC, limits(rebalance_day=False), [], [], [strong], "d", "attack")
@@ -799,11 +810,11 @@ def test_llm_veto_replaces_vetoed_buys_caches_and_fails_closed(funded, app, monk
     cfg, as_of = funded
     calls = []
 
-    def fake_judge(app_, cfg_, fund_name, u, metrics, events, flags):
+    def fake_judge(app_, cfg_, fund_name, u, metrics, flags):
         calls.append(u["code"])
         if u["code"] == "00001":
-            return {"verdict": "veto", "reason": "控股股东清盘中（背景知识，可能过时）", "model": "fake"}
-        return {"verdict": "pass", "reason": "未见具体风险", "model": "fake"}
+            return {"verdict": "veto", "reason": "公告显示控股股东清盘", "evidence": ["E1"], "model": "fake"}
+        return {"verdict": "pass", "reason": "未见具体风险", "evidence": [], "model": "fake"}
 
     monkeypatch.setattr(guards, "judge", fake_judge)
     store.set_fund(app.db, "hk_value", params_json=json.dumps({"cheap_quantile": 0.6}))   # 候选多几只，便于递补
@@ -827,3 +838,98 @@ def test_llm_veto_replaces_vetoed_buys_caches_and_fails_closed(funded, app, monk
     assert not [s for s in plans[0].suggestions if s["action"] == "buy"]
     assert any("宁可不买" in n for n in plans[0].notes)
     assert not app.db.kv_prefix("fund_veto:")                              # dry-run 不写缓存
+
+
+
+class FakeResult:
+    def __init__(self, data):
+        self.data, self.model = data, "fake"
+
+
+def test_veto_must_cite_supplied_evidence(app, monkeypatch):
+    from stockagent.fund import guards
+    from stockagent.utils import iso, utcnow
+
+    cfg = fcfg.FundsFile.model_validate({})
+    u = hk_row("00001", "优质便宜", 25, 6)
+    seed_universe(app, [u])
+    sc_store.add_events(app.db, [{"uid": "x1", "secid": "116.00001", "market": "HK", "code": "00001", "name": "优质便宜",
+                                  "source": "hkex", "kind": "default", "direction": "negative", "weight": 3.0,
+                                  "title": "有关控股股东清盘呈请的公告", "published_at": iso(utcnow())}])
+    ev = guards.evidence(app, u, ["代码标记：不派息"])
+    assert ev[0][0] == "E1" and "清盘呈请" in ev[0][1] and ev[-1][1].startswith("代码标记")
+    seen = {}
+
+    def fake(task, system, user, **kw):
+        seen["user"] = user
+        return FakeResult(seen["reply"])
+
+    monkeypatch.setattr(app.llm, "complete", fake)
+    seen["reply"] = {"verdict": "veto", "reason": "公告显示控股股东清盘", "evidence": ["E1"]}
+    r = guards.judge(app, cfg, "港股质量价值", u, {}, [])
+    assert r["verdict"] == "veto" and r["evidence"] == ["E1"] and "清盘呈请" in r["evidence_text"][0]
+    assert "[E1]" in seen["user"] and "[F1]" in seen["user"]
+    seen["reply"] = {"verdict": "veto", "reason": "背景知识：董事长曾被调查", "evidence": []}
+    assert guards.judge(app, cfg, "x", u, {}, [])["verdict"] == "flag"           # 只凭背景知识：降为提醒
+    seen["reply"] = {"verdict": "veto", "reason": "编造的依据", "evidence": ["E99"]}
+    assert guards.judge(app, cfg, "x", u, {}, [])["verdict"] == "flag"           # 引用不存在的资料也不算
+    seen["reply"] = {"verdict": "pass", "reason": "无", "evidence": []}
+    assert guards.judge(app, cfg, "x", u, {}, [])["verdict"] == "pass"
+    # 缓存键带提示词版本：旧版本的结果不再使用
+    app.db.kv_set("fund_veto:116.00001:" + u["info"]["report_date"], json.dumps({"verdict": "veto", "reason": "旧"}))
+    assert guards.cached(app, "116.00001", u["info"]["report_date"]) is None
+
+
+def test_flags_do_not_block_and_allowlist_overrides(funded, app, monkeypatch):
+    from stockagent.fund import guards
+
+    cfg, as_of = funded
+    store.set_fund(app.db, "hk_value", params_json=json.dumps({"cheap_quantile": 0.6}))
+    verdicts = {"00001": {"verdict": "flag", "reason": "背景知识：传闻治理问题", "evidence": []},
+                "00005": {"verdict": "veto", "reason": "公告显示清盘", "evidence": ["E1"]}}
+    monkeypatch.setattr(guards, "judge", lambda a, c, n, u, m, f: verdicts.get(u["code"], {"verdict": "pass", "reason": "", "evidence": []}))
+    fp = engine.plan(app, cfg, as_of, ["hk_value"], dry_run=True)[0][0]
+    buys = {s["code"]: s for s in fp.suggestions if s["action"] == "buy"}
+    assert "00001" in buys and "未核实" in buys["00001"]["trigger"]["flag"]          # 提醒不阻止，建议里带说明
+    assert "00005" not in buys
+    assert any("模型提醒 1 只" in n for n in fp.notes) and any("模型否决 1 只" in n and "E1" in n for n in fp.notes)
+    cfg.veto.allow.append(fcfg.VetoAllow(code="HK:00005", reason="已复核，清盘公告指的是子公司", date="2026-10-04"))
+    fp = engine.plan(app, cfg, as_of, ["hk_value"], dry_run=True)[0][0]
+    buys = {s["code"]: s for s in fp.suggestions if s["action"] == "buy"}
+    assert "00005" in buys and "放行名单" in buys["00005"]["trigger"]["flag"]
+    assert any("放行名单覆盖 1 只" in n for n in fp.notes)
+    text = "\n".join(t for _, t in report.plan_messages([fp], as_of))
+    assert "放行名单" in text or "未核实" in text
+
+
+def test_lowered_holdings_cap_sells_weakest_on_rebalance_day_only():
+    positions = {f"0.00000{i}": pos(f"00000{i}", 1000, sector=f"s{i}", score=50 + i) for i in range(1, 5)}
+    book = risk.Book(fund=fund_row(max_holdings=2), cash=900_000, positions=positions, prices={s: 10.0 for s in positions})
+    plan = risk.build(book, RC, limits(rebalance_day=False), [], [], [], "d", "attack")
+    assert not [s for s in plan.suggestions if s["action"] == "sell"]                 # 平时不强制卖出
+    plan = risk.build(book, RC, limits(), [], [], [], "d", "attack")
+    sold = sorted(s["code"] for s in plan.suggestions if s["action"] == "sell")
+    assert sold == ["000001", "000002"] and all("超过标的上限" in s["reason"] for s in plan.suggestions if s["action"] == "sell")
+
+
+def test_cash_flows_keep_unit_nav(app):
+    cfg = fcfg.FundsFile.model_validate(yaml.safe_load(FUNDS_YAML))
+    store.sync(app.db, cfg.funds, "2026-10-05")
+    f = store.fund(app.db, "a_trend")
+    assert store.units(app.db, f) == 1e6
+    row = store.add_flow(app.db, f, 500_000, 1.25, "2026-10-08", "追加")
+    assert row["units"] == pytest.approx(400_000) and store.fund(app.db, "a_trend")["cash"] == pytest.approx(1.5e6)
+    f = store.fund(app.db, "a_trend")
+    st = ledger.State(fund=f, cash=f["cash"], positions={})
+    # 追加前总资产 125 万（净值 1.25）+ 追加 50 万 = 175 万，份额 140 万 → 净值仍是 1.25
+    st.cash = 1.75e6
+    assert ledger.nav_row(st, {}, "2026-10-08", None, None, None, store.units(app.db, f))["nav"] == pytest.approx(1.25)
+    with pytest.raises(ValueError, match="超过现金"):
+        store.add_flow(app.db, f, -2e6, 1.25, "2026-10-08")
+    store.add_flow(app.db, f, -250_000, 1.25, "2026-10-09")
+    assert store.units(app.db, store.fund(app.db, "a_trend")) == pytest.approx(1.2e6)
+    assert store.has_history(app.db, "a_trend") and not store.has_history(app.db, "hk_value")
+    store.delete_fund(app.db, "hk_value")
+    assert store.fund(app.db, "hk_value") is None
+    with pytest.raises(ValueError):
+        store.delete_fund(app.db, "a_trend")

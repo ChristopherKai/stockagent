@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% from "_fund_macros.html" import suggestion_row, suggestion_head with context %}
+{% block title %}模拟基金 · 操作建议{% endblock %}
+{% block content %}
+{% include "_fund_head.html" %}
+<section class="card">
+  <div class="card-head"><h2>操作建议</h2>
+    <form method="get" action="/funds/suggestions" class="inline small">
+      <select name="days" data-autosubmit>{% for d in (3, 7, 14, 30, 90) %}<option value="{{ d }}" {{ 'selected' if d == days }}>最近 {{ d }} 天</option>{% endfor %}</select>
+      <select name="fund" data-autosubmit><option value="">全部基金</option>{% for k, v in names.items() %}<option value="{{ k }}" {{ 'selected' if k == fund }}>{{ v }}</option>{% endfor %}</select>
+    </form></div>
+  <p class="muted small">「已执行 / 忽略」只记录你自己的操作（可以填实际成交股数和价格，不填按建议数量和参考价），用来生成「实际持仓」；
+    模拟账本不受影响：模拟持仓与净值照旧按规则在盘后结算（开盘单按当天开盘价、条件单按触发价）。</p>
+  {% if hidden %}<p class="small">{% if show_all %}正在显示被新计划取代的 {{ hidden }} 条旧建议 · <a href="/funds/suggestions?days={{ days }}{% if fund %}&fund={{ fund }}{% endif %}">隐藏</a>
+    {% else %}已隐藏被新计划取代的 {{ hidden }} 条旧建议 · <a href="/funds/suggestions?days={{ days }}{% if fund %}&fund={{ fund }}{% endif %}&old=1">显示</a>{% endif %}</p>{% endif %}
+</section>
+{% if not by_day %}<section class="card"><p class="muted">还没有操作建议（盘前计划生成后出现在这里）。</p></section>{% endif %}
+{% for day, rows in by_day.items() %}
+<section class="card">
+  <div class="card-head"><h2>{{ day }}</h2><span class="muted small">{{ rows | length }} 条</span></div>
+  <div class="tblwrap"><table class="tbl">{{ suggestion_head() }}<tbody>
+    {% for s in rows %}{{ suggestion_row(s, names, csrf_field, TRADE_ACTIONS) }}{% endfor %}
+  </tbody></table></div>
+</section>
+{% endfor %}
+{% endblock %}

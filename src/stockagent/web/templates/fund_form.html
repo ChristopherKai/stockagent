@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}{{ '编辑' if fund else '新建' }}模拟基金{% endblock %}
+{% block content %}
+{% include "_fund_head.html" %}
+{% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+<section class="card">
+  <div class="card-head"><h2>{{ '编辑：' ~ fund.name if fund else '新建模拟基金' }}</h2>
+    {% if fund %}<a class="small" href="/funds/{{ fund.id }}">← 返回</a>{% endif %}</div>
+  <p class="muted small">保存时写入 funds.yaml（先备份、按运行时的方式完整校验，保留文件里的注释），再执行与 <code>stock fund sync</code> 相同的同步。
+    {% if locked %}这只基金已有成交或净值记录：市场、策略、初始资金不能再改（资金请用详情页的「追加 / 取回资金」；换策略请新建基金）。{% endif %}</p>
+  <form method="post" action="/funds/save" class="form">{{ csrf_field }}
+    <input type="hidden" name="original_id" value="{{ fund.id if fund else '' }}">
+    <input type="hidden" name="etag" value="{{ etag }}">
+    <div class="grid2">
+      <label>基金 id <input name="id" value="{{ v.id or '' }}" {{ 'readonly' if fund }} required pattern="[a-z][a-z0-9_]{1,40}" placeholder="如 hk_dividend"></label>
+      <label>名称 <input name="name" value="{{ v.name or '' }}" required></label>
+      <label>策略（决定市场与风格）
+        <select name="strategy" {{ 'disabled' if locked }}>{% for st in strategies %}
+          <option value="{{ st.key }}" {{ 'selected' if st.key == v.strategy }}>{{ st.label }}（{{ FUND_MARKET[st.market] }} · {{ '价值' if st.style == 'value' else '趋势' }}）</option>{% endfor %}
+        </select>{% if locked %}<input type="hidden" name="strategy" value="{{ v.strategy }}">{% endif %}</label>
+      <label>初始资金（本币；港股基金为港元，A 股基金为人民币）
+        <input name="initial_capital" value="{{ v.initial_capital | int }}" inputmode="numeric" {{ 'readonly' if locked }} required></label>
+      <label>标的上限 <input name="max_holdings" type="number" min="1" max="50" value="{{ v.max_holdings }}" required>
+        {% if fund and held %}<span class="muted small">现持有 {{ held }} 只；调低后不会立即卖出，下个调仓日卖出得分最低的</span>{% endif %}</label>
+      <label>单票上限（%） <input name="max_weight" value="{{ '%g' | format(v.max_weight * 100) }}" inputmode="decimal" required></label>
+      <label>行业上限（%） <input name="sector_cap" value="{{ '%g' | format(v.sector_cap * 100) }}" inputmode="decimal" required></label>
+      <label>最小仓位（%） <input name="min_weight" value="{{ '%g' | format(v.min_weight * 100) }}" inputmode="decimal" required></label>
+      <label>回撤熔断（%）：减半新仓 / 停开新仓 / 暂停
+        <span class="nowrap">{% for i in (1, 2, 3) %}<input name="dd{{ i }}" size="4" value="{{ '%g' | format(v.drawdown[i - 1] * 100) }}" inputmode="decimal" required> {% endfor %}</span></label>
+      <label>调仓节奏 <select name="rebalance">{% for k, lbl in [('weekly', '每周'), ('monthly', '每月'), ('quarterly', '每季度')] %}
+        <option value="{{ k }}" {{ 'selected' if k == v.rebalance }}>{{ lbl }}</option>{% endfor %}</select></label>
+      <label>基准指数（东方财富 secid） <input name="benchmark" value="{{ v.benchmark }}" placeholder="港股 100.HSI / A 股 1.000300"></label>
+      <label>状态 <select name="status"><option value="paper" {{ 'selected' if v.status == 'paper' }}>模拟运行</option>
+        <option value="paused" {{ 'selected' if v.status == 'paused' }}>暂停（只处理退出，不开新仓；记录保留）</option></select></label>
+    </div>
+    <label>策略参数（YAML，每行「名称: 值」；不写的参数用默认值）
+      <textarea name="params" rows="8" class="mono">{{ params_text }}</textarea></label>
+    <details><summary>各策略的参数与默认值</summary>
+      {% for st in strategies %}<p class="small"><b>{{ st.label }}（{{ st.key }}）</b></p><pre class="small">{{ st.defaults }}</pre>{% endfor %}
+    </details>
+    <p><button class="btn">保存</button> <span class="muted small">{{ FUND_DISCLAIMER }}</span></p>
+  </form>
+</section>
+{% endblock %}

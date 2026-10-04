@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% from "_fund_macros.html" import suggestion_row, suggestion_head with context %}
+{% block title %}{{ f.name }} · 模拟基金{% endblock %}
+{% block content %}
+{% include "_fund_head.html" %}
+{% if cfg_err %}<div class="flash err">{{ cfg_err }}</div>{% endif %}
+<section class="card">
+  <div class="card-head">
+    <h2>{{ f.name }} <span class="muted small">{{ FUND_MARKET[f.market] }} · {{ f.strategy }} · {{ f.currency }} · 自 {{ f.inception }} 起</span></h2>
+    <div class="nowrap">
+      {% if f.status != 'paper' %}<span class="badge warn">funds.yaml 设为暂停</span>{% endif %}
+      {% if f.breaker %}<span class="badge {{ 'bad' if f.breaker >= 3 else 'warn' }}">{{ BREAKER_LABEL[f.breaker] }}</span>{% else %}<span class="badge ok">正常</span>{% endif %}
+      <a class="btn tiny ghost" href="/funds/{{ f.id }}/edit">编辑</a>
+    </div>
+  </div>
+  {% if f.breaker >= 3 %}
+  <form method="post" action="/funds/{{ f.id }}/resume" class="inline" data-confirm="恢复「{{ f.name }}」？熔断清零，下一次盘前计划起恢复开新仓（回撤仍按历史最高净值计算）。">{{ csrf_field }}
+    <label class="check small"><input type="checkbox" name="confirm" value="yes" required> 我已复核暂停原因</label>
+    <button class="btn small danger">恢复基金</button></form>
+  {% endif %}
+  <div class="kpis">
+    <div class="kpi main"><div class="k">单位净值</div><div class="v">{{ s.nav | num(4) }}</div><div class="s">总资产 {{ s.equity | num(0) }}</div></div>
+    <div class="kpi"><div class="k">累计收益</div><div class="v {{ s.ret | dirclass }}">{{ s.ret | pct(2) }}</div>
+      <div class="s">基准 {{ s.bench_ret | pct(2) }}{% if s.excess is not none %} · 超额 {{ s.excess | pct(2) }}{% endif %}</div></div>
+    <div class="kpi"><div class="k">回撤</div><div class="v">{{ s.drawdown | pct(1, false) }}</div><div class="s">最大 {{ s.max_dd | pct(1, false) }}</div></div>
+    <div class="kpi"><div class="k">仓位</div><div class="v">{{ s.exposure | pct(0, false) }}</div><div class="s">{% if s.cap is not none %}上限 {{ s.cap | pct(0, false) }} · {% endif %}现金 {{ s.cash | num(0) }}</div></div>
+    <div class="kpi"><div class="k">已平仓</div><div class="v">{{ s.stats.n }}</div>
+      <div class="s">胜率 {{ s.stats.win_rate | pct(0, false) }} · 盈亏比 {{ s.stats.payoff | num(2) }} · 每笔期望 {{ s.stats.expectancy | num(0) }}</div></div>
+    <div class="kpi"><div class="k">市场状态</div><div class="v small">{{ REGIME_LABEL[s.regime.state] if s.regime else '—' }}</div><div class="s">{{ s.regime.date if s.regime else '' }}</div></div>
+  </div>
+  {{ s.chart }}
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>模拟持仓（{{ s.holdings | length }} / {{ f.max_holdings }}）</h2><span class="muted small">现价为库里最近的收盘价</span></div>
+  {% if s.holdings %}<div class="tblwrap"><table class="tbl">
+    <thead><tr><th>标的</th><th class="r">股数</th><th class="r">成本</th><th class="r">现价</th><th class="r">权重 / 目标</th><th class="r">浮盈亏</th>
+      <th class="r">止损</th><th>建仓</th><th>批次</th><th>理由</th></tr></thead>
+    <tbody>{% for h in s.holdings %}
+      <tr><td><b>{{ h.code }} {{ h.name }}</b><div class="muted small">{{ h.sector or '' }}</div></td>
+        <td class="r">{{ h.shares | num(0) }}</td><td class="r">{{ h.avg_cost | num(3) }}</td>
+        <td class="r">{{ h.close | num(3) }}<div class="muted small">{{ h.close_date or '' }}</div></td>
+        <td class="r">{{ h.weight | pct(1, false) }}<div class="muted small">{{ h.target_weight | pct(1, false) }}</div></td>
+        <td class="r {{ h.pnl | dirclass }}">{{ h.pnl | pct(1) }}<div class="small">{{ h.pnl_amt | num(0) }}</div></td>
+        <td class="r">{{ h.stop | num(2) }}</td><td class="small">{{ h.opened_on }}</td><td>{{ h.tranches }}</td>
+        <td class="small clip">{{ h.thesis or '' }}{% for k, v in (h.flags or {}).items() %}<span class="tag">{{ {'review': '已提示复核', 'half_off': '已减半', 'lot_unknown': '每手股数未知', 'period': '报告期'}.get(k, k) }}{% if k == 'period' %} {{ v }}{% endif %}</span> {% endfor %}</td></tr>
+    {% endfor %}</tbody></table></div>{% else %}<p class="muted">没有持仓。</p>{% endif %}
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>最近一次计划{% if s.last_plan %}（{{ s.last_plan }}）{% endif %}</h2><a class="small" href="/funds/suggestions?fund={{ f.id }}">全部建议 →</a></div>
+  {% if pending %}<div class="tblwrap"><table class="tbl">{{ suggestion_head(False) }}<tbody>
+    {% for x in pending %}{{ suggestion_row(x, {}, csrf_field, TRADE_ACTIONS, False) }}{% endfor %}</tbody></table></div>
+  {% else %}<p class="muted">还没有计划。</p>{% endif %}
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>最近一次打分{% if snap %}（{{ snap[0].date }}）{% endif %}</h2><span class="muted small">策略给出的候选，风控、模型否决之前</span></div>
+  {% if snap %}<div class="tblwrap"><table class="tbl">
+    <thead><tr><th>#</th><th>标的</th><th class="r">分</th><th class="r">目标权重</th><th>理由</th><th>模型否决检查</th></tr></thead>
+    <tbody>{% for r in snap %}
+      <tr><td>{{ r.rank }}</td><td><b>{{ r.code }} {{ r.name }}</b></td><td class="r">{{ r.score | num(1) }}</td><td class="r">{{ r.target_weight | pct(1, false) }}</td>
+        <td class="small clip">{{ r.reason }}</td>
+        <td class="small">{% if r.veto %}<span class="badge {{ 'bad' if r.veto.verdict == 'veto' else 'warn' if r.veto.verdict == 'flag' else 'ok' }}">{{ {'veto': '否决', 'pass': '放行', 'flag': '标记'}.get(r.veto.verdict, r.veto.verdict) }}</span> {{ r.veto.reason }}{% else %}<span class="muted">未检查</span>{% endif %}</td></tr>
+    {% endfor %}</tbody></table></div>{% else %}<p class="muted">还没有打分记录。</p>{% endif %}
+  {% if excluded %}<details><summary>风险排除（股票池命中 {{ excluded | length }} 只）</summary>
+    <ul class="small">{% for x in excluded[:30] %}<li>{{ x.code }} {{ x.name }}：{{ x.reason }}</li>{% endfor %}</ul></details>{% endif %}
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>模拟成交</h2></div>
+  {% if trades %}<div class="tblwrap"><table class="tbl">
+    <thead><tr><th>日期</th><th>标的</th><th>方向</th><th class="r">股数</th><th class="r">价格</th><th class="r">金额</th><th class="r">费用</th><th class="r">已实现盈亏</th><th>理由</th></tr></thead>
+    <tbody>{% for t in trades %}<tr><td>{{ t.date }}</td><td>{{ t.code }} {{ t.name }}</td><td>{{ '买' if t.side == 'buy' else '卖' }}</td>
+      <td class="r">{{ t.shares | num(0) }}</td><td class="r">{{ t.price | num(3) }}</td><td class="r">{{ t.amount | num(0) }}</td><td class="r">{{ t.fees | num(2) }}</td>
+      <td class="r {{ t.realized | dirclass }}">{{ t.realized | num(0) }}</td><td class="small clip">{{ t.reason or '' }}</td></tr>{% endfor %}</tbody></table></div>
+  {% else %}<p class="muted">还没有模拟成交。</p>{% endif %}
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>每日净值</h2></div>
+  {% if navs %}<div class="tblwrap"><table class="tbl">
+    <thead><tr><th>日期</th><th class="r">单位净值</th><th class="r">基准</th><th class="r">回撤</th><th class="r">仓位</th><th class="r">现金</th><th class="r">持仓</th><th>熔断</th></tr></thead>
+    <tbody>{% for n in navs %}<tr><td>{{ n.date }}</td><td class="r">{{ n.nav | num(4) }}</td><td class="r">{{ n.benchmark_nav | num(4) }}</td>
+      <td class="r">{{ n.drawdown | pct(1, false) }}</td><td class="r">{{ n.exposure | pct(0, false) }}</td><td class="r">{{ n.cash | num(0) }}</td>
+      <td class="r">{{ n.positions }}</td><td class="small">{{ BREAKER_LABEL[n.breaker] if n.breaker else '' }}</td></tr>{% endfor %}</tbody></table></div>
+  {% else %}<p class="muted">尚未结算（每个交易日 17:30 盘后结算后记一行）。</p>{% endif %}
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>市场状态（{{ FUND_MARKET[f.market] }}）</h2></div>
+  {% if regimes %}<div class="tblwrap"><table class="tbl">
+    <thead><tr><th>日期</th><th>状态</th><th class="r">指数</th><th class="r">长期均线</th><th class="r">宽度</th><th class="r">波动率分位</th><th>转弱信号</th></tr></thead>
+    <tbody>{% for r in regimes %}{% set sig = r.signals or {} %}<tr><td>{{ r.date }}</td><td>{{ REGIME_LABEL.get(r.state, r.state) }}</td>
+      <td class="r">{{ r.index_close | num(2) }}</td><td class="r">{{ r.index_ma | num(2) }}</td><td class="r">{{ r.breadth | pct(0, false) }}</td>
+      <td class="r">{{ r.vol_pct | pct(0, false) }}</td><td class="small">{{ '；'.join(sig.get('weak', [])) }}</td></tr>{% endfor %}</tbody></table></div>
+  {% else %}<p class="muted">还没有市场状态记录。</p>{% endif %}
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>资金进出</h2><span class="muted small">总份额 {{ units | num(0) }}</span></div>
+  <p class="muted small">追加 / 取回资金按当时的单位净值（库里最近收盘价估算）申购或赎回份额，单位净值与收益率不受影响；
+    取回不能超过现金（模拟基金不会为取回资金自动卖出）。</p>
+  <form method="post" action="/funds/{{ f.id }}/flow" class="inline">{{ csrf_field }}
+    <select name="direction"><option value="in">追加</option><option value="out">取回</option></select>
+    <input name="amount" size="12" inputmode="decimal" placeholder="金额（{{ f.currency }}）" required>
+    <input name="note" size="20" placeholder="备注（可选）">
+    <button class="btn small">记录</button></form>
+  {% if flows %}<div class="tblwrap"><table class="tbl">
+    <thead><tr><th>日期</th><th class="r">金额</th><th class="r">单位净值</th><th class="r">份额变动</th><th>备注</th></tr></thead>
+    <tbody>{% for x in flows %}<tr><td>{{ x.date }}</td><td class="r {{ x.amount | dirclass }}">{{ x.amount | num(0) }}</td>
+      <td class="r">{{ x.nav | num(4) }}</td><td class="r">{{ x.units | num(0) }}</td><td class="small">{{ x.note or '' }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>参数（funds.yaml，只读）</h2><a class="btn tiny ghost" href="/funds/{{ f.id }}/edit">编辑</a></div>
+  <p class="small">标的上限 {{ f.max_holdings }} · 单票上限 {{ f.max_weight | pct(0, false) }} · 行业上限 {{ f.sector_cap | pct(0, false) }} · 最小仓位 {{ f.min_weight | pct(0, false) }}
+    · 回撤熔断 {{ f.dd1 | pct(0, false) }} / {{ f.dd2 | pct(0, false) }} / {{ f.dd3 | pct(0, false) }} · 调仓 {{ {'weekly': '每周', 'monthly': '每月', 'quarterly': '每季度'}.get(f.rebalance, f.rebalance) }}
+    · 基准 {{ f.benchmark }} · 初始资金 {{ f.initial_capital | num(0) }} {{ f.currency }}</p>
+  <details><summary>策略参数</summary><pre class="small">{{ params_json }}</pre></details>
+  {% if cfg %}<details><summary>共用风控与交易成本</summary><pre class="small">{{ cfg.risk.model_dump_json(indent=2) }}
+{{ cfg.costs.model_dump_json(indent=2) }}</pre></details>{% endif %}
+  <p class="muted small">也可以直接改 funds.yaml 后运行 <code>stock fund sync</code>（已建账基金的初始资金不能改）。</p>
+  {% if not history %}
+  <form method="post" action="/funds/{{ f.id }}/delete" class="inline" data-confirm="删除基金「{{ f.name }}」？会从 funds.yaml 移除（先备份）并删除它的计划与打分记录。">{{ csrf_field }}
+    <input type="hidden" name="etag" value="{{ etag }}">
+    <label class="check small"><input type="checkbox" name="confirm" value="yes" required> 确认删除（这只基金还没有成交与净值记录）</label>
+    <button class="btn small danger">删除基金</button></form>
+  {% else %}<p class="muted small">已有成交或净值记录的基金不能删除，只能在「编辑」里改为暂停（记录保留）。</p>{% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}模拟基金 · 实际持仓{% endblock %}
+{% block content %}
+{% include "_fund_head.html" %}
+<section class="card"><p class="muted small">「实际持仓」只由你在「操作建议」页点的「已执行」推算（平均成本法），与模拟持仓并排对照；
+  没有回执的建议不计入。股数差 = 实际 − 模拟。</p></section>
+{% for x in funds %}{% set f = x.fund %}
+<section class="card">
+  <div class="card-head"><h2><a href="/funds/{{ f.id }}">{{ f.name }}</a></h2><span class="muted small">回执 {{ x.n_actions }} 条</span></div>
+  {% if x.rows %}
+  <div class="tblwrap"><table class="tbl">
+    <thead><tr><th>标的</th><th class="r">模拟股数</th><th class="r">模拟成本</th><th class="r">实际股数</th><th class="r">实际成本</th>
+      <th class="r">股数差</th><th class="r">现价</th><th class="r">实际盈亏</th></tr></thead>
+    <tbody>{% for r in x.rows %}
+      <tr><td><b>{{ r.code }} {{ r.name }}</b></td>
+        <td class="r">{{ r.model.shares | num(0) if r.model else '—' }}</td><td class="r">{{ r.model.avg_cost | num(3) if r.model else '—' }}</td>
+        <td class="r">{{ r.actual.shares | num(0) if r.actual else '—' }}{{ '（含推算）' if r.actual and r.actual.estimated }}</td>
+        <td class="r">{{ r.actual.avg_cost | num(3) if r.actual and r.actual.shares else '—' }}</td>
+        <td class="r {{ 'down' if r.diff < 0 else 'up' if r.diff > 0 }}">{{ r.diff | num(0) }}</td>
+        <td class="r">{{ r.close | num(3) }}</td>
+        <td class="r {{ r.actual_pnl | dirclass }}">{{ r.actual_pnl | num(0) }}</td></tr>
+    {% endfor %}</tbody></table></div>
+  {% else %}<p class="muted">没有模拟持仓，也没有已执行的回执。</p>{% endif %}
+</section>
+{% endfor %}
+{% if not funds %}<section class="card"><p class="muted">还没有基金。</p></section>{% endif %}
+{% endblock %}

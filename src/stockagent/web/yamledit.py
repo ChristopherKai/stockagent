@@ -201,6 +201,83 @@ def delete_company(path: Path, company_id: str, etag: str | None, backup_dir: Pa
     write(path, text, etag, backup_dir)
 
 
+# ---------------------------------------------------------------- funds.yaml（模拟基金）
+
+FUND_KEYS = ("id", "name", "market", "strategy", "style", "currency", "initial_capital", "max_holdings", "max_weight", "sector_cap",
+             "min_weight", "drawdown", "rebalance", "benchmark", "status", "params")
+
+
+def validate_funds(text: str):
+    from ..fund.config import FundsFile  # 只有基金页面用到
+
+    try:
+        return FundsFile.model_validate(yaml.safe_load(text) or {})
+    except (yaml.YAMLError, ValueError) as e:
+        raise EditError(f"funds.yaml 校验失败：{e}") from e
+
+
+def _num(v):
+    return int(v) if isinstance(v, float) and v.is_integer() else v
+
+
+def fund_entry(f: dict, existing: CommentedMap | None = None) -> CommentedMap:
+    """表单数据 → funds.yaml 的基金条目；已有条目按键原地更新（保留注释），策略参数逐项更新（删掉的参数恢复默认值）。"""
+    m = existing if existing is not None else CommentedMap()
+    values = {k: f[k] for k in FUND_KEYS if k in f and k != "params"}
+    values["benchmark"] = DoubleQuotedScalarString(f["benchmark"])
+    values["drawdown"] = _flow_seq([_num(x) for x in f["drawdown"]])
+    values["initial_capital"] = _num(f["initial_capital"])
+    if existing is None:
+        for k, v in values.items():
+            m[k] = v
+        m["params"] = CommentedMap({k: _num(v) for k, v in (f.get("params") or {}).items()})
+        return m
+    update_map(m, values)
+    params = m.get("params")
+    new = {k: _num(v) for k, v in (f.get("params") or {}).items()}
+    if not isinstance(params, CommentedMap):
+        m["params"] = CommentedMap(new)
+    else:
+        for k in [k for k in params if k not in new]:
+            del params[k]
+        update_map(params, new)
+    return m
+
+
+def upsert_fund(path: Path, fund: dict, etag: str | None, backup_dir: Path, is_new: bool):
+    """写入一只基金（新建或修改）；写入前按运行时的方式重读并完整校验。返回校验后的 FundsFile。"""
+    data, _ = load(path) if path.exists() else (CommentedMap(), None)
+    seq = data.get("funds")
+    if seq is None:
+        seq = data["funds"] = CommentedSeq()
+    idx = next((i for i, x in enumerate(seq) if x.get("id") == fund["id"]), None)
+    if is_new and idx is not None:
+        raise EditError(f"基金 id「{fund['id']}」已存在")
+    if not is_new and idx is None:
+        raise EditError(f"funds.yaml 中没有「{fund['id']}」")
+    if idx is None:
+        seq.append(fund_entry(fund))
+    else:
+        fund_entry(fund, seq[idx])
+    text = dump(data)
+    cfg = validate_funds(text)
+    write(path, text, etag, backup_dir)
+    return cfg
+
+
+def delete_fund(path: Path, fund_id: str, etag: str | None, backup_dir: Path):
+    data, _ = load(path)
+    seq = data.get("funds") or []
+    idx = next((i for i, x in enumerate(seq) if x.get("id") == fund_id), None)
+    if idx is None:
+        raise EditError(f"funds.yaml 中没有「{fund_id}」")
+    del seq[idx]
+    text = dump(data)
+    cfg = validate_funds(text)
+    write(path, text, etag, backup_dir)
+    return cfg
+
+
 # ---------------------------------------------------------------- config.yaml
 
 def save_config(path: Path, data: CommentedMap, etag: str | None, backup_dir: Path) -> Settings:

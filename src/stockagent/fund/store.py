@@ -1,7 +1,9 @@
 """模拟基金的数据表（与核心表同库，首次使用时由本模块建表；核心模块不读写这些表）。
 
 fund 基金定义与账户状态 / market_regime 每日市场状态 / signal_snapshot 每次打分结果 / position 持仓 /
-suggestion 操作建议 / trade 模拟成交 / nav_daily 每日净值。
+suggestion 操作建议 / trade 模拟成交 / nav_daily 每日净值 / user_action 使用者对建议的回执（已执行 / 忽略）。
+
+user_action 只记使用者自己的操作，与模拟账本分开：模拟持仓、净值照旧按规则计算，「实际持仓」由回执推算，两者可以对照。
 """
 
 from __future__ import annotations
@@ -157,6 +159,36 @@ CREATE TABLE IF NOT EXISTS nav_daily (
     created_at      TEXT NOT NULL,
     PRIMARY KEY (fund_id, date)
 );
+
+CREATE TABLE IF NOT EXISTS user_action (
+    id            INTEGER PRIMARY KEY,
+    suggestion_id INTEGER NOT NULL UNIQUE,    -- 每条建议一条回执，改主意时覆盖
+    fund_id       TEXT NOT NULL,
+    secid         TEXT NOT NULL,
+    code          TEXT,
+    name          TEXT,
+    status        TEXT NOT NULL,              -- executed 已执行 | ignored 忽略
+    side          TEXT,                       -- buy | sell（已执行时）
+    shares        REAL,                       -- 实际成交股数（未填写时按建议数量）
+    price         REAL,                       -- 实际成交价（未填写时按参考价）
+    estimated     INTEGER NOT NULL DEFAULT 0, -- 价格或数量是推算的（使用者没有填写）
+    note          TEXT,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fua_fund ON user_action(fund_id, created_at);
+
+CREATE TABLE IF NOT EXISTS fund_flow (          -- 追加 / 取回资金：按当时的单位净值申购或赎回份额，净值不受影响
+    id          INTEGER PRIMARY KEY,
+    fund_id     TEXT NOT NULL,
+    date        TEXT NOT NULL,              -- 北京时间日期
+    amount      REAL NOT NULL,              -- 正数追加，负数取回（本币）
+    nav         REAL NOT NULL,              -- 当时的单位净值
+    units       REAL NOT NULL,              -- 变动的份额（amount ÷ nav）
+    note        TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ff_fund ON fund_flow(fund_id, id);
 """
 
 JSON_FIELDS = ("params_json", "signals_json", "entry_json", "scores_json", "flags_json", "trigger_json")
@@ -205,7 +237,8 @@ def def_row(d) -> dict:
 
 def sync(db: DB, defs: list, inception: str, dry_run: bool = False) -> list[str]:
     """把 funds.yaml 同步到 fund 表：新基金按初始资金建账；已有基金只更新定义，不动现金、持仓与熔断状态。
-    已建账基金的初始资金不能改（会让净值失真），要改须换一个基金 id。"""
+    已有成交、净值或资金进出的基金，初始资金不能改（会让净值失真；加减资金用「追加 / 取回资金」），其他定义照常更新；
+    还没有任何记录的基金可以改初始资金（现金同步重置）。"""
     ensure(db)
     msgs = []
     have = {f["id"]: f for f in funds(db)}
@@ -219,16 +252,22 @@ def sync(db: DB, defs: list, inception: str, dry_run: bool = False) -> list[str]
                          f"VALUES (?, {', '.join('?' * len(DEF_COLS))}, ?, ?, ?, ?, ?)",
                          (d.id, *[row[k] for k in DEF_COLS], _dump(row["params"]), d.initial_capital, inception, now(), now()))
             continue
+        reset_cash = False
         if abs(old["initial_capital"] - d.initial_capital) > 1e-6:
-            msgs.append(f"✗ {d.id}：已建账基金的初始资金不能修改（{old['initial_capital']:,.0f} → {d.initial_capital:,.0f}），"
-                        "要换资金规模请新建一个基金 id")
-            continue
+            if has_history(db, d.id):
+                msgs.append(f"✗ {d.id}：已有成交或净值记录，初始资金不能修改（{old['initial_capital']:,.0f} → {d.initial_capital:,.0f}），"
+                            "加减资金请用「追加 / 取回资金」；其他修改照常同步")
+                row["initial_capital"] = old["initial_capital"]
+            else:
+                reset_cash = True
         changed = [k for k in DEF_COLS if old[k] != row[k]] + (["params"] if old["params"] != row["params"] else [])
         if changed:
             msgs.append(f"更新 {d.id}：{'、'.join(changed)}")
             if not dry_run:
                 db._exec(f"UPDATE fund SET {', '.join(f'{k}=?' for k in DEF_COLS)}, params_json=?, updated_at=? WHERE id=?",
                          (*[row[k] for k in DEF_COLS], _dump(row["params"]), now(), d.id))
+                if reset_cash:
+                    db._exec("UPDATE fund SET cash=? WHERE id=?", (row["initial_capital"], d.id))
     for fid in have:
         msgs.append(f"{fid} 已不在 funds.yaml 中：保留账户与历史，不再生成建议（如需删除请手动处理）")
     return msgs or ["基金定义没有变化"]
@@ -368,3 +407,105 @@ def last_nav(db: DB, fund_id: str, before: str | None = None) -> dict | None:
     if before:
         return db._one("SELECT * FROM nav_daily WHERE fund_id=? AND date<? ORDER BY date DESC LIMIT 1", (fund_id, before))
     return db._one("SELECT * FROM nav_daily WHERE fund_id=? ORDER BY date DESC LIMIT 1", (fund_id,))
+
+
+def resume(db: DB, fund_id: str) -> dict | None:
+    """恢复因回撤三档熔断而暂停的基金：熔断清零（回撤仍按历史最高净值计算）。命令行与 WebUI 共用。"""
+    f = fund(db, fund_id)
+    if f is not None:
+        set_fund(db, fund_id, breaker=0, halted_at=None)
+    return f
+
+
+# ---------------------------------------------------------------- 使用者回执（不改动模拟账本）
+
+def suggestion(db: DB, suggestion_id: int) -> dict | None:
+    ensure(db)
+    return _decode(db._one("SELECT * FROM suggestion WHERE id=?", (suggestion_id,)))
+
+
+def record_action(db: DB, s: dict, status: str, shares: float | None = None, price: float | None = None,
+                  estimated: bool = False, note: str | None = None) -> None:
+    ensure(db)
+    side = None if status != "executed" else ("buy" if s["action"] in ("buy", "add") else "sell")
+    db._exec("INSERT INTO user_action (suggestion_id, fund_id, secid, code, name, status, side, shares, price, estimated, note, "
+             "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+             "ON CONFLICT(suggestion_id) DO UPDATE SET status=excluded.status, side=excluded.side, shares=excluded.shares, "
+             "price=excluded.price, estimated=excluded.estimated, note=excluded.note, updated_at=excluded.updated_at",
+             (s["id"], s["fund_id"], s["secid"], s.get("code"), s.get("name"), status, side, shares if status == "executed" else None,
+              price if status == "executed" else None, int(estimated), note, now(), now()))
+
+
+def clear_action(db: DB, suggestion_id: int) -> bool:
+    ensure(db)
+    return db._exec("DELETE FROM user_action WHERE suggestion_id=?", (suggestion_id,)).rowcount > 0
+
+
+def actions(db: DB, fund_id: str | None = None) -> list[dict]:
+    ensure(db)
+    if fund_id is None:
+        return db._all("SELECT * FROM user_action ORDER BY created_at, id")
+    return db._all("SELECT * FROM user_action WHERE fund_id=? ORDER BY created_at, id", (fund_id,))
+
+
+def actual_holdings(db: DB, fund_id: str) -> dict[str, dict]:
+    """由「已执行」回执推算的实际持仓（平均成本法）：secid → {code, name, shares, avg_cost, realized}。"""
+    out: dict[str, dict] = {}
+    for a in actions(db, fund_id):
+        if a["status"] != "executed" or not a["shares"] or a["price"] is None:
+            continue
+        h = out.setdefault(a["secid"], {"secid": a["secid"], "code": a["code"], "name": a["name"], "shares": 0.0, "avg_cost": 0.0,
+                                        "realized": 0.0, "estimated": False})
+        h["estimated"] = h["estimated"] or bool(a["estimated"])
+        if a["side"] == "buy":
+            total = h["shares"] + a["shares"]
+            h["avg_cost"] = (h["shares"] * h["avg_cost"] + a["shares"] * a["price"]) / total
+            h["shares"] = total
+        else:
+            n = min(a["shares"], h["shares"])
+            h["realized"] += n * (a["price"] - h["avg_cost"])
+            h["shares"] -= n
+    return {k: v for k, v in out.items() if v["shares"] > 0 or v["realized"]}
+
+
+# ---------------------------------------------------------------- 资金进出（份额制）
+
+def flows(db: DB, fund_id: str) -> list[dict]:
+    ensure(db)
+    return db._all("SELECT * FROM fund_flow WHERE fund_id=? ORDER BY id", (fund_id,))
+
+
+def units(db: DB, f: dict) -> float:
+    """总份额：建账时按单位净值 1 申购 initial_capital 份，之后每笔资金进出按当时净值增减份额。"""
+    return f["initial_capital"] + sum(x["units"] for x in flows(db, f["id"]))
+
+
+def add_flow(db: DB, f: dict, amount: float, nav: float, day: str, note: str | None = None) -> dict:
+    """追加（amount > 0）或取回（< 0）资金：现金同步增减；份额 = 金额 ÷ 当时的单位净值，所以单位净值与收益率不受影响。"""
+    ensure(db)
+    if nav <= 0:
+        raise ValueError("单位净值无效，无法折算份额")
+    if amount < 0 and -amount > f["cash"] + 1e-6:
+        raise ValueError(f"取回金额超过现金 {f['cash']:,.0f}（需要先减仓，模拟基金不会为取回资金自动卖出）")
+    row = {"fund_id": f["id"], "date": day, "amount": amount, "nav": nav, "units": amount / nav, "note": note}
+    with db.transaction() as c:
+        c.execute("INSERT INTO fund_flow (fund_id, date, amount, nav, units, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                  (f["id"], day, amount, nav, row["units"], note, now()))
+        c.execute("UPDATE fund SET cash=cash+?, updated_at=? WHERE id=?", (amount, now(), f["id"]))
+    return row
+
+
+def has_history(db: DB, fund_id: str) -> bool:
+    """有过模拟成交、净值或资金进出的基金不能删除（只能暂停），以免丢掉记录。"""
+    ensure(db)
+    return any(db._one(f"SELECT 1 AS x FROM {t} WHERE fund_id=? LIMIT 1", (fund_id,)) for t in ("trade", "nav_daily", "fund_flow", "position"))
+
+
+def delete_fund(db: DB, fund_id: str) -> None:
+    """删除没有历史的基金（以及它的计划、打分与回执）。"""
+    if has_history(db, fund_id):
+        raise ValueError("这只基金已有成交或净值记录，只能暂停，不能删除")
+    with db.transaction() as c:
+        for t in ("suggestion", "signal_snapshot", "user_action"):
+            c.execute(f"DELETE FROM {t} WHERE fund_id=?", (fund_id,))
+        c.execute("DELETE FROM fund WHERE id=?", (fund_id,))

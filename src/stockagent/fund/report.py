@@ -50,6 +50,8 @@ def suggestion_lines(s: dict, equity: float) -> list[str]:
         risk_pct = s["shares"] * (level - s["stop"]) / equity if level and equity else None
         lines.append(f"  止损：{_px(s['stop'])}" + (f"（{s['stop'] / level - 1:+.1%}，风险占净值 {_w(risk_pct)}）" if level else ""))
     lines.append(f"  理由：{s['reason']}")
+    if t.get("flag"):
+        lines.append(f"  ⚑ {t['flag']}")
     if not t.get("lot_known", True):
         lines.append("  注意：每手股数未知，暂按 100 股取整，下单前核对")
     lines.append("  失效：今日未" + ("触发" if s["kind"] == "conditional" else "成交") + "则作废")

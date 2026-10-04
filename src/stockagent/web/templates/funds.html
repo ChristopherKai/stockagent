@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}模拟基金{% endblock %}
+{% block content %}
+{% include "_fund_head.html" %}
+{% if cfg_err %}<div class="flash err">{{ cfg_err }}</div>{% endif %}
+<section class="card">
+  <div class="card-head"><h2>合计（折人民币）</h2><a class="btn small" href="/funds/new">新建基金</a></div>
+  <div class="kpis">
+    <div class="kpi main"><div class="k">总资产</div><div class="v">{{ total | num(0) }}</div>
+      <div class="s">港元按 {{ fx | num(4) }} 折算{{ '' if fx_ok else '（没有汇率行情，用兜底值）' }}</div></div>
+    <div class="kpi"><div class="k">累计收益</div><div class="v {{ total_ret | dirclass }}">{{ total_ret | pct(2) }}</div></div>
+    <div class="kpi"><div class="k">基金数</div><div class="v">{{ summaries | length }}</div></div>
+  </div>
+</section>
+{% if not summaries %}
+<section class="card"><p class="muted">还没有基金：在命令行运行 <code>stock fund sync</code>（基金定义写在 funds.yaml）。</p></section>
+{% endif %}
+{% for s in summaries %}{% set f = s.fund %}
+<section class="card">
+  <div class="card-head">
+    <h2><a href="/funds/{{ f.id }}">{{ f.name }}</a> <span class="muted small">{{ FUND_MARKET[f.market] }} · {{ f.strategy }} · {{ f.currency }}</span></h2>
+    <div class="nowrap">
+      {% if f.status != 'paper' %}<span class="badge warn">funds.yaml 设为暂停</span>{% endif %}
+      {% if f.breaker %}<span class="badge {{ 'bad' if f.breaker >= 3 else 'warn' }}">{{ BREAKER_LABEL[f.breaker] }}</span>{% else %}<span class="badge ok">正常</span>{% endif %}
+      {% if f.id not in configured %}<span class="badge">不在 funds.yaml 中</span>{% endif %}
+    </div>
+  </div>
+  <div class="kpis">
+    <div class="kpi main"><div class="k">单位净值</div><div class="v">{{ s.nav | num(4) }}</div>
+      <div class="s">{% if s.last %}结算至 {{ s.last.date }}{% else %}尚未结算{% endif %}（按库里最近收盘价估）</div></div>
+    <div class="kpi"><div class="k">累计收益</div><div class="v {{ s.ret | dirclass }}">{{ s.ret | pct(2) }}</div>
+      <div class="s">基准 {{ s.bench_ret | pct(2) }}{% if s.excess is not none %} · 超额 <span class="{{ s.excess | dirclass }}">{{ s.excess | pct(2) }}</span>{% endif %}</div></div>
+    <div class="kpi"><div class="k">回撤</div><div class="v">{{ s.drawdown | pct(1, false) }}</div><div class="s">最大回撤 {{ s.max_dd | pct(1, false) }}</div></div>
+    <div class="kpi"><div class="k">仓位</div><div class="v">{{ s.exposure | pct(0, false) }}</div>
+      <div class="s">{% if s.cap is not none %}上限 {{ s.cap | pct(0, false) }} · {% endif %}现金 {{ s.cash | num(0) }}</div></div>
+    <div class="kpi"><div class="k">持仓</div><div class="v">{{ s.holdings | length }} / {{ f.max_holdings }}</div>
+      <div class="s">最近计划 {{ s.last_plan or '—' }}</div></div>
+    <div class="kpi"><div class="k">市场状态</div><div class="v small">{% if s.regime %}{{ REGIME_LABEL[s.regime.state] }}{% else %}—{% endif %}</div>
+      <div class="s">{% if s.regime %}{{ s.regime.date }}{% if s.regime.breadth is not none %} · 宽度 {{ s.regime.breadth | pct(0, false) }}{% endif %}{% endif %}</div></div>
+  </div>
+  {{ s.chart }}
+</section>
+{% endfor %}
+{% endblock %}

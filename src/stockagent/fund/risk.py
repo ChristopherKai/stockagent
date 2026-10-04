@@ -76,6 +76,17 @@ def exposure_cap(fund: dict, risk: RiskConfig, regime_state: str, breaker: int) 
     return cap
 
 
+def cap_reason(fund: dict, risk: RiskConfig, regime_state: str, breaker: int) -> str:
+    """总仓位上限的来由：市场状态与回撤熔断各自的上限，标出取的是哪一个。"""
+    reg = risk.exposure[fund["style"]][regime_state]
+    parts = [f"市场状态{REGIME_LABEL[regime_state]}上限 {reg:.0%}"]
+    if breaker >= 2:
+        b = risk.halt_exposure if breaker >= 3 else risk.breaker_cap
+        parts.append(f"{BREAKER_LABEL[breaker].split('：')[0]}上限 {b:.0%}")
+        parts[0 if reg <= b else 1] += "（取较低者）"
+    return "；".join(parts)
+
+
 def new_entry_quota(fund: dict, risk: RiskConfig, regime_state: str, breaker: int, status: str) -> int | None:
     if status != "paper" or breaker >= 2:
         return 0
@@ -162,14 +173,22 @@ def build(book: Book, risk: RiskConfig, lim: Limits, exits: list[tuple[dict, Exi
             n = min(n, int(p["shares"]))
             w = v / E
             sells.append(sug(p, "sell" if n >= p["shares"] else "trim", "open", n, w, w * (1 - n / p["shares"]),
-                             f"总仓位 {exposure:.0%} 超过上限 {cap:.0%}（{BREAKER_LABEL[lim.breaker] if lim.breaker else '市场状态转弱'}），按比例降仓",
-                             3))
+                             f"总仓位 {exposure:.0%} 超过上限 {cap:.0%}（{cap_reason(f, risk, regime_state, lim.breaker)}），"
+                             f"各持仓按比例降到上限", 3))
             p["shares"] -= n
             if p["shares"] <= 0:
                 del remaining[sid]
         exposure = sum(value_of(s) for s in remaining) / E
 
-    # 3. 调仓日：单票超过上限 drift 以上的调回上限
+    # 3. 调仓日：持仓数超过标的上限（上限被调低）的，卖出得分最低的；单票超过上限 drift 以上的调回上限
+    if lim.rebalance_day and len(remaining) > f["max_holdings"]:
+        excess = sorted(remaining.items(), key=lambda kv: kv[1].get("score") or 0.0)[: len(remaining) - f["max_holdings"]]
+        for sid, p in excess:
+            w = value_of(sid) / E
+            sells.append(sug(p, "sell", "open", int(p["shares"]), w, 0.0,
+                             f"持仓 {len(book.positions)} 只超过标的上限 {f['max_holdings']}，调仓日卖出得分最低的", 5))
+            del remaining[sid]
+        exposure = sum(value_of(s) for s in remaining) / E
     if lim.rebalance_day:
         for sid, p in list(remaining.items()):
             w = value_of(sid) / E
@@ -267,8 +286,10 @@ def build(book: Book, risk: RiskConfig, lim: Limits, exits: list[tuple[dict, Exi
         if replace:
             p = remaining.pop(replace)
             v = p["shares"] * book.prices.get(replace, p["avg_cost"])
+            gap = (t.score / w_score - 1) if w_score > 0 else None
             sells.append(sug(p, "sell", "open", int(p["shares"]), v / E, 0.0,
-                             f"被更好的候选替换：{t.name}（{t.score:.0f} 分，比持仓最弱的 {w_score:.0f} 分高 {risk.replace_margin:.0%} 以上）", 5))
+                             f"被更好的候选替换：{t.name}（{t.score:.0f} 分）比持仓里最弱的这只（{w_score:.0f} 分）高 {t.score - w_score:.0f} 分"
+                             + (f"（+{gap:.0%}）" if gap is not None else "") + f"，超过 {risk.replace_margin:.0%} 的替换门槛", 5))
             weakest.pop(0)
             cash_left += v * (1 - 0.002)
             exposure -= v / E
