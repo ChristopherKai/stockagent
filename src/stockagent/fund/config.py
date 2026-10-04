@@ -158,7 +158,7 @@ class VetoConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task: str = "screen"                # 用哪个任务的模型路由（与选股器快筛相同）
-    max_tokens: int = 2000
+    max_tokens: int = 16000             # 推理模型会先想再答，给小了会被截断重试
 
 
 class Costs(BaseModel):
