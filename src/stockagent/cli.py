@@ -605,7 +605,7 @@ def cmd_fund(args) -> None:
             if dry:
                 print(f"（--dry-run）将把 {f['name']} 的熔断从「{f['breaker']}」恢复为 0")
                 return
-            store.set_fund(app.db, f["id"], breaker=0, halted_at=None)
+            store.resume(app.db, f["id"])
             print(f"{f['name']} 已恢复：熔断清零，下一次盘前计划起恢复开新仓（回撤仍按历史最高净值计算）")
 
 

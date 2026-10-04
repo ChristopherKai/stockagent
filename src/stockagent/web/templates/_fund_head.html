@@ -1,0 +1,8 @@
+{# 模拟基金页面的子导航与标签：每个页面都标注「模拟组合信号，非投资建议」 #}
+{% set path = request.url.path %}
+<div class="flash warn"><b>模拟基金</b> · {{ FUND_DISCLAIMER }}</div>
+<p class="small">
+  <a href="/funds" class="{{ 'on' if path == '/funds' }}">基金总览</a> ·
+  <a href="/funds/suggestions" class="{{ 'on' if path.startswith('/funds/suggestions') }}">操作建议</a> ·
+  <a href="/funds/actual" class="{{ 'on' if path.startswith('/funds/actual') }}">实际持仓（按你的回执）</a>
+</p>

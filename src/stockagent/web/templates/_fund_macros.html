@@ -1,0 +1,42 @@
+{# 操作建议的一行：建议内容、模型账本状态、你的回执与按钮（回执不改动模拟账本） #}
+{% macro suggestion_row(s, names, csrf_field, TRADE_ACTIONS, show_fund=True) -%}
+{% set t = s.trigger or {} %}
+<tr>
+  {% if show_fund %}<td class="small"><a href="/funds/{{ s.fund_id }}">{{ names.get(s.fund_id, s.fund_id) }}</a></td>{% endif %}
+  <td><b>{{ s.code }} {{ s.name }}</b></td>
+  <td class="nowrap"><span class="badge {{ 'bad' if s.action in ('sell', 'trim', 'stop') else 'ok' if s.action in ('buy', 'add') else '' }}">{{ ACTION_LABEL.get(s.action, s.action) }}</span>
+    <div class="muted small">{{ KIND_LABEL.get(s.kind, s.kind) }}</div></td>
+  <td class="r nowrap">{% if s.shares %}{{ s.shares | num(0) }} 股{% endif %}
+    <div class="muted small">{{ s.cur_weight | pct(1, false) }} → {{ s.target_weight | pct(1, false) }}</div></td>
+  <td class="small">
+    {% if t.type == 'breakout' %}突破 {{ t.level | num(2) }} 且量比 ≥ {{ t.volume_ratio }}{% endif %}
+    {% if t.type == 'stop' %}跌破 {{ t.price | num(2) }}{% endif %}
+    {% if s.limit_price and s.action in ('buy', 'add') %}<div>限价 ≤ {{ s.limit_price | num(3) }}</div>{% endif %}
+    {% if s.stop and s.action in ('buy', 'add') %}<div>止损 {{ s.stop | num(2) }}</div>{% endif %}
+    {% if t.tranche %}<div class="muted">{{ t.tranche }}</div>{% endif %}
+  </td>
+  <td class="small clip">{{ s.reason }}{% if t.flag %}<div class="down">⚑ {{ t.flag }}</div>{% endif %}</td>
+  <td class="small nowrap"><span class="badge {{ 'ok' if s.status == 'filled' else 'warn' if s.status == 'pending' else '' }}">{{ STATUS_LABEL.get(s.status, s.status) }}</span>
+    {% if s.model_trade %}<div class="muted">模拟 {{ s.model_trade.shares | num(0) }} 股 @ {{ s.model_trade.price | num(3) }}</div>{% endif %}
+    {% if s.note and s.status != 'pending' %}<div class="muted">{{ s.note }}</div>{% endif %}</td>
+  <td class="small">
+    {% if s.action in TRADE_ACTIONS %}
+      {% if s.user %}
+        <span class="badge {{ 'ok' if s.user.status == 'executed' else '' }}">{{ USER_LABEL[s.user.status] }}</span>
+        {% if s.user.status == 'executed' %}<div>{{ s.user.shares | num(0) }} 股 @ {{ s.user.price | num(3) }}{{ '（推算）' if s.user.estimated }}</div>{% endif %}
+        <form method="post" action="/funds/suggestions/{{ s.id }}/clear" class="inline">{{ csrf_field }}<button class="btn tiny ghost">撤销</button></form>
+      {% else %}
+        <form method="post" action="/funds/suggestions/{{ s.id }}/execute" class="inline">{{ csrf_field }}
+          <input name="shares" size="7" inputmode="numeric" placeholder="{{ s.shares | num(0) }}" title="实际成交股数（不填按建议数量）">
+          <input name="price" size="7" inputmode="decimal" placeholder="{{ s.ref_price | num(3) if s.ref_price else '成交价' }}" title="实际成交价（不填按参考价）">
+          <button class="btn tiny">已执行</button></form>
+        <form method="post" action="/funds/suggestions/{{ s.id }}/ignore" class="inline">{{ csrf_field }}<button class="btn tiny ghost">忽略</button></form>
+      {% endif %}
+    {% endif %}
+  </td>
+</tr>
+{%- endmacro %}
+
+{% macro suggestion_head(show_fund=True) -%}
+<thead><tr>{% if show_fund %}<th>基金</th>{% endif %}<th>标的</th><th>动作</th><th class="r">数量 / 权重</th><th>条件</th><th>理由</th><th>模拟账本</th><th>你的回执</th></tr></thead>
+{%- endmacro %}

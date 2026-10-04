@@ -102,3 +102,55 @@ def timeline_svg(bars, revisions: list[dict], events: list[dict], currency: str 
     out.append(f'<text class="axis" x="{PAD_L}" y="{PAD_T - 4}">{escape(currency)}</text>')
     out.append("</svg>")
     return Markup("".join(out))
+
+
+def nav_svg(navs: list[dict], height: int = 220) -> Markup:
+    """模拟基金净值走势（服务端 SVG）：上半部分单位净值与基准（按建账日归一），下半部分从最高点的回撤。
+    navs：nav_daily 的行（date, nav, benchmark_nav, drawdown），按日期升序。"""
+    if len(navs) < 2:
+        return Markup('<p class="muted small">净值记录不足两天，暂不画图（每个交易日盘后结算后增加一天）。</p>')
+    w, h = W, height
+    top_h = h * 0.68
+    dates = [str(r["date"]) for r in navs]
+    nav = [float(r["nav"]) for r in navs]
+    bench = [float(r["benchmark_nav"]) if r.get("benchmark_nav") else None for r in navs]
+    dd = [float(r["drawdown"] or 0.0) for r in navs]
+    vals = nav + [b for b in bench if b is not None]
+    lo, hi = min(vals), max(vals)
+    span = (hi - lo) or 0.02
+    lo, hi = lo - span * 0.08, hi + span * 0.08
+    dmax = max(max(dd), 0.02)
+    n = len(navs)
+
+    def x(i: int) -> float:
+        return PAD_L + (w - PAD_L - PAD_R) * (i / (n - 1))
+
+    def y(v: float) -> float:
+        return PAD_T + (top_h - PAD_T) * (1 - (v - lo) / (hi - lo))
+
+    def yd(v: float) -> float:
+        return top_h + 14 + (h - PAD_B - top_h - 14) * (v / dmax)
+
+    out = [f'<svg class="chart" viewBox="0 0 {w} {h}" role="img" aria-label="单位净值与回撤">']
+    for k in range(4):
+        v = lo + (hi - lo) * k / 3
+        out.append(f'<line class="grid" x1="{PAD_L}" x2="{w - PAD_R}" y1="{y(v):.1f}" y2="{y(v):.1f}"/>'
+                   f'<text class="axis" x="{PAD_L - 6}" y="{y(v) + 4:.1f}" text-anchor="end">{v:.3f}</text>')
+    out.append(f'<text class="axis" x="{PAD_L - 6}" y="{yd(dmax) + 4:.1f}" text-anchor="end">-{dmax * 100:.0f}%</text>'
+               f'<line class="grid" x1="{PAD_L}" x2="{w - PAD_R}" y1="{yd(0):.1f}" y2="{yd(0):.1f}"/>')
+    last_month = None
+    for i, d in enumerate(dates):
+        if d[:7] != last_month:
+            if last_month is not None:
+                out.append(f'<text class="axis" x="{x(i):.1f}" y="{h - 8}" text-anchor="middle">{escape(d[2:7])}</text>')
+            last_month = d[:7]
+    bpts = [(x(i), y(b)) for i, b in enumerate(bench) if b is not None]
+    if len(bpts) >= 2:
+        out.append('<polyline class="target" points="' + " ".join(f"{a:.1f},{b:.1f}" for a, b in bpts) + '"><title>基准</title></polyline>')
+    out.append('<polyline class="close" points="' + " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(nav)) + '"><title>单位净值</title></polyline>')
+    area = [(x(0), yd(0))] + [(x(i), yd(v)) for i, v in enumerate(dd)] + [(x(n - 1), yd(0))]
+    out.append('<polygon class="dd" points="' + " ".join(f"{a:.1f},{b:.1f}" for a, b in area) + '"><title>回撤</title></polygon>')
+    out.append(f'<text class="tlabel" x="{w - PAD_R}" y="{y(nav[-1]) - 6:.1f}" text-anchor="end">{nav[-1]:.4f}</text>')
+    out.append(f'<text class="axis" x="{PAD_L}" y="{PAD_T - 4}">单位净值（实线）· 基准（虚线）· 下方为回撤</text>')
+    out.append("</svg>")
+    return Markup("".join(out))

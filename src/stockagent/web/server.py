@@ -135,9 +135,10 @@ def create_app(config_path: str | Path = "config.yaml", allowed_hosts: list[str]
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts or LOOPBACK_HOSTS)  # 最外层：先挡掉非本机 Host
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
-    from . import chat_views, screen_views, settings_views, views  # noqa: PLC0415 - 路由模块引用本模块的 page()
+    from . import chat_views, fund_views, screen_views, settings_views, views  # noqa: PLC0415 - 路由模块引用本模块的 page()
 
     app.include_router(views.router)
+    app.include_router(fund_views.router)
     app.include_router(chat_views.router)
     app.include_router(settings_views.router)
     app.include_router(screen_views.router)

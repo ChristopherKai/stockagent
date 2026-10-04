@@ -109,6 +109,7 @@ form.inline { display: inline; }
 .chart .close { fill: none; stroke: var(--fg); stroke-width: 1.4; }
 .chart .target { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 4; }
 .chart .band { fill: var(--accent-bg); stroke: none; }
+.chart .dd { fill: var(--bad-bg); stroke: var(--bad); stroke-width: 1; }
 .chart .ev { stroke: var(--card); stroke-width: 1; opacity: .9; cursor: pointer; }
 .chart .ev-pos, .lg.ev-pos, .tl-dot.ev-pos { fill: var(--up-c); background: var(--up-c); }
 .chart .ev-neg, .lg.ev-neg, .tl-dot.ev-neg { fill: var(--down-c); background: var(--down-c); }

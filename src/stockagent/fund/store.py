@@ -1,7 +1,9 @@
 """模拟基金的数据表（与核心表同库，首次使用时由本模块建表；核心模块不读写这些表）。
 
 fund 基金定义与账户状态 / market_regime 每日市场状态 / signal_snapshot 每次打分结果 / position 持仓 /
-suggestion 操作建议 / trade 模拟成交 / nav_daily 每日净值。
+suggestion 操作建议 / trade 模拟成交 / nav_daily 每日净值 / user_action 使用者对建议的回执（已执行 / 忽略）。
+
+user_action 只记使用者自己的操作，与模拟账本分开：模拟持仓、净值照旧按规则计算，「实际持仓」由回执推算，两者可以对照。
 """
 
 from __future__ import annotations
@@ -157,6 +159,24 @@ CREATE TABLE IF NOT EXISTS nav_daily (
     created_at      TEXT NOT NULL,
     PRIMARY KEY (fund_id, date)
 );
+
+CREATE TABLE IF NOT EXISTS user_action (
+    id            INTEGER PRIMARY KEY,
+    suggestion_id INTEGER NOT NULL UNIQUE,    -- 每条建议一条回执，改主意时覆盖
+    fund_id       TEXT NOT NULL,
+    secid         TEXT NOT NULL,
+    code          TEXT,
+    name          TEXT,
+    status        TEXT NOT NULL,              -- executed 已执行 | ignored 忽略
+    side          TEXT,                       -- buy | sell（已执行时）
+    shares        REAL,                       -- 实际成交股数（未填写时按建议数量）
+    price         REAL,                       -- 实际成交价（未填写时按参考价）
+    estimated     INTEGER NOT NULL DEFAULT 0, -- 价格或数量是推算的（使用者没有填写）
+    note          TEXT,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fua_fund ON user_action(fund_id, created_at);
 """
 
 JSON_FIELDS = ("params_json", "signals_json", "entry_json", "scores_json", "flags_json", "trigger_json")
@@ -368,3 +388,62 @@ def last_nav(db: DB, fund_id: str, before: str | None = None) -> dict | None:
     if before:
         return db._one("SELECT * FROM nav_daily WHERE fund_id=? AND date<? ORDER BY date DESC LIMIT 1", (fund_id, before))
     return db._one("SELECT * FROM nav_daily WHERE fund_id=? ORDER BY date DESC LIMIT 1", (fund_id,))
+
+
+def resume(db: DB, fund_id: str) -> dict | None:
+    """恢复因回撤三档熔断而暂停的基金：熔断清零（回撤仍按历史最高净值计算）。命令行与 WebUI 共用。"""
+    f = fund(db, fund_id)
+    if f is not None:
+        set_fund(db, fund_id, breaker=0, halted_at=None)
+    return f
+
+
+# ---------------------------------------------------------------- 使用者回执（不改动模拟账本）
+
+def suggestion(db: DB, suggestion_id: int) -> dict | None:
+    ensure(db)
+    return _decode(db._one("SELECT * FROM suggestion WHERE id=?", (suggestion_id,)))
+
+
+def record_action(db: DB, s: dict, status: str, shares: float | None = None, price: float | None = None,
+                  estimated: bool = False, note: str | None = None) -> None:
+    ensure(db)
+    side = None if status != "executed" else ("buy" if s["action"] in ("buy", "add") else "sell")
+    db._exec("INSERT INTO user_action (suggestion_id, fund_id, secid, code, name, status, side, shares, price, estimated, note, "
+             "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+             "ON CONFLICT(suggestion_id) DO UPDATE SET status=excluded.status, side=excluded.side, shares=excluded.shares, "
+             "price=excluded.price, estimated=excluded.estimated, note=excluded.note, updated_at=excluded.updated_at",
+             (s["id"], s["fund_id"], s["secid"], s.get("code"), s.get("name"), status, side, shares if status == "executed" else None,
+              price if status == "executed" else None, int(estimated), note, now(), now()))
+
+
+def clear_action(db: DB, suggestion_id: int) -> bool:
+    ensure(db)
+    return db._exec("DELETE FROM user_action WHERE suggestion_id=?", (suggestion_id,)).rowcount > 0
+
+
+def actions(db: DB, fund_id: str | None = None) -> list[dict]:
+    ensure(db)
+    if fund_id is None:
+        return db._all("SELECT * FROM user_action ORDER BY created_at, id")
+    return db._all("SELECT * FROM user_action WHERE fund_id=? ORDER BY created_at, id", (fund_id,))
+
+
+def actual_holdings(db: DB, fund_id: str) -> dict[str, dict]:
+    """由「已执行」回执推算的实际持仓（平均成本法）：secid → {code, name, shares, avg_cost, realized}。"""
+    out: dict[str, dict] = {}
+    for a in actions(db, fund_id):
+        if a["status"] != "executed" or not a["shares"] or a["price"] is None:
+            continue
+        h = out.setdefault(a["secid"], {"secid": a["secid"], "code": a["code"], "name": a["name"], "shares": 0.0, "avg_cost": 0.0,
+                                        "realized": 0.0, "estimated": False})
+        h["estimated"] = h["estimated"] or bool(a["estimated"])
+        if a["side"] == "buy":
+            total = h["shares"] + a["shares"]
+            h["avg_cost"] = (h["shares"] * h["avg_cost"] + a["shares"] * a["price"]) / total
+            h["shares"] = total
+        else:
+            n = min(a["shares"], h["shares"])
+            h["realized"] += n * (a["price"] - h["avg_cost"])
+            h["shares"] -= n
+    return {k: v for k, v in out.items() if v["shares"] > 0 or v["realized"]}
