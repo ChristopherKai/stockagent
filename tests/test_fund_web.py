@@ -128,3 +128,56 @@ def test_resume_needs_confirm_and_csrf(traded, project, monkeypatch, app):
     assert f["breaker"] == 0 and f["halted_at"] is None
     r = post(c, "/funds/a_trend/resume", {"confirm": "yes"})
     assert "err=" in r.headers["location"]                                                          # 没有熔断时不需要恢复
+
+
+FORM = {"id": "hk_div", "name": "港股高股息", "strategy": "hk_quality_value", "initial_capital": "500000", "max_holdings": "12",
+        "max_weight": "12", "sector_cap": "30", "min_weight": "3", "dd1": "5", "dd2": "10", "dd3": "15", "rebalance": "monthly",
+        "benchmark": "100.HSI", "status": "paper", "params": "min_roe: 10\ncheap_quantile: 0.3\n"}
+
+
+def test_create_edit_and_delete_fund_through_the_form(funded, project, monkeypatch, app):  # noqa: F811
+    path = project / "funds.yaml"
+    path.write_text("# 我的基金配置（注释要保留）\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
+    c = client_for(project, monkeypatch)
+    for url in ("/funds/new", "/funds/a_trend/edit"):
+        r = c.get(url)
+        assert r.status_code == 200 and LABEL in r.text, url
+    assert c.post("/funds/save", data={**FORM, "original_id": ""}, follow_redirects=False).status_code == 403   # 没有 CSRF
+    r = post(c, "/funds/save", {**FORM, "original_id": ""})
+    assert r.status_code == 303 and "/funds/hk_div" in r.headers["location"], r.text[:300]
+    text = path.read_text(encoding="utf-8")
+    assert "# 我的基金配置（注释要保留）" in text and "hk_div" in text and 'benchmark: "100.HSI"' in text
+    f = store.fund(app.db, "hk_div")
+    assert f["initial_capital"] == 500000 and f["max_weight"] == 0.12 and f["params"] == {"min_roe": 10, "cheap_quantile": 0.3}
+    assert any(b.name.startswith("funds.yaml.") for b in (app.data_dir / "backups").iterdir())
+    # 无效输入：策略参数不认识、市场与策略不符时不写入
+    before = path.read_text(encoding="utf-8")
+    r = post(c, "/funds/save", {**FORM, "id": "bad_one", "original_id": "", "params": "nope: 1"})
+    assert r.status_code == 400 and "nope" in r.text and path.read_text(encoding="utf-8") == before
+    # 编辑：没有历史的基金可以改初始资金；调低标的上限、改为暂停
+    r = post(c, "/funds/save", {**FORM, "original_id": "hk_div", "initial_capital": "800000", "status": "paused"})
+    assert r.status_code == 303 and store.fund(app.db, "hk_div")["status"] == "paused"
+    assert store.fund(app.db, "hk_div")["initial_capital"] == 800000
+    # 有历史的基金：初始资金、策略不能改（表单提交了也忽略）
+    store.add_flow(app.db, store.fund(app.db, "a_trend"), 100_000, 1.0, "2026-10-05")
+    r = post(c, "/funds/save", {**FORM, "id": "a_trend", "original_id": "a_trend", "strategy": "a_sector_trend", "name": "A 趋势",
+                                "initial_capital": "9999999", "params": "rs_top: 0.25\n", "benchmark": "1.000300"})
+    assert r.status_code == 303, r.text[:300]
+    f = store.fund(app.db, "a_trend")
+    assert f["initial_capital"] == 1e6 and f["name"] == "A 趋势" and f["params"] == {"rs_top": 0.25}
+    assert "初始资金不能改" in requests.utils.unquote(r.headers["location"])
+    # 资金进出：CSRF、超过现金被拒、成功后份额增加
+    assert c.post("/funds/a_trend/flow", data={"amount": "1000"}, follow_redirects=False).status_code == 403
+    r = post(c, "/funds/a_trend/flow", {"direction": "out", "amount": "99999999"})
+    assert "err=" in r.headers["location"]
+    r = post(c, "/funds/a_trend/flow", {"direction": "in", "amount": "50000", "note": "加仓资金"})
+    assert "ok=" in r.headers["location"] and len(store.flows(app.db, "a_trend")) == 2
+    assert "资金进出" in c.get("/funds/a_trend").text
+    # 删除：有历史的不行；没有历史的从 funds.yaml 与库里删除
+    r = post(c, "/funds/a_trend/delete", {"confirm": "yes"})
+    assert "err=" in r.headers["location"] and store.fund(app.db, "a_trend") is not None
+    r = post(c, "/funds/hk_div/delete")
+    assert "err=" in r.headers["location"]                                            # 没勾确认
+    r = post(c, "/funds/hk_div/delete", {"confirm": "yes"})
+    assert r.headers["location"].startswith("/funds?ok=") and store.fund(app.db, "hk_div") is None
+    assert "hk_div" not in path.read_text(encoding="utf-8") and "# 我的基金配置（注释要保留）" in path.read_text(encoding="utf-8")

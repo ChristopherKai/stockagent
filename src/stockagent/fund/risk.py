@@ -169,7 +169,15 @@ def build(book: Book, risk: RiskConfig, lim: Limits, exits: list[tuple[dict, Exi
                 del remaining[sid]
         exposure = sum(value_of(s) for s in remaining) / E
 
-    # 3. 调仓日：单票超过上限 drift 以上的调回上限
+    # 3. 调仓日：持仓数超过标的上限（上限被调低）的，卖出得分最低的；单票超过上限 drift 以上的调回上限
+    if lim.rebalance_day and len(remaining) > f["max_holdings"]:
+        excess = sorted(remaining.items(), key=lambda kv: kv[1].get("score") or 0.0)[: len(remaining) - f["max_holdings"]]
+        for sid, p in excess:
+            w = value_of(sid) / E
+            sells.append(sug(p, "sell", "open", int(p["shares"]), w, 0.0,
+                             f"持仓 {len(book.positions)} 只超过标的上限 {f['max_holdings']}，调仓日卖出得分最低的", 5))
+            del remaining[sid]
+        exposure = sum(value_of(s) for s in remaining) / E
     if lim.rebalance_day:
         for sid, p in list(remaining.items()):
             w = value_of(sid) / E

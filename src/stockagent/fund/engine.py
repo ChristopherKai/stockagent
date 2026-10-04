@@ -238,7 +238,7 @@ def _plan_fund(app: App, cfg: FundsFile, f: dict, md: MarketData, positions: dic
     if unknown:
         notes.append("每手股数未知、暂按 100 股取整（晚间任务会补查）：" + "、".join(unknown))
     last = store.last_nav(app.db, f["id"])
-    fp = FundPlan(fund=f, regime=md.regime, cap=p.cap, equity=book.equity, nav=book.equity / f["initial_capital"],
+    fp = FundPlan(fund=f, regime=md.regime, cap=p.cap, equity=book.equity, nav=book.equity / store.units(app.db, f),
                   drawdown=last["drawdown"] if last else 0.0,
                   exposure=sum(pp["shares"] * prices[s] for s, pp in positions.items()) / book.equity if book.equity else 0.0,
                   suggestions=p.suggestions, targets=targets, notes=notes, unchanged=p.unchanged, rebalance_day=rebalance,
@@ -414,7 +414,7 @@ def close(app: App, cfg: FundsFile, day: date, fund_ids: list[str] | None = None
         first = store.navs(app.db, f["id"])
         bench_close = closes.get(f["benchmark"])
         bench_base = first[0]["benchmark_close"] if first and first[0]["benchmark_close"] else bench_close
-        nav = ledger.nav_row(state, closes, dstr, prev, bench_close, bench_base)
+        nav = ledger.nav_row(state, closes, dstr, prev, bench_close, bench_base, store.units(app.db, f))
         b0 = int(f["breaker"])
         b1 = risk.breaker_level(b0, nav["drawdown"], (f["dd1"], f["dd2"], f["dd3"]), cfg.risk.recover)
         nav["breaker"] = b1

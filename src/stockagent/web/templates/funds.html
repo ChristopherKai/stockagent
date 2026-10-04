@@ -4,7 +4,7 @@
 {% include "_fund_head.html" %}
 {% if cfg_err %}<div class="flash err">{{ cfg_err }}</div>{% endif %}
 <section class="card">
-  <div class="card-head"><h2>合计（折人民币）</h2></div>
+  <div class="card-head"><h2>合计（折人民币）</h2><a class="btn small" href="/funds/new">新建基金</a></div>
   <div class="kpis">
     <div class="kpi main"><div class="k">总资产</div><div class="v">{{ total | num(0) }}</div>
       <div class="s">港元按 {{ fx | num(4) }} 折算{{ '' if fx_ok else '（没有汇率行情，用兜底值）' }}</div></div>

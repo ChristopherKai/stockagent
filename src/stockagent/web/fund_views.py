@@ -10,14 +10,17 @@ import json
 import math
 from datetime import date, timedelta
 
+import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..fund import config as fcfg
 from ..fund import data, guards, ledger, regime, risk, store
 from ..fund.report import DISCLAIMER as FUND_DISCLAIMER
 from ..fund.report import MARKET_LABEL as FUND_MARKET
+from ..fund.strategy import STRATEGIES
 from ..screen import store as sc_store
-from . import charts
+from ..utils import today_local
+from . import charts, yamledit
 from .security import verify_csrf
 from .server import page
 from .views import back, holder
@@ -68,7 +71,7 @@ def _summary(app, f: dict, cfg: fcfg.FundsFile | None) -> dict:
     reg = store.regime(app.db, f["market"])
     cap = risk.exposure_cap(f, cfg.risk, reg["state"], int(f["breaker"])) if cfg and reg else None
     last = navs[-1] if navs else None
-    nav = equity / f["initial_capital"]
+    nav = equity / store.units(app.db, f)
     bench = last.get("benchmark_nav") if last else None
     plan = app.db._one("SELECT MAX(date) AS d FROM suggestion WHERE fund_id=?", (f["id"],))
     return {
@@ -101,7 +104,8 @@ def funds_page(request: Request):
     summaries = [_summary(app, f, cfg) for f in funds]
     fx, fx_ok = data.fx_hkdcny(app, cfg.risk.fx_hkdcny if cfg else 0.92)
     total = sum(s["equity"] * (fx if s["fund"]["currency"] == "HKD" else 1.0) for s in summaries)
-    initial = sum(s["fund"]["initial_capital"] * (fx if s["fund"]["currency"] == "HKD" else 1.0) for s in summaries)
+    initial = sum((s["fund"]["initial_capital"] + sum(x["amount"] for x in store.flows(app.db, s["fund"]["id"])))
+                  * (fx if s["fund"]["currency"] == "HKD" else 1.0) for s in summaries)
     configured = {d.id for d in cfg.funds} if cfg else set()
     return page(request, "funds.html", **_ctx(summaries=summaries, total=total, total_ret=(total / initial - 1) if initial else None,
                                                fx=fx, fx_ok=fx_ok, cfg_err=err, configured=configured))
@@ -158,6 +162,159 @@ def actual_page(request: Request):
     return page(request, "fund_actual.html", **_ctx(funds=out))
 
 
+BENCHMARKS = {"HK": "100.HSI", "A": "1.000300"}
+DEFAULT_FORM = {"market": "HK", "strategy": "hk_quality_value", "max_holdings": 10, "initial_capital": 1_000_000, "max_weight": 0.15,
+                "sector_cap": 0.30, "min_weight": 0.03, "drawdown": [0.05, 0.10, 0.15], "rebalance": "monthly", "benchmark": "100.HSI",
+                "status": "paper", "params": {}}
+
+
+def _strategies() -> list[dict]:
+    out = []
+    for k, cls in STRATEGIES.items():
+        defaults = {n: f.default for n, f in cls.Params.model_fields.items()}
+        out.append({"key": k, "label": cls.label, "market": cls.market, "style": cls.style, "defaults": yaml.safe_dump(
+            defaults, allow_unicode=True, sort_keys=False, default_flow_style=False).strip(), "doc": (cls.__doc__ or "").strip()})
+    return out
+
+
+def _form_page(request: Request, values: dict, fund: dict | None, err: str | None = None, status_code: int = 200):
+    h = holder(request)
+    path = fcfg.path(h.app)
+    etag = yamledit.digest(path.read_text(encoding="utf-8")) if path.exists() else ""
+    locked = bool(fund) and store.has_history(h.app.db, fund["id"])
+    held = len(store.positions(h.app.db, fund["id"])) if fund else 0
+    params_text = yaml.safe_dump(values.get("params") or {}, allow_unicode=True, sort_keys=False, default_flow_style=False).strip()
+    return page(request, "fund_form.html", status_code=status_code, **_ctx(
+        v=values, fund=fund, err=err, etag=etag, locked=locked, held=held, strategies=_strategies(), params_text=params_text
+        if values.get("params") else "", BENCHMARKS=BENCHMARKS))
+
+
+@router.get("/funds/new")
+def fund_new(request: Request):
+    return _form_page(request, dict(DEFAULT_FORM), None)
+
+
+@router.get("/funds/{fund_id}/edit")
+def fund_edit(request: Request, fund_id: str):
+    app = holder(request).app
+    f = _fund_or_404(app, fund_id)
+    cfg, err = _cfg(app)
+    d = cfg.fund(fund_id) if cfg else None
+    if d is None:
+        return back(f"/funds/{fund_id}", err=err or "funds.yaml 里没有这只基金（可能已被移除），无法编辑")
+    return _form_page(request, d.model_dump(), f)
+
+
+def _pct_field(form, name: str) -> float:
+    v = (form.get(name) or "").strip()
+    try:
+        return float(v) / 100
+    except ValueError as e:
+        raise ValueError(f"{name} 不是数字：{v}") from e
+
+
+def _parse_fund_form(form) -> dict:
+    strategy = (form.get("strategy") or "").strip()
+    cls = STRATEGIES.get(strategy)
+    if cls is None:
+        raise ValueError(f"未知策略：{strategy}")
+    try:
+        params = yaml.safe_load(form.get("params") or "") or {}
+    except yaml.YAMLError as e:
+        raise ValueError(f"策略参数不是有效的 YAML：{e}") from e
+    params = params if isinstance(params, dict) else None
+    if params is None:
+        raise ValueError("策略参数须是「名称: 值」的列表")
+    try:
+        capital, holdings = float(form.get("initial_capital") or 0), int(form.get("max_holdings") or 0)
+    except ValueError as e:
+        raise ValueError("初始资金与标的上限须是数字") from e
+    return {
+        "id": (form.get("id") or "").strip(), "name": (form.get("name") or "").strip(), "market": cls.market, "strategy": strategy,
+        "style": cls.style, "currency": fcfg.MARKET_CCY[cls.market], "initial_capital": capital, "max_holdings": holdings,
+        "max_weight": _pct_field(form, "max_weight"), "sector_cap": _pct_field(form, "sector_cap"), "min_weight": _pct_field(form, "min_weight"),
+        "drawdown": [_pct_field(form, f"dd{i}") for i in (1, 2, 3)], "rebalance": form.get("rebalance") or "monthly",
+        "benchmark": (form.get("benchmark") or "").strip() or BENCHMARKS[cls.market], "status": form.get("status") or "paper",
+        "params": params,
+    }
+
+
+@router.post("/funds/save")
+async def fund_save(request: Request):
+    h = holder(request)
+    app = h.app
+    form = await request.form()
+    original = (form.get("original_id") or "").strip()
+    fund = store.fund(app.db, original) if original else None
+    if original and fund is None:
+        raise HTTPException(404, "没有这只基金")
+    try:
+        values = _parse_fund_form(form)
+    except ValueError as e:
+        return _form_page(request, {**DEFAULT_FORM, **{k: form.get(k) for k in ("id", "name")}}, fund, err=str(e), status_code=400)
+    notes = []
+    if fund:
+        values["id"] = fund["id"]                      # id 不能改（库里的账户按 id 关联）
+        if store.has_history(app.db, fund["id"]):      # 有历史的基金：市场、策略、初始资金不能改
+            for k in ("market", "strategy", "style", "currency", "initial_capital"):
+                if values[k] != fund[k]:
+                    notes.append({"initial_capital": "初始资金不能改（请用「追加 / 取回资金」）", "strategy": "策略不能改（请新建基金）",
+                                  "market": "市场不能改（请新建基金）"}.get(k, ""))
+                values[k] = fund[k]
+        held = len(store.positions(app.db, fund["id"]))
+        if values["max_holdings"] < held:
+            notes.append(f"现持有 {held} 只，超过新的上限 {values['max_holdings']}：不会立即卖出，下个调仓日卖出得分最低的")
+    try:
+        fcfg.FundDef.model_validate(values)
+        cfg = yamledit.upsert_fund(fcfg.path(app), values, form.get("etag") or None, h.backup_dir, is_new=fund is None)
+    except (ValueError, yamledit.EditError) as e:
+        return _form_page(request, values, fund, err=str(e), status_code=400)
+    msgs = store.sync(app.db, cfg.funds, today_local().isoformat())
+    text = "；".join([m for m in msgs if m] + [n for n in notes if n])
+    return back(f"/funds/{values['id']}", ok=f"已保存到 funds.yaml 并同步：{text}")
+
+
+@router.post("/funds/{fund_id}/flow")
+async def fund_flow(request: Request, fund_id: str):
+    app = holder(request).app
+    f = _fund_or_404(app, fund_id)
+    form = await request.form()
+    try:
+        amount = _num(form.get("amount"), "金额")
+    except ValueError as e:
+        return back(f"/funds/{fund_id}", err=str(e))
+    if amount is None:
+        return back(f"/funds/{fund_id}", err="请填写金额")
+    sign = -1 if form.get("direction") == "out" else 1
+    _, _, equity = _holdings(app, f)
+    nav = equity / store.units(app.db, f)
+    try:
+        row = store.add_flow(app.db, f, sign * amount, nav, today_local().isoformat(), (form.get("note") or "").strip()[:200] or None)
+    except ValueError as e:
+        return back(f"/funds/{fund_id}", err=str(e))
+    return back(f"/funds/{fund_id}", ok=f"已{'追加' if sign > 0 else '取回'} {amount:,.0f} {f['currency']}：按单位净值 {nav:.4f} "
+                f"{'申购' if sign > 0 else '赎回'} {abs(row['units']):,.0f} 份，净值与收益率不受影响")
+
+
+@router.post("/funds/{fund_id}/delete")
+async def fund_delete(request: Request, fund_id: str):
+    h = holder(request)
+    f = _fund_or_404(h.app, fund_id)
+    form = await request.form()
+    if form.get("confirm") != "yes":
+        return back(f"/funds/{fund_id}", err="请先勾选确认")
+    if store.has_history(h.app.db, fund_id):
+        return back(f"/funds/{fund_id}", err="这只基金已有成交或净值记录，只能暂停（编辑 → 状态改为暂停），不能删除")
+    try:
+        cfg = fcfg.load(h.app)
+        if cfg.fund(fund_id):
+            yamledit.delete_fund(fcfg.path(h.app), fund_id, form.get("etag") or None, h.backup_dir)
+    except (fcfg.FundsError, yamledit.EditError) as e:
+        return back(f"/funds/{fund_id}", err=str(e))
+    store.delete_fund(h.app.db, fund_id)
+    return back("/funds", ok=f"已删除基金 {f['name']}（funds.yaml 已备份）")
+
+
 @router.get("/funds/{fund_id}")
 def fund_page(request: Request, fund_id: str):
     app = holder(request).app
@@ -181,7 +338,9 @@ def fund_page(request: Request, fund_id: str):
     return page(request, "fund.html", **_ctx(
         s=s, f=f, pending=pending, snap=snap, excluded=excluded, regimes=regimes, cfg=cfg, cfg_err=err, fdef=fdef,
         trades=list(reversed(store.trades(app.db, f["id"])))[:40], navs=list(reversed(s["navs"]))[:30],
-        params_json=json.dumps(f["params"], ensure_ascii=False, indent=2), TRADE_ACTIONS=TRADE_ACTIONS))
+        params_json=json.dumps(f["params"], ensure_ascii=False, indent=2), TRADE_ACTIONS=TRADE_ACTIONS,
+        flows=store.flows(app.db, f["id"]), units=store.units(app.db, f), history=store.has_history(app.db, f["id"]),
+        etag=yamledit.digest(fcfg.path(app).read_text(encoding="utf-8")) if fcfg.path(app).exists() else ""))
 
 
 # ---------------------------------------------------------------- 回执与恢复（写操作：CSRF 由 router 依赖校验）

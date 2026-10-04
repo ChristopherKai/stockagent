@@ -161,9 +161,15 @@ def test_sync_creates_updates_and_refuses_capital_change(app):
     cfg.funds[0].max_holdings = 12
     assert any("更新 hk_value：max_holdings" in m for m in store.sync(app.db, cfg.funds, "2026-10-06"))
     assert store.fund(app.db, "hk_value")["cash"] == 123.0          # 同步不动现金
-    cfg.funds[0].initial_capital = 2e6
-    assert any("不能修改" in m for m in store.sync(app.db, cfg.funds, "2026-10-06"))
-    assert store.fund(app.db, "hk_value")["initial_capital"] == 1e6
+    cfg.funds[0].initial_capital = 2e6                               # 还没有记录：可以改，现金重置
+    store.sync(app.db, cfg.funds, "2026-10-06")
+    assert store.fund(app.db, "hk_value")["initial_capital"] == 2e6 and store.fund(app.db, "hk_value")["cash"] == 2e6
+    store.add_flow(app.db, store.fund(app.db, "hk_value"), 1000, 1.0, "2026-10-06")
+    cfg.funds[0].initial_capital = 3e6
+    cfg.funds[0].max_holdings = 13
+    assert any("不能修改" in m for m in store.sync(app.db, cfg.funds, "2026-10-07"))
+    f = store.fund(app.db, "hk_value")
+    assert f["initial_capital"] == 2e6 and f["max_holdings"] == 13          # 初始资金不变，其他修改照常同步
 
 
 # ---------------------------------------------------------------- 交易日历
@@ -889,3 +895,36 @@ def test_flags_do_not_block_and_allowlist_overrides(funded, app, monkeypatch):
     assert any("放行名单覆盖 1 只" in n for n in fp.notes)
     text = "\n".join(t for _, t in report.plan_messages([fp], as_of))
     assert "放行名单" in text or "未核实" in text
+
+
+def test_lowered_holdings_cap_sells_weakest_on_rebalance_day_only():
+    positions = {f"0.00000{i}": pos(f"00000{i}", 1000, sector=f"s{i}", score=50 + i) for i in range(1, 5)}
+    book = risk.Book(fund=fund_row(max_holdings=2), cash=900_000, positions=positions, prices={s: 10.0 for s in positions})
+    plan = risk.build(book, RC, limits(rebalance_day=False), [], [], [], "d", "attack")
+    assert not [s for s in plan.suggestions if s["action"] == "sell"]                 # 平时不强制卖出
+    plan = risk.build(book, RC, limits(), [], [], [], "d", "attack")
+    sold = sorted(s["code"] for s in plan.suggestions if s["action"] == "sell")
+    assert sold == ["000001", "000002"] and all("超过标的上限" in s["reason"] for s in plan.suggestions if s["action"] == "sell")
+
+
+def test_cash_flows_keep_unit_nav(app):
+    cfg = fcfg.FundsFile.model_validate(yaml.safe_load(FUNDS_YAML))
+    store.sync(app.db, cfg.funds, "2026-10-05")
+    f = store.fund(app.db, "a_trend")
+    assert store.units(app.db, f) == 1e6
+    row = store.add_flow(app.db, f, 500_000, 1.25, "2026-10-08", "追加")
+    assert row["units"] == pytest.approx(400_000) and store.fund(app.db, "a_trend")["cash"] == pytest.approx(1.5e6)
+    f = store.fund(app.db, "a_trend")
+    st = ledger.State(fund=f, cash=f["cash"], positions={})
+    # 追加前总资产 125 万（净值 1.25）+ 追加 50 万 = 175 万，份额 140 万 → 净值仍是 1.25
+    st.cash = 1.75e6
+    assert ledger.nav_row(st, {}, "2026-10-08", None, None, None, store.units(app.db, f))["nav"] == pytest.approx(1.25)
+    with pytest.raises(ValueError, match="超过现金"):
+        store.add_flow(app.db, f, -2e6, 1.25, "2026-10-08")
+    store.add_flow(app.db, f, -250_000, 1.25, "2026-10-09")
+    assert store.units(app.db, store.fund(app.db, "a_trend")) == pytest.approx(1.2e6)
+    assert store.has_history(app.db, "a_trend") and not store.has_history(app.db, "hk_value")
+    store.delete_fund(app.db, "hk_value")
+    assert store.fund(app.db, "hk_value") is None
+    with pytest.raises(ValueError):
+        store.delete_fund(app.db, "a_trend")
