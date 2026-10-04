@@ -1,0 +1,95 @@
+# 模拟基金（paper fund）：模拟组合信号，非投资建议。不对接券商、不下单；建议按规则模拟成交、逐日记净值。
+# 修改后运行 stock fund sync 同步到数据库。已建账基金的初始资金不能改（要换规模请新建一个基金 id）。
+# 策略说明见 src/stockagent/fund/strategy.py；风控见 risk.py；交易日历见 calendar.py。
+
+funds:
+  - id: hk_quality_value
+    name: 港股质量价值
+    market: HK
+    strategy: hk_quality_value      # 港股通全市场「质量 + 便宜」综合排名；有情景加权目标价的再加安全边际门槛
+    style: value                    # 市场状态对应的仓位上限按价值档（进攻 100% / 中性 85% / 防守 60%）
+    currency: HKD
+    initial_capital: 1000000
+    max_holdings: 15
+    max_weight: 0.15                # 单票上限
+    sector_cap: 0.30                # 同一行业上限
+    min_weight: 0.03                # 计划满仓权重低于该值的不开
+    drawdown: [0.05, 0.10, 0.15]    # 回撤熔断：新仓减半 / 停止开新仓并降到 50% / 暂停（stock fund resume 恢复）
+    rebalance: quarterly            # 季度第一个交易日调仓（新建仓、替换）；止盈、证伪、回调补仓每天检查
+    benchmark: "100.HSI"
+    status: paper
+    params:
+      min_roe: 12.0                 # ROE（年化，%）下限
+      max_debt_ratio: 60.0          # 资产负债率上限（%），净现金公司不受限
+      mos: 0.75                     # 有目标价时：现价 ≤ 目标价 × 0.75 才买
+      take_profit: 1.2              # 现价 ≥ 目标价（或合理价值）× 1.2 时卖出
+      cheap_quantile: 0.2           # 没有目标价时：便宜程度须排在股票池前 20%
+      review_drop: 0.2              # 较成本跌 20% 推送复核提醒（不机械止损）
+      tranches: 3
+      # 防价值陷阱
+      roe_cap: 40.0                 # ROE 超过 40% 按 40% 计分并在理由里标出（多半是低净资产或一次性收益）
+      ey_cap: 0.20                  # 盈利收益率计分上限
+      fcf_yield_cap: 0.20           # FCF Yield 计分上限
+      min_fcf_years: 2              # 最近 fcf_window 个年度里 FCF 为正至少 2 年（年度数据不足 2 年的不达标）
+      fcf_window: 3
+      fcf_stability: 0.3            # 最差一年 FCF 不低于平均的 30%（排除营运资金一次性波动撑起来的高 FCF）
+      exclude_flags: [fcf_unstable, cash_and_debt, no_payout, minority, net_debt, stale]   # 选股器的风险标记，命中即排除
+      llm_veto: true                # 新建仓前过模型否决（只能否决；模型不可用时不新建仓）
+
+  - id: a_sector_trend
+    name: A 股景气趋势
+    market: A
+    strategy: a_sector_trend        # 第二阶段上升趋势 + 相对强度 + 行业动量，放量突破买入
+    style: trend                    # 仓位上限按趋势档（进攻 100% / 中性 60% / 防守 30%，防守不开新仓）
+    currency: CNY
+    initial_capital: 1000000
+    max_holdings: 10
+    max_weight: 0.15
+    sector_cap: 0.30
+    min_weight: 0.03
+    drawdown: [0.05, 0.10, 0.15]
+    rebalance: weekly               # 每周第一个交易日允许替换持仓；突破买入、止损每天检查
+    benchmark: "1.000300"
+    status: paper
+    params:
+      rs_top: 0.2                   # 相对强度排名前 20%
+      sector_top: 0.4               # 行业动量排名前 40%
+      breakout_volume: 1.5          # 突破量比（对 50 日均量）
+      hard_stop: 0.075              # 硬止损 7.5%（与 2 倍 ATR 取近者）
+      risk_per_trade: 0.01          # 每笔风险占净值 1%
+      time_stop_days: 15            # 3 周不涨则离场
+
+risk:
+  cross_fund_cap: 0.10              # 同一发行人（A+H 合并）在全部基金合计不超过总资金 10%
+  drift: 0.05                       # 权重偏离不到 5 个百分点不调
+  replace_margin: 0.20              # 满仓时新候选须比最弱持仓高 20% 才替换
+
+# 新建仓前的风险排除（所有基金共用）。名单由你维护；负面公告来自选股器的全市场公告扫描（screen_events）。
+exclusions:
+  codes:
+    "HK:06666": 控股股东中国恒大集团已被香港高等法院颁令清盘（2024-01）
+  name_keywords:
+    恒大: 所属恒大集团，母公司清盘中
+  event_kinds: [default, delist_risk, audit, investigation]   # 违约 / 清盘 / 债务重组、退市风险、非标审计、立案调查
+  event_days: 365
+
+# 新建仓前的模型否决：复用选股器快筛的模型路由（llm.tasks.screen，未配置时用默认 profile），每只按最新报告期缓存
+veto:
+  task: screen
+
+universe:
+  min_listing_days: 365
+  min_mcap: {HK: 5.0e9, A: 5.0e9}           # 第一阶段：总市值下限（港元 / 人民币）
+  min_turnover: {HK: 2.0e7, A: 1.0e8}       # 第二阶段：20 日成交额中位数下限
+  bars_universe: {HK: 400, A: 1200}         # 每晚刷新日线的股票数（按市值取前 N）
+
+bars:
+  request_delay: 1.0                # 逐只请求的最小间隔（秒）；被限流时调大
+  max_errors: 8
+
+# 交易成本（每边）。港股印花税与规费按港交所收费页（2026-10 核对）；佣金、滑点按自己的券商调整。
+costs:
+  HK: {commission: 0.0003, min_commission: 5, stamp_buy: 0.001, stamp_sell: 0.001, stamp_round_up: true,
+       exchange_fees: 0.000085, settlement_fee: 0.000042, slippage: 0.001}
+  A: {commission: 0.00025, min_commission: 5, stamp_buy: 0.0, stamp_sell: 0.0005, stamp_round_up: false,
+      exchange_fees: 0.0000541, settlement_fee: 0.00001, slippage: 0.0005}

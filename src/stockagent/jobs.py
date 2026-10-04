@@ -65,10 +65,20 @@ TASKS: dict[str, Task] = {t.key: t for t in [
          desc="只刷新股票池、报表与全市场公告事件，不打分"),
     Task("screen_themes", "选股器：主题 agent", ("screen", "themes", "--suggest"), (), "none", "screen", category="选股",
          desc="按 themes.yaml 的产业链主题找瓶颈环节的公司，结果是建议，在选股页采纳后才写入主题文件"),
+    Task("fund_plan", "模拟基金：盘前计划", ("fund", "plan"), ("--push",), "none", "fund", category="模拟基金",
+         desc="按前一交易日收盘数据计算各模拟基金的当日操作建议（只读库）；模拟组合信号，非投资建议"),
+    Task("fund_alert", "模拟基金：盘中提醒", ("fund", "alert"), ("--push",), "none", "fund", category="模拟基金",
+         desc="只查持仓与当天条件单的快照报价：止损、突破、跳空、证伪条件触发时提醒；不在交易时段时直接结束"),
+    Task("fund_close", "模拟基金：盘后复盘", ("fund", "close"), ("--push",), "none", "fund", category="模拟基金",
+         desc="按当日日线模拟成交、扣费，记净值、回撤与熔断"),
+    Task("fund_refresh", "模拟基金：刷新日线", ("fund", "refresh"), (), "none", "fund", category="模拟基金",
+         desc="晚间逐只限速刷新股票池日线（首次回填约 20–40 分钟，可中断续跑）与港股每手股数"),
+    Task("fund_weekly", "模拟基金：周报", ("fund", "weekly"), ("--push",), "none", "fund", category="模拟基金",
+         desc="各基金本周与累计收益、相对基准的超额、回撤、胜率与盈亏比"),
     Task("llm_test", "测试模型连接", ("llm-test",), (), "none", profile=True, category="维护", desc="逐个测试文本与 JSON 输出"),
     Task("eval", "事后检验", ("eval",), (), "any", category="维护", desc="统计已分级事件发布后的超额收益，检验分级有没有预测力"),
 ]}
-CATEGORIES = ["常用", "资料与分级", "追踪管理", "选股", "维护"]
+CATEGORIES = ["常用", "资料与分级", "追踪管理", "选股", "模拟基金", "维护"]
 FLAG_LABEL = {"--push": "推送", "--no-llm": "不调用模型", "--no-fetch": "不抓取（只处理已分级的依据）", "--force": "强制重做",
               "--reuse-notes": "复用研究笔记", "--refill": "重新补缺", "--dossier": "缺报告时先生成", "--no-prices": "不抓行情",
               "--no-filings": "不抓公告", "--no-news": "不抓新闻", "--no-push": "不推送",
