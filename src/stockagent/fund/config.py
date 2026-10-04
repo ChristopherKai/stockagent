@@ -141,6 +141,26 @@ class BarsConfig(BaseModel):
     lot_days: int = 30                  # 港股每手股数缓存天数
 
 
+class ExclusionConfig(BaseModel):
+    """新建仓前的风险排除（所有基金共用）：维护的名单 + 选股器全市场公告扫描里的负面事件。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    codes: dict[str, str] = Field(default_factory=dict)          # 代码（00700 / HK:00700 / 600519）→ 原因
+    name_keywords: dict[str, str] = Field(default_factory=dict)  # 名称包含 → 原因（如所属集团清盘）
+    event_kinds: list[str] = ["default", "delist_risk", "audit", "investigation"]   # screen_events 的负面类别
+    event_days: int = 365                                         # 回看天数
+
+
+class VetoConfig(BaseModel):
+    """新建仓前的模型否决：只能否决，不能增加或调整仓位；模型不可用时新建仓一律跳过。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task: str = "screen"                # 用哪个任务的模型路由（与选股器快筛相同）
+    max_tokens: int = 2000
+
+
 class Costs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -157,6 +177,8 @@ class FundsFile(BaseModel):
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     bars: BarsConfig = Field(default_factory=BarsConfig)
     costs: Costs = Field(default_factory=Costs)
+    exclusions: ExclusionConfig = Field(default_factory=ExclusionConfig)
+    veto: VetoConfig = Field(default_factory=VetoConfig)
 
     @field_validator("funds")
     @classmethod

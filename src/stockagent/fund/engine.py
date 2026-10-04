@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
@@ -12,7 +12,7 @@ from .. import app as appmod
 from ..app import FX_HKDCNH, App
 from ..sources import eastmoney
 from ..utils import CST, iso, log, parse_iso, today_local, utcnow
-from . import calendar, data, ledger, regime, risk, store
+from . import calendar, data, guards, ledger, regime, risk, store
 from .config import FundsFile
 from .strategy import STRATEGIES, Context, Target
 
@@ -35,6 +35,8 @@ class MarketData:
     trackers: dict[str, dict]
     kill: dict[str, list[dict]]
     notes: list[str] = field(default_factory=list)
+    excluded: dict[str, str] = field(default_factory=dict)     # secid → 风险排除原因
+    exclusion_hits: dict[str, int] = field(default_factory=dict)
 
 
 def watch_links(app: App, market: str, ind: dict[str, dict]) -> tuple[dict[str, dict], dict[str, list[dict]]]:
@@ -80,6 +82,8 @@ def market_data(app: App, cfg: FundsFile, market: str, as_of: date, after_close:
     reg = regime.compute(app, cfg.regime, market, {u["secid"]: bars[u["secid"]] for u in universe if u["secid"] in bars})
     trackers, kill = watch_links(app, market, ind)
     md = MarketData(market, as_of, expected, universe, dropped, ind, reg, trackers, kill)
+    held = [{"secid": s, "market": market, "code": s.split(".", 1)[1], "name": ""} for s in extra if s not in {u["secid"] for u in universe}]
+    md.excluded, md.exclusion_hits = guards.exclusions(app, cfg, universe + held)
     have = sum(1 for u in universe if u["secid"] in ind)
     md.notes.append(f"股票池 {len(universe)} 只（第一阶段批量数据过滤后），其中 {have} 只有日线"
                     + ("" if have >= len(universe) * 0.8 else "；日线不足，先运行 stock fund refresh 回填"))
@@ -177,7 +181,7 @@ def _plan_fund(app: App, cfg: FundsFile, f: dict, md: MarketData, positions: dic
     rebalance = first or calendar.first_of_period(f["market"], md.as_of, f["rebalance"])
     ctx = Context(app=app, market=f["market"], as_of=md.as_of, expected=md.expected, universe=md.universe, ind=md.ind,
                   min_turnover=cfg.universe.min_turnover[f["market"]], participation=cfg.universe.participation,
-                  rebalance_day=rebalance, trackers=md.trackers, kill=md.kill, hkdcny=fx)
+                  rebalance_day=rebalance, trackers=md.trackers, kill=md.kill, hkdcny=fx, excluded=md.excluded)
     updates: dict[str, dict] = {}
     for sid, p in positions.items():
         u = strat.update(p, ctx)
@@ -216,8 +220,16 @@ def _plan_fund(app: App, cfg: FundsFile, f: dict, md: MarketData, positions: dic
         regime_cap=cfg.risk.exposure[f["style"]][md.regime["state"]], breaker=breaker, new_entries=quota, rebalance_day=rebalance,
         capacity={sid: c for sid, x in md.ind.items() if (c := data.liquidity_capacity(x, cfg.universe.participation))},
         other_funds=others, total_cny=total, fx_cny=fx if f["currency"] == "HKD" else 1.0, lots=lots)
-    p = risk.build(book, cfg.risk, lim, exits, adds, targets, md.as_of.isoformat(), md.regime["state"])
-    notes = list(md.notes) + ctx.notes + p.notes
+    def build(ts: list[Target]) -> risk.Plan:
+        return risk.build(book, cfg.risk, lim, exits, adds, ts, md.as_of.isoformat(), md.regime["state"])
+
+    guard_notes = exclusion_notes(app, md, ctx)
+    if getattr(strat.p, "llm_veto", False):
+        p, veto_notes = veto_buys(app, cfg, f, md, targets, build, dry_run)
+        guard_notes = veto_notes + guard_notes
+    else:
+        p = build(targets)
+    notes = guard_notes + ctx.notes + p.notes + list(md.notes)
     if breaker:
         notes.insert(0, risk.BREAKER_LABEL[breaker])
     if f["status"] != "paper":
@@ -244,6 +256,65 @@ def _plan_fund(app: App, cfg: FundsFile, f: dict, md: MarketData, positions: dic
                           (*cols.values(), store.now(), f["id"], sid))
         store.add_suggestions(app.db, p.suggestions)
     return fp
+
+
+def exclusion_notes(app: App, md: MarketData, ctx: Context) -> list[str]:
+    """风险排除的提示：股票池命中数（按来源）+ 质量达标却被排除的前几只。"""
+    n = sum(md.exclusion_hits.values())
+    if not n and not ctx.excluded_hits:
+        return []
+    src = "，".join(f"{k} {v}" for k, v in md.exclusion_hits.items() if v)
+    line = f"风险排除：股票池命中 {n} 只（{src}）" if n else "风险排除"
+    if ctx.excluded_hits:
+        line += f"；其中质量达标的 {len(ctx.excluded_hits)} 只：" + "；".join(f"{c} {nm}（{why}）" for c, nm, why in ctx.excluded_hits[:3])
+    if md.exclusion_hits.get("负面公告") is not None and (cov := guards.event_coverage(app, md.market)):
+        line += f"。负面公告扫描覆盖 {cov}"
+    return [line]
+
+
+def veto_buys(app: App, cfg: FundsFile, f: dict, md: MarketData, targets: list[Target], build, dry_run: bool) -> tuple[risk.Plan, list[str]]:
+    """新建仓前的模型否决：先按全部候选出计划，把计划里的新建仓逐只交给模型（有缓存用缓存）；被否决或无法检查的去掉、
+    由后面的候选递补，再出一次计划，直到新建仓都已放行。模型只能去掉候选，不能增加或调整仓位。"""
+    from ..screen import store as sc_store
+
+    rows = {u["secid"]: u for u in md.universe}
+    by_sid = {t.secid: t for t in targets}
+    checked: dict[str, dict] = {}
+    ts = list(targets)
+    since = iso(utcnow() - timedelta(days=180))
+    p = build(ts)
+    for _ in range(10):
+        new = [s for s in p.suggestions if s["action"] == "buy" and s["secid"] not in checked and s["secid"] in rows]
+        if not new:
+            break
+        cands = []
+        for s in new:
+            t = by_sid[s["secid"]]
+            evs = sc_store.events_since(app.db, since, s["secid"])
+            flags = [x for x in (t.metrics.get("flags"), t.metrics.get("outliers")) if x]
+            cands.append({"u": rows[s["secid"]], "metrics": t.metrics, "events": evs, "flags": flags})
+        checked.update(guards.check(app, cfg, f["name"], cands, dry_run))
+        bad = {sid for sid, r in checked.items() if r["verdict"] != "pass"}
+        if not bad & {s["secid"] for s in p.suggestions if s["action"] == "buy"}:
+            break
+        ts = [t for t in ts if t.secid not in bad]
+        p = build(ts)
+    vetoed = [(sid, r) for sid, r in checked.items() if r["verdict"] == "veto"]
+    skipped = [(sid, r) for sid, r in checked.items() if r["verdict"] not in ("pass", "veto")]
+    passed = [r for r in checked.values() if r["verdict"] == "pass"]
+    notes = []
+
+    def name(sid: str) -> str:
+        return f"{rows[sid]['code']} {rows[sid]['name']}"
+
+    if vetoed:
+        notes.append(f"模型否决 {len(vetoed)} 只：" + "；".join(f"{name(sid)}（{r['reason'][:50]}）" for sid, r in vetoed[:4])
+                     + ("……" if len(vetoed) > 4 else ""))
+    if skipped:
+        notes.append(f"{len(skipped)} 只新建仓没能做模型检查，按规则跳过（宁可不买）：{skipped[0][1]['reason'][:60]}")
+    if passed:
+        notes.append(f"模型放行 {len(passed)} 只（其中缓存 {sum(1 for r in passed if r.get('cached'))} 只）")
+    return p, notes
 
 
 # ---------------------------------------------------------------- 盘后结算
@@ -513,16 +584,32 @@ def refresh(app: App, cfg: FundsFile, markets: list[str] | None = None, limit: i
         rate = f"，{st.rate:.2f} 次/秒" if st.rate else ""
         msgs.append(f"  日线：请求 {st.requested} 次（成功 {st.ok}，其中全量 {st.full}；失败 {st.failed}），用时 {st.seconds:.0f} 秒{rate}"
                     + (f"；{st.aborted}" if st.aborted else ""))
+        md = None
+        codes = [p["code"] for f in funds if f["market"] == m for p in store.positions(app.db, f["id"])]
+        for f in funds:
+            if f["market"] != m:
+                continue
+            strat = STRATEGIES[f["strategy"]](f["params"])
+            if m != "HK" and not getattr(strat.p, "llm_veto", False):
+                continue
+            md = md or market_data(app, cfg, m, today_local(), after_close=True)
+            ctx = Context(app=app, market=m, as_of=md.as_of, expected=md.expected, universe=md.universe, ind=md.ind,
+                          min_turnover=cfg.universe.min_turnover[m], participation=cfg.universe.participation,
+                          trackers=md.trackers, kill=md.kill, hkdcny=data.fx_hkdcny(app, cfg.risk.fx_hkdcny)[0], excluded=md.excluded)
+            targets = strat.score(ctx)
+            codes += [t.code for t in targets]
+            if getattr(strat.p, "llm_veto", False):  # 预先做模型否决检查并缓存，盘前计划就不必临时调用模型
+                held = {p["secid"] for p in store.positions(app.db, f["id"])}
+                top = [t for t in targets if t.secid not in held][: f["max_holdings"] * 2]
+                rows = {u["secid"]: u for u in md.universe}
+                cands = [{"u": rows[t.secid], "metrics": t.metrics, "events": [],
+                          "flags": [x for x in (t.metrics.get("flags"), t.metrics.get("outliers")) if x]} for t in top]
+                res = guards.check(app, cfg, f["name"], cands, dry_run=False)
+                fresh = [r for r in res.values() if not r.get("cached")]
+                msgs.append(f"  {f['name']}：模型否决检查 {len(res)} 只（新查 {len(fresh)} 只，否决 "
+                            f"{sum(1 for r in res.values() if r['verdict'] == 'veto')} 只，未能检查 "
+                            f"{sum(1 for r in res.values() if r['verdict'] == 'skip')} 只）")
         if m == "HK":
-            codes = [p["code"] for f in funds if f["market"] == "HK" for p in store.positions(app.db, f["id"])]
-            for f in funds:
-                if f["market"] != "HK":
-                    continue
-                md = market_data(app, cfg, "HK", today_local(), after_close=True)
-                ctx = Context(app=app, market="HK", as_of=md.as_of, expected=md.expected, universe=md.universe, ind=md.ind,
-                              min_turnover=cfg.universe.min_turnover["HK"], participation=cfg.universe.participation,
-                              trackers=md.trackers, kill=md.kill, hkdcny=data.fx_hkdcny(app, cfg.risk.fx_hkdcny)[0])
-                codes += [t.code for t in STRATEGIES[f["strategy"]](f["params"]).score(ctx)]
             n = data.refresh_lots(app, cfg, list(dict.fromkeys(codes)))
             msgs.append(f"  港股每手股数：查询 {len(set(codes))} 只，新取得 {n} 只")
     return msgs

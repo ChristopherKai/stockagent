@@ -84,7 +84,7 @@ def fund_plan_block(fp) -> str:
         out.append(f"不动：其余 {fp.unchanged} 只，权重偏离均在 5 个百分点内")
     notes = [n for n in fp.notes if n]
     if notes:
-        out.append("提示：" + "；".join(notes[:6]))
+        out.append("提示：" + "；".join(notes[:8]))
     return "\n".join(out)
 
 

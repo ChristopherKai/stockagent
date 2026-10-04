@@ -26,6 +26,15 @@ funds:
       cheap_quantile: 0.2           # 没有目标价时：便宜程度须排在股票池前 20%
       review_drop: 0.2              # 较成本跌 20% 推送复核提醒（不机械止损）
       tranches: 3
+      # 防价值陷阱
+      roe_cap: 40.0                 # ROE 超过 40% 按 40% 计分并在理由里标出（多半是低净资产或一次性收益）
+      ey_cap: 0.20                  # 盈利收益率计分上限
+      fcf_yield_cap: 0.20           # FCF Yield 计分上限
+      min_fcf_years: 2              # 最近 fcf_window 个年度里 FCF 为正至少 2 年（年度数据不足 2 年的不达标）
+      fcf_window: 3
+      fcf_stability: 0.3            # 最差一年 FCF 不低于平均的 30%（排除营运资金一次性波动撑起来的高 FCF）
+      exclude_flags: [fcf_unstable, cash_and_debt, no_payout, minority, net_debt, stale]   # 选股器的风险标记，命中即排除
+      llm_veto: true                # 新建仓前过模型否决（只能否决；模型不可用时不新建仓）
 
   - id: a_sector_trend
     name: A 股景气趋势
@@ -54,6 +63,19 @@ risk:
   cross_fund_cap: 0.10              # 同一发行人（A+H 合并）在全部基金合计不超过总资金 10%
   drift: 0.05                       # 权重偏离不到 5 个百分点不调
   replace_margin: 0.20              # 满仓时新候选须比最弱持仓高 20% 才替换
+
+# 新建仓前的风险排除（所有基金共用）。名单由你维护；负面公告来自选股器的全市场公告扫描（screen_events）。
+exclusions:
+  codes:
+    "HK:06666": 控股股东中国恒大集团已被香港高等法院颁令清盘（2024-01）
+  name_keywords:
+    恒大: 所属恒大集团，母公司清盘中
+  event_kinds: [default, delist_risk, audit, investigation]   # 违约 / 清盘 / 债务重组、退市风险、非标审计、立案调查
+  event_days: 365
+
+# 新建仓前的模型否决：复用选股器快筛的模型路由（llm.tasks.screen，未配置时用默认 profile），每只按最新报告期缓存
+veto:
+  task: screen
 
 universe:
   min_listing_days: 365

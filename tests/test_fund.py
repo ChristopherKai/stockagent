@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import textwrap
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -728,3 +729,101 @@ def test_hk_value_rechecks_quality_after_new_results(app):
     assert sig.priority == 2 and "新财报" in sig.reason
     good = {**old, "secid": "116.00001", "code": "00001"}
     assert s.update(good, ctx)["flags"]["period"] == row["info"]["report_date"]   # 新财报仍达标：更新报告期
+
+
+# ---------------------------------------------------------------- 价值陷阱防护
+
+
+def with_flows(row: dict, annual: list[float], ttm: float | None = None, cash: float | None = None) -> dict:
+    """按给定的年度 FCF（新 → 旧，资本开支为 0）重写报表；ttm 为最新中报推算用的半年数。"""
+    y = today_local().year
+    flows = [{"date": f"{y}-06-30", "annual": False, "ocf": (ttm if ttm is not None else annual[0]) / 2, "capex": 0.0},
+             {"date": f"{y - 1}-06-30", "annual": False, "ocf": annual[0] / 2, "capex": 0.0}]
+    flows += [{"date": f"{y - 1 - i}-12-31", "annual": True, "ocf": v, "capex": 0.0} for i, v in enumerate(annual)]
+    flows.sort(key=lambda x: x["date"], reverse=True)
+    bal = dict(row["fcf"]["balance"])
+    if cash is not None:
+        bal["cash"] = cash
+    return {**row, "fcf": {"flows": flows, "balance": bal}}
+
+
+def test_hk_value_caps_outliers_and_checks_fcf_consistency(app):
+    s = HKQualityValue({"cheap_quantile": 1.0})
+    ctx = hk_ctx(app, date(2026, 10, 8))
+    extreme = hk_row("00009", "极端", 80, 2)                                    # ROE 80%、盈利收益率 50%
+    swing = with_flows(hk_row("00010", "波动", 25, 6), [40e8, 2e8, 30e8])       # 最差一年只有平均的 8%
+    short = with_flows(hk_row("00011", "新上市", 25, 6), [40e8])                # 只有一个年度
+    cashbox = hk_row("00012", "囤现金", 25, 6, mcap=50e8)
+    cashbox["info"] = {**cashbox["info"], "dividend_yield": None, "payout": None}  # 净现金高、不派息
+    ctx.universe = ctx.universe + [extreme, swing, short, cashbox]
+    for r in (extreme, swing, short, cashbox):
+        ctx.ind[r["secid"]] = ctx.ind["116.00001"]
+    m, fail = s._metrics(extreme, ctx)
+    assert fail is None and m["roe_s"] == 40 and m["ey_s"] == 0.20 and "按上限" in m["outliers"]
+    assert "波动" in s._metrics(swing, ctx)[1]
+    assert "数据不足" in s._metrics(short, ctx)[1]
+    assert s._metrics(cashbox, ctx)[1].startswith("风险标记")                  # 选股器的 no_payout 标记
+    out = {t.code: t for t in s.score(ctx)}
+    assert "00010" not in out and "00011" not in out and "00012" not in out
+    assert "按上限" in out["00009"].reason and out["00009"].metrics["fcf_yield"] <= 0.20
+
+
+def test_exclusions_from_list_keywords_and_negative_events(app):
+    from stockagent.utils import iso, utcnow
+
+    cfg = fcfg.FundsFile.model_validate({"exclusions": {"codes": {"HK:00001": "控股股东清盘"}, "name_keywords": {"恒大": "集团清盘"}}})
+    rows = [hk_row("00001", "优质便宜", 25, 6), hk_row("06666", "恒大物业", 30, 6), hk_row("00005", "一般便宜", 14, 7),
+            hk_row("00007", "正常", 20, 8)]
+    seed_universe(app, rows)
+    sc_store.add_events(app.db, [{"uid": "e1", "secid": "116.00005", "market": "HK", "code": "00005", "name": "一般便宜",
+                                  "source": "hkex", "kind": "default", "direction": "negative", "weight": 3.0,
+                                  "title": "有关清盘呈请的公告", "published_at": iso(utcnow())}])
+    from stockagent.fund import guards
+
+    ex, hits = guards.exclusions(app, cfg, rows)
+    assert ex["116.00001"].startswith("排除名单") and "恒大" in ex["116.06666"] and "清盘呈请" in ex["116.00005"]
+    assert "116.00007" not in ex and hits == {"名单": 1, "名称关键词": 1, "负面公告": 1}
+    ctx = hk_ctx(app, date(2026, 10, 8))
+    ctx.excluded = {"116.00001": "排除名单：控股股东清盘"}
+    s = HKQualityValue({"cheap_quantile": 1.0})
+    assert "00001" not in [t.code for t in s.score(ctx)]
+    assert ctx.excluded_hits and ctx.excluded_hits[0][0] == "00001"
+    p = {"secid": "116.00001", "code": "00001", "name": "优质便宜", "shares": 1000, "avg_cost": 20.0, "tranches": 1, "flags": {}}
+    sig = s.check_exit(p, ctx)
+    assert sig.action == "sell" and sig.priority == 2 and "风险排除" in sig.reason
+
+
+def test_llm_veto_replaces_vetoed_buys_caches_and_fails_closed(funded, app, monkeypatch):
+    from stockagent.fund import guards
+
+    cfg, as_of = funded
+    calls = []
+
+    def fake_judge(app_, cfg_, fund_name, u, metrics, events, flags):
+        calls.append(u["code"])
+        if u["code"] == "00001":
+            return {"verdict": "veto", "reason": "控股股东清盘中（背景知识，可能过时）", "model": "fake"}
+        return {"verdict": "pass", "reason": "未见具体风险", "model": "fake"}
+
+    monkeypatch.setattr(guards, "judge", fake_judge)
+    store.set_fund(app.db, "hk_value", params_json=json.dumps({"cheap_quantile": 0.6}))   # 候选多几只，便于递补
+    plans, _ = engine.plan(app, cfg, as_of, ["hk_value"])
+    fp = plans[0]
+    buys = [s["code"] for s in fp.suggestions if s["action"] == "buy"]
+    assert "00001" not in buys and buys                                   # 被否决的由后面的候选递补
+    assert "00001" in calls and any("模型否决 1 只" in n and "00001" in n for n in fp.notes)
+    assert json.loads(app.db.kv_get(guards.cache_key("116.00001", today_local().replace(month=6, day=30).isoformat())))["verdict"] == "veto"
+    text = "\n".join(t for _, t in report.plan_messages(plans, as_of))
+    assert "模型否决" in text
+    # 第二次用缓存，不再调用模型
+    calls.clear()
+    engine.plan(app, cfg, as_of, ["hk_value"], dry_run=True)
+    assert calls == []
+    # 模型不可用：没有缓存的新建仓一律跳过
+    for k in list(app.db.kv_prefix("fund_veto:")):
+        app.db.kv_delete(k)
+    monkeypatch.setattr(app.llm, "unavailable_reason", lambda task: "没有配置 key")
+    plans, _ = engine.plan(app, cfg, as_of, ["hk_value"], dry_run=True)
+    assert not [s for s in plans[0].suggestions if s["action"] == "buy"]
+    assert any("宁可不买" in n for n in plans[0].notes)
+    assert not app.db.kv_prefix("fund_veto:")                              # dry-run 不写缓存

@@ -64,7 +64,9 @@ class Context:
     trackers: dict[str, dict] = field(default_factory=dict)   # secid → {target, ratio, company_id, company}
     kill: dict[str, list[dict]] = field(default_factory=dict)  # secid → 证伪条件（已触发 / 苗头，含 falsifies）
     hkdcny: float | None = None
+    excluded: dict[str, str] = field(default_factory=dict)     # secid → 风险排除原因（guards.exclusions）
     notes: list[str] = field(default_factory=list)
+    excluded_hits: list[tuple[str, str, str]] = field(default_factory=list)   # 质量达标但被风险排除的 (代码, 名称, 原因)
 
     def row(self, secid: str) -> dict | None:
         return next((u for u in self.universe if u["secid"] == secid), None)
@@ -129,7 +131,10 @@ class HKQualityValue(Strategy):
     便宜：盈利收益率（1 / PE TTM）与保守 FCF Yield 的排名平均（股息率作并列时的参考）。
     买：有目标价的现价 ≤ 目标价 × mos；没有的须便宜程度排在前 cheap_quantile。分 3 批，按综合得分在 min_weight–max_weight 间定权重。
     卖：证伪条件触发；现价 ≥ 目标价（没有目标价时用选股器口径的合理价值）× take_profit；调仓日质量条件不再满足。
-    不设机械止损：较成本跌 review_drop 时推送复核提醒。银行、保险等 FCF 口径不适用的行业不参与。"""
+    不设机械止损：较成本跌 review_drop 时推送复核提醒。银行、保险等 FCF 口径不适用的行业不参与。
+    防价值陷阱：ROE、盈利收益率、FCF Yield 超过上限的按上限计分并标出（极端值多半是低净资产、一次性收益或营运资金波动）；
+    FCF 须在最近 fcf_window 个年度里至少 min_fcf_years 年为正（数据不足即不达标），且最差一年不低于平均的 fcf_stability；
+    选股器的风险标记（exclude_flags）与风险排除名单（guards.exclusions）直接排除；新建仓前还要过模型否决（llm_veto，engine 里做）。"""
 
     key = "hk_quality_value"
     label = "港股质量价值"
@@ -152,6 +157,13 @@ class HKQualityValue(Strategy):
         min_weight: float = 0.05
         max_weight: float = 0.15
         candidates: int = 30
+        roe_cap: float = 40.0              # 计分上限（%）
+        ey_cap: float = 0.20
+        fcf_yield_cap: float = 0.20
+        fcf_window: int = 3                # 看最近几个年度
+        fcf_stability: float = 0.3         # 最差一年 FCF ≥ 平均 × 该比例
+        exclude_flags: list[str] = ["fcf_unstable", "cash_and_debt", "no_payout", "minority", "net_debt", "stale"]
+        llm_veto: bool = True              # 新建仓前过模型否决（只能否决；模型不可用时不新建仓）
 
     def _metrics(self, u: dict, ctx: Context) -> tuple[dict | None, str | None]:
         """(指标, 质量不达标的原因)。行业不适用或缺报表时指标为 None。"""
@@ -166,19 +178,39 @@ class HKQualityValue(Strategy):
             return None, "缺少报表"
         roe, debt, pe = info.get("roe"), info.get("debt_ratio"), u.get("pe_ttm")
         gm, gm0 = info.get("gross_margin"), info.get("gross_margin_prev")
-        m = {"roe": roe, "debt_ratio": debt, "ey": 1 / pe if pe and pe > 0 else 0.0, "fcf_yield": fm["yield_cons"] or 0.0,
-             "dividend_yield": info.get("dividend_yield") or 0.0, "fcf_years": fm["fcf_positive_years"],
-             "margin_drop": (gm0 - gm) if gm is not None and gm0 is not None else None, "fair_price": fm["fair_price"],
-             "net_cash_ratio": fm["net_cash_ratio"]}
+        ey = 1 / pe if pe and pe > 0 else 0.0
+        fy = fm["yield_cons"] or 0.0
+        annual = fm["annual_fcf"][: self.p.fcf_window]
+        avg = sum(annual) / len(annual) if annual else None
+        outliers = []
+        if roe is not None and roe > self.p.roe_cap:
+            outliers.append(f"ROE {roe:.1f}% 按上限 {self.p.roe_cap:.0f}% 计分")
+        if ey > self.p.ey_cap:
+            outliers.append(f"盈利收益率 {ey:.1%} 按上限 {self.p.ey_cap:.0%} 计分")
+        if fy > self.p.fcf_yield_cap:
+            outliers.append(f"保守 FCF Yield {fy:.1%} 按上限 {self.p.fcf_yield_cap:.0%} 计分")
+        m = {"roe": roe, "roe_s": min(roe, self.p.roe_cap) if roe is not None else None, "debt_ratio": debt,
+             "ey": ey, "ey_s": min(ey, self.p.ey_cap), "fcf_yield_raw": fy, "fcf_yield": min(fy, self.p.fcf_yield_cap),
+             "dividend_yield": info.get("dividend_yield") or 0.0, "fcf_years": sum(1 for x in annual if x > 0),
+             "annual_fcf": annual, "margin_drop": (gm0 - gm) if gm is not None and gm0 is not None else None,
+             "fair_price": fm["fair_price"], "net_cash_ratio": fm["net_cash_ratio"], "outliers": "；".join(outliers),
+             "flags": "；".join(f["text"] for f in fm["flags"] if f["severity"] != "info")}
+        bad_flag = next((f for f in fm["flags"] if f["code"] in self.p.exclude_flags), None)
         fail = None
         if roe is None or roe < self.p.min_roe:
             fail = "ROE 不达标"
         elif debt is not None and debt > self.p.max_debt_ratio and (fm["net_cash"] or 0) <= 0:
             fail = "负债率过高"
-        elif fm["fcf_base"] is None or fm["fcf_base"] <= 0 or (fm["annual_n"] >= 2 and fm["fcf_positive_years"] < self.p.min_fcf_years):
-            fail = "FCF 不稳定"
-        elif any(f["severity"] == "high" for f in fm["flags"]):
-            fail = "风险标记（FCF 不稳定或存贷双高）"
+        elif fm["fcf_base"] is None or fm["fcf_base"] <= 0:
+            fail = "最新 FCF 为负"
+        elif len(annual) < self.p.min_fcf_years:
+            fail = f"FCF 年度数据不足 {self.p.min_fcf_years} 年"
+        elif m["fcf_years"] < self.p.min_fcf_years:
+            fail = f"近 {len(annual)} 个年度 FCF 为正不足 {self.p.min_fcf_years} 年"
+        elif len(annual) >= 2 and avg and avg > 0 and min(annual) < self.p.fcf_stability * avg:
+            fail = f"FCF 波动大（最差一年低于平均的 {self.p.fcf_stability:.0%}）"
+        elif bad_flag:
+            fail = f"风险标记：{bad_flag['text'][:30]}"
         return m, fail
 
     def qualifies(self, u: dict, ctx: Context) -> tuple[bool, str | None]:
@@ -202,16 +234,20 @@ class HKQualityValue(Strategy):
             return []
         df = pd.DataFrame(rows)
         # 便宜程度在整个股票池（有报表的）里排名：盈利收益率与保守 FCF Yield 的排名平均，0 = 最便宜
-        df["cheap_pct"] = ((_rank_pct(df["ey"]) + _rank_pct(df["fcf_yield"])) / 2).rank(pct=True)
+        # 极端值按上限计分（ey_s、fcf_yield 已截断），避免一次性因素把排名顶上去
+        df["cheap_pct"] = ((_rank_pct(df["ey_s"]) + _rank_pct(df["fcf_yield"])) / 2).rank(pct=True)
         ok = []
         for _, r in df.iterrows():
             ind = r["ind"]
             if isinstance(r["fail"], str):
-                drop(r["fail"])
+                drop(r["fail"] if not r["fail"].startswith("风险标记") else "风险标记")
             elif not isinstance(ind, dict) or not ind.get("turnover_med20") or ind["turnover_med20"] < ctx.min_turnover:
                 drop("流动性不足或缺日线")
             elif ind["date"] < ctx.expected.isoformat() or ind["volume"] <= 0:
                 drop("停牌或日线未更新")
+            elif r["u"]["secid"] in ctx.excluded:
+                drop("风险排除")
+                ctx.excluded_hits.append((r["u"]["code"], r["u"]["name"], ctx.excluded[r["u"]["secid"]]))
             else:
                 ok.append(r)
         ctx.notes.append(f"{self.label}：有报表 {len(df)} 只，质量与流动性筛选后 {len(ok)} 只（"
@@ -219,7 +255,7 @@ class HKQualityValue(Strategy):
         if not ok:
             return []
         q = pd.DataFrame(ok)
-        quality = _rank_pct(q["roe"]) + 0.25 * q["margin_drop"].fillna(0).clip(lower=0) / max(self.p.max_margin_drop, 1e-9)
+        quality = _rank_pct(q["roe_s"]) + 0.25 * q["margin_drop"].fillna(0).clip(lower=0) / max(self.p.max_margin_drop, 1e-9)
         q["score"] = 100 * (1 - (quality.rank(pct=True) + q["cheap_pct"].rank(pct=True)) / 2)
         out = []
         for _, r in q.sort_values("score", ascending=False).iterrows():
@@ -237,14 +273,16 @@ class HKQualityValue(Strategy):
                     continue
                 gate = f"便宜程度在港股通有报表的 {len(df)} 只中排前 {max(r['cheap_pct'], 0.01):.0%}"
                 bonus = 0.0
-            reason = (f"ROE {r['roe']:.1f}%，盈利收益率 {r['ey']:.1%}，保守 FCF Yield {r['fcf_yield']:.1%}，"
-                      f"股息率 {r['dividend_yield']:.1%}；{gate}")
+            reason = (f"ROE {r['roe']:.1f}%，盈利收益率 {r['ey']:.1%}，保守 FCF Yield {r['fcf_yield_raw']:.1%}，"
+                      f"股息率 {r['dividend_yield']:.1%}；{gate}" + (f"（{r['outliers']}）" if r["outliers"] else ""))
             out.append(Target(secid=u["secid"], code=u["code"], name=u["name"], market="HK", score=round(float(r["score"]) + bonus, 1),
                               weight=0.0, price=ind["close"], entry={"type": "open"}, tranches=self.p.tranches, reason=reason,
                               sector=u.get("industry"), org_code=u.get("org_code"),
                               metrics={k: (None if pd.isna(r[k]) else float(r[k])) for k in
-                                       ("roe", "ey", "fcf_yield", "dividend_yield", "cheap_pct", "fair_price")}
-                              | {"target": tr["target"] if tr else None}))
+                                       ("roe", "ey", "fcf_yield", "fcf_yield_raw", "dividend_yield", "cheap_pct", "fair_price",
+                                        "net_cash_ratio")}
+                              | {"target": tr["target"] if tr else None, "annual_fcf": list(r["annual_fcf"]),
+                                 "outliers": r["outliers"], "flags": r["flags"]}))
             if len(out) >= self.p.candidates:
                 break
         out.sort(key=lambda t: -t.score)
@@ -258,6 +296,8 @@ class HKQualityValue(Strategy):
     def check_exit(self, pos: dict, ctx: Context) -> ExitSignal | None:
         if sig := kill_exit(pos, ctx):
             return sig
+        if why := ctx.excluded.get(pos["secid"]):
+            return ExitSignal("sell", 1.0, 2, f"风险排除：{why}")
         ind = ctx.ind.get(pos["secid"])
         if not ind:
             return None
