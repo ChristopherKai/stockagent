@@ -152,12 +152,24 @@ class ExclusionConfig(BaseModel):
     event_days: int = 365                                         # 回看天数
 
 
+class VetoAllow(BaseModel):
+    """放行名单：你复核过、认为模型否决不成立的标的。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str                           # 00700 / HK:00700 / 600519
+    reason: str
+    date: str                           # 复核日期 YYYY-MM-DD
+
+
 class VetoConfig(BaseModel):
-    """新建仓前的模型否决：只能否决，不能增加或调整仓位；模型不可用时新建仓一律跳过。"""
+    """新建仓前的模型否决：只能否决，不能增加或调整仓位；否决须引用系统里的资料，只凭背景知识的只作提醒；
+    模型不可用时新建仓一律跳过。"""
 
     model_config = ConfigDict(extra="forbid")
 
     task: str = "screen"                # 用哪个任务的模型路由（与选股器快筛相同）
+    allow: list[VetoAllow] = Field(default_factory=list)
     max_tokens: int = 16000             # 推理模型会先想再答，给小了会被截断重试
 
 

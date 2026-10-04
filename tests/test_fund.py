@@ -799,11 +799,11 @@ def test_llm_veto_replaces_vetoed_buys_caches_and_fails_closed(funded, app, monk
     cfg, as_of = funded
     calls = []
 
-    def fake_judge(app_, cfg_, fund_name, u, metrics, events, flags):
+    def fake_judge(app_, cfg_, fund_name, u, metrics, flags):
         calls.append(u["code"])
         if u["code"] == "00001":
-            return {"verdict": "veto", "reason": "控股股东清盘中（背景知识，可能过时）", "model": "fake"}
-        return {"verdict": "pass", "reason": "未见具体风险", "model": "fake"}
+            return {"verdict": "veto", "reason": "公告显示控股股东清盘", "evidence": ["E1"], "model": "fake"}
+        return {"verdict": "pass", "reason": "未见具体风险", "evidence": [], "model": "fake"}
 
     monkeypatch.setattr(guards, "judge", fake_judge)
     store.set_fund(app.db, "hk_value", params_json=json.dumps({"cheap_quantile": 0.6}))   # 候选多几只，便于递补
@@ -827,3 +827,65 @@ def test_llm_veto_replaces_vetoed_buys_caches_and_fails_closed(funded, app, monk
     assert not [s for s in plans[0].suggestions if s["action"] == "buy"]
     assert any("宁可不买" in n for n in plans[0].notes)
     assert not app.db.kv_prefix("fund_veto:")                              # dry-run 不写缓存
+
+
+
+class FakeResult:
+    def __init__(self, data):
+        self.data, self.model = data, "fake"
+
+
+def test_veto_must_cite_supplied_evidence(app, monkeypatch):
+    from stockagent.fund import guards
+    from stockagent.utils import iso, utcnow
+
+    cfg = fcfg.FundsFile.model_validate({})
+    u = hk_row("00001", "优质便宜", 25, 6)
+    seed_universe(app, [u])
+    sc_store.add_events(app.db, [{"uid": "x1", "secid": "116.00001", "market": "HK", "code": "00001", "name": "优质便宜",
+                                  "source": "hkex", "kind": "default", "direction": "negative", "weight": 3.0,
+                                  "title": "有关控股股东清盘呈请的公告", "published_at": iso(utcnow())}])
+    ev = guards.evidence(app, u, ["代码标记：不派息"])
+    assert ev[0][0] == "E1" and "清盘呈请" in ev[0][1] and ev[-1][1].startswith("代码标记")
+    seen = {}
+
+    def fake(task, system, user, **kw):
+        seen["user"] = user
+        return FakeResult(seen["reply"])
+
+    monkeypatch.setattr(app.llm, "complete", fake)
+    seen["reply"] = {"verdict": "veto", "reason": "公告显示控股股东清盘", "evidence": ["E1"]}
+    r = guards.judge(app, cfg, "港股质量价值", u, {}, [])
+    assert r["verdict"] == "veto" and r["evidence"] == ["E1"] and "清盘呈请" in r["evidence_text"][0]
+    assert "[E1]" in seen["user"] and "[F1]" in seen["user"]
+    seen["reply"] = {"verdict": "veto", "reason": "背景知识：董事长曾被调查", "evidence": []}
+    assert guards.judge(app, cfg, "x", u, {}, [])["verdict"] == "flag"           # 只凭背景知识：降为提醒
+    seen["reply"] = {"verdict": "veto", "reason": "编造的依据", "evidence": ["E99"]}
+    assert guards.judge(app, cfg, "x", u, {}, [])["verdict"] == "flag"           # 引用不存在的资料也不算
+    seen["reply"] = {"verdict": "pass", "reason": "无", "evidence": []}
+    assert guards.judge(app, cfg, "x", u, {}, [])["verdict"] == "pass"
+    # 缓存键带提示词版本：旧版本的结果不再使用
+    app.db.kv_set("fund_veto:116.00001:" + u["info"]["report_date"], json.dumps({"verdict": "veto", "reason": "旧"}))
+    assert guards.cached(app, "116.00001", u["info"]["report_date"]) is None
+
+
+def test_flags_do_not_block_and_allowlist_overrides(funded, app, monkeypatch):
+    from stockagent.fund import guards
+
+    cfg, as_of = funded
+    store.set_fund(app.db, "hk_value", params_json=json.dumps({"cheap_quantile": 0.6}))
+    verdicts = {"00001": {"verdict": "flag", "reason": "背景知识：传闻治理问题", "evidence": []},
+                "00005": {"verdict": "veto", "reason": "公告显示清盘", "evidence": ["E1"]}}
+    monkeypatch.setattr(guards, "judge", lambda a, c, n, u, m, f: verdicts.get(u["code"], {"verdict": "pass", "reason": "", "evidence": []}))
+    fp = engine.plan(app, cfg, as_of, ["hk_value"], dry_run=True)[0][0]
+    buys = {s["code"]: s for s in fp.suggestions if s["action"] == "buy"}
+    assert "00001" in buys and "未核实" in buys["00001"]["trigger"]["flag"]          # 提醒不阻止，建议里带说明
+    assert "00005" not in buys
+    assert any("模型提醒 1 只" in n for n in fp.notes) and any("模型否决 1 只" in n and "E1" in n for n in fp.notes)
+    cfg.veto.allow.append(fcfg.VetoAllow(code="HK:00005", reason="已复核，清盘公告指的是子公司", date="2026-10-04"))
+    fp = engine.plan(app, cfg, as_of, ["hk_value"], dry_run=True)[0][0]
+    buys = {s["code"]: s for s in fp.suggestions if s["action"] == "buy"}
+    assert "00005" in buys and "放行名单" in buys["00005"]["trigger"]["flag"]
+    assert any("放行名单覆盖 1 只" in n for n in fp.notes)
+    text = "\n".join(t for _, t in report.plan_messages([fp], as_of))
+    assert "放行名单" in text or "未核实" in text

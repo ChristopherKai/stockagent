@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 import pandas as pd
 
@@ -272,44 +272,61 @@ def exclusion_notes(app: App, md: MarketData, ctx: Context) -> list[str]:
     return [line]
 
 
-def veto_buys(app: App, cfg: FundsFile, f: dict, md: MarketData, targets: list[Target], build, dry_run: bool) -> tuple[risk.Plan, list[str]]:
-    """新建仓前的模型否决：先按全部候选出计划，把计划里的新建仓逐只交给模型（有缓存用缓存）；被否决或无法检查的去掉、
-    由后面的候选递补，再出一次计划，直到新建仓都已放行。模型只能去掉候选，不能增加或调整仓位。"""
-    from ..screen import store as sc_store
+def blocking(r: dict) -> bool:
+    """否决（引用了系统资料）或无法检查时不建仓；放行名单覆盖否决；只凭背景知识的标记不阻止。"""
+    if r.get("allowed"):
+        return r["verdict"] == "skip"
+    return r["verdict"] in ("veto", "skip")
 
+
+def veto_buys(app: App, cfg: FundsFile, f: dict, md: MarketData, targets: list[Target], build, dry_run: bool) -> tuple[risk.Plan, list[str]]:
+    """新建仓前的模型否决：先按全部候选出计划，把计划里的新建仓逐只交给模型（附上系统里的公告、新闻、风险标记，有缓存用缓存）；
+    引用了资料的否决、无法检查的去掉，由后面的候选递补，再出一次计划，直到剩下的新建仓都不被阻止。
+    只凭背景知识的否决降为提醒（写进建议与提示），放行名单覆盖否决。模型只能去掉候选，不能增加或调整仓位。"""
     rows = {u["secid"]: u for u in md.universe}
     by_sid = {t.secid: t for t in targets}
     checked: dict[str, dict] = {}
     ts = list(targets)
-    since = iso(utcnow() - timedelta(days=180))
     p = build(ts)
     for _ in range(10):
         new = [s for s in p.suggestions if s["action"] == "buy" and s["secid"] not in checked and s["secid"] in rows]
         if not new:
             break
-        cands = []
-        for s in new:
-            t = by_sid[s["secid"]]
-            evs = sc_store.events_since(app.db, since, s["secid"])
-            flags = [x for x in (t.metrics.get("flags"), t.metrics.get("outliers")) if x]
-            cands.append({"u": rows[s["secid"]], "metrics": t.metrics, "events": evs, "flags": flags})
+        cands = [{"u": rows[s["secid"]], "metrics": by_sid[s["secid"]].metrics,
+                  "flags": [x for x in (by_sid[s["secid"]].metrics.get("flags"), by_sid[s["secid"]].metrics.get("outliers")) if x]}
+                 for s in new]
         checked.update(guards.check(app, cfg, f["name"], cands, dry_run))
-        bad = {sid for sid, r in checked.items() if r["verdict"] != "pass"}
+        bad = {sid for sid, r in checked.items() if blocking(r)}
         if not bad & {s["secid"] for s in p.suggestions if s["action"] == "buy"}:
             break
         ts = [t for t in ts if t.secid not in bad]
         p = build(ts)
-    vetoed = [(sid, r) for sid, r in checked.items() if r["verdict"] == "veto"]
-    skipped = [(sid, r) for sid, r in checked.items() if r["verdict"] not in ("pass", "veto")]
-    passed = [r for r in checked.values() if r["verdict"] == "pass"]
-    notes = []
+    for s in p.suggestions:  # 留下的新建仓带上模型的提醒或放行名单说明（推送与操作建议页都显示）
+        r = checked.get(s["secid"]) if s["action"] == "buy" else None
+        if r and r.get("allowed") and r["verdict"] in ("veto", "flag"):
+            s.setdefault("trigger", {})["flag"] = f"模型{'否决' if r['verdict'] == 'veto' else '提醒'}被放行名单覆盖：{r['reason'][:50]}"
+        elif r and r["verdict"] == "flag":
+            s.setdefault("trigger", {})["flag"] = f"模型提醒（仅凭背景知识，未核实，不阻止）：{r['reason'][:60]}"
 
     def name(sid: str) -> str:
         return f"{rows[sid]['code']} {rows[sid]['name']}"
 
+    vetoed = [(sid, r) for sid, r in checked.items() if r["verdict"] == "veto" and not r.get("allowed")]
+    flagged = [(sid, r) for sid, r in checked.items() if r["verdict"] == "flag" and not r.get("allowed")]
+    overridden = [(sid, r) for sid, r in checked.items() if r.get("allowed") and r["verdict"] in ("veto", "flag")]
+    skipped = [(sid, r) for sid, r in checked.items() if r["verdict"] == "skip"]
+    passed = [r for r in checked.values() if r["verdict"] == "pass"]
+    notes = []
     if vetoed:
-        notes.append(f"模型否决 {len(vetoed)} 只：" + "；".join(f"{name(sid)}（{r['reason'][:50]}）" for sid, r in vetoed[:4])
-                     + ("……" if len(vetoed) > 4 else ""))
+        notes.append(f"模型否决 {len(vetoed)} 只：" + "；".join(
+            f"{name(sid)}（{r['reason'][:50]}；依据 {'、'.join(r.get('evidence') or [])}）" for sid, r in vetoed[:4])
+            + ("……" if len(vetoed) > 4 else ""))
+    if flagged:
+        notes.append(f"模型提醒 {len(flagged)} 只（仅凭背景知识，未核实，照常建仓）：" + "；".join(
+            f"{name(sid)}（{r['reason'][:50]}）" for sid, r in flagged[:4]))
+    if overridden:
+        notes.append(f"放行名单覆盖 {len(overridden)} 只：" + "；".join(
+            f"{name(sid)}（{r['allowed']['reason'][:40]}，{r['allowed']['date']}）" for sid, r in overridden[:4]))
     if skipped:
         notes.append(f"{len(skipped)} 只新建仓没能做模型检查，按规则跳过（宁可不买）：{skipped[0][1]['reason'][:60]}")
     if passed:
@@ -602,12 +619,13 @@ def refresh(app: App, cfg: FundsFile, markets: list[str] | None = None, limit: i
                 held = {p["secid"] for p in store.positions(app.db, f["id"])}
                 top = [t for t in targets if t.secid not in held][: f["max_holdings"] * 2]
                 rows = {u["secid"]: u for u in md.universe}
-                cands = [{"u": rows[t.secid], "metrics": t.metrics, "events": [],
+                cands = [{"u": rows[t.secid], "metrics": t.metrics,
                           "flags": [x for x in (t.metrics.get("flags"), t.metrics.get("outliers")) if x]} for t in top]
                 res = guards.check(app, cfg, f["name"], cands, dry_run=False)
                 fresh = [r for r in res.values() if not r.get("cached")]
                 msgs.append(f"  {f['name']}：模型否决检查 {len(res)} 只（新查 {len(fresh)} 只，否决 "
-                            f"{sum(1 for r in res.values() if r['verdict'] == 'veto')} 只，未能检查 "
+                            f"{sum(1 for r in res.values() if r['verdict'] == 'veto')} 只，仅凭背景知识的提醒 "
+                            f"{sum(1 for r in res.values() if r['verdict'] == 'flag')} 只，未能检查 "
                             f"{sum(1 for r in res.values() if r['verdict'] == 'skip')} 只）")
         if m == "HK":
             n = data.refresh_lots(app, cfg, list(dict.fromkeys(codes)))
