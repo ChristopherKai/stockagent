@@ -21,6 +21,7 @@ PROFILE_SYSTEM = """你是资深行业研究员。根据提供的公司资料（
 ## 业务与收入结构（分业务/分地区，最新一期数据及同比）
 ## 客户与供应商（集中度、主要客户/供应商，如有披露）
 ## 竞争格局与护城河
+## 资本结构与流动性（现金及投资、有息负债与到期结构、可转债/融资安排、经营现金流与资本开支；最新一期数据）
 ## 核心驱动因素（3–6 个可跟踪的量化指标，如价格、销量、产能利用率、毛利率）
 ## 主要风险（按重要性排序）
 ## 近期关注事项（资料里提到的时间节点：解禁、投产、新产品、诉讼进展、业绩指引等）
@@ -34,6 +35,16 @@ KEYWORDS = [
     "主要供應商", "前五名供应商", "行業概覽", "行业情况", "Management Discussion", "Business Review",
     "Principal Risks",
 ]
+# 美国申报文件（10-K / 20-F / 10-Q）的章节标题：全大写的「ITEM 7—MANAGEMENT’S DISCUSSION…」，正文里的交叉引用不会出现在行首
+SECTION_RES = [re.compile(p, re.I | re.M) for p in (
+    r"^item\s*7[\s.:—–-]+management",            # 10-K MD&A
+    r"^item\s*1a[\s.:—–-]+risk factors",         # 10-K / 10-Q 风险因素
+    r"^item\s*5[\s.:—–-]+operating and financial review",  # 20-F
+    r"^item\s*3[\s.:—–-]+key information",       # 20-F（含风险因素）
+    r"^item\s*4[\s.:—–-]+information on the company",  # 20-F 业务概览
+    r"^item\s*2[\s.:—–-]+management.s discussion",  # 10-Q MD&A
+    r"^(?:[a-e]\.\s*)?liquidity and capital resources\s*$",  # MD&A 里的流动性与资本资源（现金、债务、融资与资本开支）；单独成行才算标题
+)]
 
 
 def _merge(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -53,8 +64,10 @@ def select_text(text: str, budget: int) -> tuple[str, bool]:
     if len(text) <= budget:
         return text, False
     head = int(budget * 0.5)
-    hits = [m.start() for kw in KEYWORDS for m in list(re.finditer(re.escape(kw), text[head:]))[:2]]
-    hits = [h + head for h in hits]
+    hits = [m.start() + head for kw in KEYWORDS for m in list(re.finditer(re.escape(kw), text[head:]))[:2]]
+    for rx in SECTION_RES:
+        if m := rx.search(text, head):  # 同一标题只取第一处；目录页在开头一半里，不会命中
+            hits.append(m.start())
     window = min(30000, max(4000, (budget - head) // max(1, len(hits))))
     merged = _merge([(0, head)] + [(max(0, s - 300), min(len(text), s + window)) for s in hits])
     used = sum(e - s for s, e in merged)

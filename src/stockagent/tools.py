@@ -541,6 +541,11 @@ def statement_table(app: App, listing: Listing, kind: str, periods: int, annual_
              + ("；流量为年初至今累计" if kind != "balance" and listing.market != "US" else "") + "）：",
              "| 科目 | " + " | ".join(cols) + " |", "|---|" + "---|" * len(cols)]
     lines += [f"| {label} | " + " | ".join(_cell(label, v) for v in values) + " |" for label, values in data["rows"]]
+    lines += [f"注：{n}。" for n in data.get("notes") or []]
+    if data.get("missing"):
+        lines.append(f"\n注：没有取到{'、'.join(data['missing'])}（公司可能使用了未收录的 XBRL 概念，请查申报原文 documents 里的对应报表）。")
+    if listing.market == "US" and any("推导" in c for c in cols):
+        lines.append("注：标「推导」的列由代码计算（Q4 = 全年 − 前 9 个月累计；近 12 个月 = 上一财年 + 本年累计 − 去年同期累计），不是申报原值。")
     return "\n".join(lines)
 
 
