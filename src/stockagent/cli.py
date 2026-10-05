@@ -15,7 +15,7 @@ from pathlib import Path
 import requests
 
 from . import app as appmod
-from . import brief, consensus, docs, dossier, evaluate, imafeed, jobs, monitor, newco, notify, profile, tracker, triage
+from . import brief, consensus, docs, dossier, evaluate, imafeed, jobs, monitor, newco, notify, profile, tracker, triage, twitterfeed
 from .app import SOURCE_LABEL, App, refine_news_dates
 from .config import ConfigError
 from .llm import LLMError
@@ -180,7 +180,7 @@ def cmd_alert(args) -> None:
             print(PIPELINE_BUSY)
             return
         companies = app.watchlist.select(args.company)
-        _print(appmod.fetch(app, companies, market=False, ima=app.settings.sources.ima.in_alert))
+        _print(appmod.fetch(app, companies, market=False, ima=app.settings.sources.ima.in_alert, twitter=False))
         _print(triage.run(app, companies))
         _print(monitor.run(app, companies))
         _print(brief.alerts(app, do_push=not args.no_push))
@@ -613,7 +613,7 @@ def cmd_web(args) -> None:
     from .web.server import serve  # noqa: PLC0415 - 只有 stock web 需要 FastAPI
 
     try:
-        serve(args.config, port=args.port, background=not args.no_scheduler, open_browser=args.open)
+        serve(args.config, port=args.port, background=not args.no_scheduler, open_browser=args.open, scheduler_on=not args.jobs_only)
     except ConfigError as e:
         sys.exit(str(e))
 
@@ -796,6 +796,37 @@ def cmd_ima(args) -> None:
         sys.exit(str(e))
 
 
+def cmd_twitter(args) -> None:
+    app = _load(args)
+    from .sources import twitter
+
+    if not twitter.available():
+        sys.exit(f"推特不可用：需要安装 twitter-cli（pipx install twitter-cli），并在 .env 填写 {twitter.ENV_AUTH} 与 {twitter.ENV_CT0}"
+                 "（或用 agent-reach configure twitter-cookies 保存 Cookie）")
+    try:
+        if args.action == "candidates":
+            rows = twitterfeed.candidates(app, args.limit)
+            if not rows:
+                print("暂无候选账号（新闻源每次运行会记下检索到的帖子的作者；同一账号出现多次才会列出）")
+            for r in rows:
+                print(f"@{r['handle']}{'✓' if r['verified'] else ''}｜出现 {r['posts']} 次｜总赞 {r['likes']}｜{'、'.join(r['companies'].values())}\n    {r['sample']}\n    {r['url']}")
+            print("加入账号：WebUI 设置 → 通用 → 推特 / X → 账号发现，或编辑 config.yaml 的 sources.twitter.shared_accounts / watchlist 的 twitter_official、twitter_accounts")
+            return
+        if args.action == "fetch":
+            if not twitterfeed.enabled(app):
+                sys.exit("推特新闻源未开启：在 WebUI 设置 → 通用 →「推特 / X」打开「新闻源」，或把 config.yaml 的 sources.twitter.news_feed 设为 true")
+            _print(twitterfeed.fetch(app, app.watchlist.select(args.query and [args.query])))
+            return
+        if not args.query:
+            sys.exit("用法：stock twitter search 检索词 / stock twitter user 账号名")
+        posts = twitter.search(args.query, args.limit, app.settings.sources.twitter.days, app.settings.sources.twitter.min_likes) \
+            if args.action == "search" else twitter.user_posts(args.query, args.limit)
+    except twitter.TwitterError as e:
+        sys.exit(str(e))
+    for p in posts:
+        print(f"{fmt_local(iso(p['at']))}｜@{p['author']}{'✓' if p['verified'] else ''}｜赞{p['likes']}｜{twitterfeed._text(p)[:120]}\n    {p['url']}")
+
+
 def cmd_status(args) -> None:
     app = _load(args)
     s = app.db.stats()
@@ -811,6 +842,12 @@ def cmd_status(args) -> None:
     print("推送渠道：" + ("、".join(chans) if chans else "未配置"))
     kbs = app.settings.sources.ima.knowledge_bases
     print("ima 知识库：" + ("、".join(kbs) if imafeed.enabled(app) else "未启用（需要 .env 的 IMA_CLIENT_ID / IMA_API_KEY 与 sources.ima.knowledge_bases）"))
+    from .sources import twitter
+
+    tw = app.settings.sources.twitter
+    ready = twitter.available()
+    print("推特：" + (f"agent 工具{'开' if tw.agent_tools else '关'}、新闻源{'开' if tw.news_feed else '关'}" if ready
+                    else "未启用（需要安装 twitter-cli 并配置 TWITTER_AUTH_TOKEN / TWITTER_CT0）"))
 
 
 # ---------------------------------------------------------------- 解析
@@ -970,6 +1007,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=30)
     sp.set_defaults(func=cmd_ima)
 
+    sp = sub.add_parser("twitter", help="推特 / X：search 检索 / user 读取账号 / fetch 只抓取新闻源 / candidates 账号发现的候选账号")
+    sp.add_argument("action", choices=["search", "user", "fetch", "candidates"])
+    sp.add_argument("query", nargs="?", help="search 的检索词、user 的账号名；fetch 时可指定一家公司")
+    sp.add_argument("--limit", type=int, default=10)
+    sp.set_defaults(func=cmd_twitter)
+
     scp = sub.add_parser("screen", help="选股器：港股通与 A 股全市场初筛 → 代码打分 → 模型快筛；点选送深研（研究候选，不是买卖建议）")
     ssub = scp.add_subparsers(dest="screen_cmd", required=True)
     sp = ssub.add_parser("refresh", help="刷新股票池、报表数据与全市场公告事件")
@@ -1029,7 +1072,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("web", help="WebUI（只监听 127.0.0.1）：事件与估值修正时间线、观察清单、追踪、模型与日程配置；内置调度器")
     sp.add_argument("--port", type=int, help="端口（默认 config.yaml 的 web.port，8765）")
-    sp.add_argument("--no-scheduler", action="store_true", help="不启动内置调度器与后台任务执行器")
+    sp.add_argument("--no-scheduler", action="store_true", help="不启动内置调度器与后台任务执行器（WebUI 里提交的任务会一直排队）")
+    sp.add_argument("--jobs-only", action="store_true", help="只启动后台任务执行器，不启动内置调度器：测试实例用，WebUI 里提交的任务会执行，但不会按日程自动运行")
     sp.add_argument("--open", action="store_true", help="启动后在浏览器打开")
     sp.set_defaults(func=cmd_web)
     return p

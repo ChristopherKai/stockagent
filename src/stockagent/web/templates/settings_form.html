@@ -11,6 +11,7 @@
 {% for section, label, fields in sections %}
 <section class="card">
   <div class="card-head"><h2>{{ label }}</h2><span class="muted small mono">{{ section }}</span></div>
+  {% if notes and notes.get(section) %}<p class="small muted">{{ notes[section] }}</p>{% endif %}
   <form method="post" action="/settings/section/{{ section }}" class="form">{{ csrf_field }}
     <input type="hidden" name="etag" value="{{ etag }}">
     <div class="grid-fields">
@@ -18,6 +19,32 @@
     </div>
     <button class="btn">保存「{{ label }}」</button>
   </form>
+  {% if section == 'twitter' and twitter_candidates is defined %}
+  <h3>账号发现</h3>
+  {% if twitter_candidates %}
+  <p class="muted small">新闻源按检索词找到的帖子里，反复出现的作者（已登记和已忽略的不再列出）。加入后下次 stock run 起按账号读取；是否可信由你判断，✓ 只表示推特认证，不等于可靠。</p>
+  <div class="tblwrap"><table class="tbl">
+    <thead><tr><th>账号</th><th class="r">出现</th><th class="r">总赞数</th><th>涉及公司</th><th>示例</th><th>加入</th></tr></thead>
+    <tbody>{% for c in twitter_candidates %}
+      <tr><td><a href="https://x.com/{{ c.handle }}" target="_blank" rel="noopener noreferrer">@{{ c.handle }}</a>{% if c.verified %} ✓{% endif %}<div class="muted small">{{ c.name or '' }}</div></td>
+        <td class="r">{{ c.posts }}</td><td class="r">{{ c.likes }}</td>
+        <td class="small">{{ c.companies.values() | join('、') }}</td>
+        <td class="small"><a href="{{ c.url | safe_url }}" target="_blank" rel="noopener noreferrer">{{ c.sample }}</a></td>
+        <td class="nowrap">
+          <form method="post" action="/settings/twitter/accept" class="inline">{{ csrf_field }}
+            <input type="hidden" name="handle" value="{{ c.handle }}"><input type="hidden" name="etag" value="{{ etag }}">
+            <select name="target" aria-label="加入到">
+              <option value="shared" {{ 'selected' if c.suggest == 'shared' }}>全局共享账号</option>
+              {% for cid, cname in c.companies.items() %}<option value="accounts:{{ cid }}" {{ 'selected' if c.suggest == 'accounts:' ~ cid }}>{{ cname }}·媒体/关键人物</option><option value="official:{{ cid }}" {{ 'selected' if c.suggest == 'official:' ~ cid }}>{{ cname }}·官方号</option>{% endfor %}
+            </select><button class="btn tiny">加入</button></form>
+          <form method="post" action="/settings/twitter/dismiss" class="inline">{{ csrf_field }}
+            <input type="hidden" name="handle" value="{{ c.handle }}"><button class="btn tiny ghost">忽略</button></form></td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+  {% else %}
+  <p class="muted small">暂无候选账号：新闻源每次运行会记下检索到的帖子的作者，同一账号在统计期内出现达到「账号发现：最少出现次数」才会列出。</p>
+  {% endif %}
+  {% endif %}
 </section>
 {% endfor %}
 <p class="muted small">嵌套配置（如行情源之外的字典项）请到「原始配置」修改。</p>

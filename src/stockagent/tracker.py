@@ -20,6 +20,8 @@ from datetime import timedelta
 from pydantic import BaseModel, field_validator
 
 from . import anchor, imafeed, technical, verify
+from . import twitterfeed
+from .sources import twitter
 from .app import SOURCE_LABEL, App
 from .config import Company
 from .docs import DOC_TYPES
@@ -53,7 +55,8 @@ DISCLAIMER = "目标价（情景加权估值）由程序按估值假设计算，
 TOOLS = ["calculate", "company_events", "web_search", "fetch_url", "list_filings", "search_filings", "read_filing",
          "market_data", "financials", "statements", "fcf_yield", "broker_research", "earnings_vs_consensus", "shareholders",
          "ccass", "manual_data",
-         "valuation_matrix", "ima_search", "ima_read"]
+         "valuation_matrix", "ima_search", "ima_read", "twitter_search", "twitter_user"]
+WEB_TOOLS = ("web_search", "twitter_search", "twitter_user")  # tracker.web_search 关闭时一并去掉；深度报告运行期间只暂停 web_search
 # 修正时附给 agent 的报告章节（论证逻辑），按顺序截取
 REPORT_SECTIONS = ["核心洞见", "关键经营变量", "估值：框架与可比", "12 个月情景", "证伪条件"]
 SECTION_CHARS = 3000
@@ -415,7 +418,7 @@ def revisions_context(app: App, company: Company, since_id: int, limit: int = 6)
 
 def _allowed_tools(app: App) -> tuple[list[str], str]:
     if not app.settings.tracker.web_search:
-        return [t for t in TOOLS if t != "web_search"], "按配置不使用网页搜索"
+        return [t for t in TOOLS if t not in WEB_TOOLS], "按配置不使用网页搜索"
     if dossier_running(app):
         return [t for t in TOOLS if t != "web_search"], "深度报告正在运行，本次修正暂停网页搜索（避免与它争抢搜索源）"
     return list(TOOLS), ""
@@ -437,6 +440,8 @@ def _research(app: App, company: Company, context: str, evidence: list[Evidence]
     system = [RESEARCH_SYSTEM.format(company=company.title, today=today_local(), max_steps=steps)]
     if "ima_search" in box.tools:
         system.append(imafeed.AGENT_HINT)
+    if "twitter_search" in box.tools:
+        system += [twitter.HINT, line] if (line := twitterfeed.accounts_line(app, company)) else [twitter.HINT]
     user = (context + "\n\n=== 新依据（编号供引用）===\n" + "\n".join(f"- {e.text}" for e in evidence)
             + (f"\n\n（{why}）" if why else "") + (f"\n（{note}）" if note else "")
             + "\n\n请逐条核实与量化，输出修正研究笔记。")

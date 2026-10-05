@@ -148,6 +148,8 @@ def company_entry(c: dict, existing: CommentedMap | None = None) -> CommentedMap
         "notes": LiteralScalarString(notes) if notes and "\n" in notes else notes,
         "watch_items": CommentedSeq(c["watch_items"]) if c.get("watch_items") else None,
         "news_queries": CommentedMap({k: _flow_seq(v) for k, v in c["news_queries"].items() if v}) if c.get("news_queries") else None,
+        "twitter_official": _flow_seq(c["twitter_official"]) if c.get("twitter_official") else None,
+        "twitter_accounts": _flow_seq(c["twitter_accounts"]) if c.get("twitter_accounts") else None,
     }
     if existing is None:
         for k, v in values.items():
@@ -185,6 +187,24 @@ def upsert_company(path: Path, company: dict, etag: str | None, backup_dir: Path
     text = dump(data)
     check_codes(text, {company["id"]: [f"{l['market']}:{l['code']}" for l in company["listings"]]})
     write(path, text, etag, backup_dir)
+
+
+def add_company_handle(path: Path, company_id: str, field: str, handle: str, backup_dir: Path) -> None:
+    """把推特账号加到某家公司的 twitter_official / twitter_accounts（保留注释与写法；已有则不重复）。"""
+    if field not in ("twitter_official", "twitter_accounts"):
+        raise EditError(f"不能写入字段：{field}")
+    data, _ = load(path)
+    entry = next((x for x in data.get("companies") or [] if x.get("id") == company_id), None)
+    if entry is None:
+        raise EditError(f"观察清单中没有「{company_id}」")
+    seq = entry.get(field)
+    if seq is None:
+        entry[field] = _flow_seq([handle])
+    elif handle.lower() not in [str(x).lower() for x in seq]:
+        seq.append(handle)
+    text = dump(data)
+    validate_watchlist(text)
+    write(path, text, None, backup_dir)
 
 
 def delete_company(path: Path, company_id: str, etag: str | None, backup_dir: Path) -> None:
@@ -298,6 +318,11 @@ def save_raw(path: Path, text: str, etag: str | None, backup_dir: Path, kind: st
 
 # 只允许密钥类变量名：避免借「设置 key」改写 PATH、PYTHONPATH 之类会影响子进程的环境变量
 SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*_(KEY|TOKEN|SECRET|WEBHOOK)$")
+EXTRA_SECRET_NAMES = {"TWITTER_CT0"}  # twitter-cli 要求的变量名（x.com 的 ct0 Cookie），不以上述后缀结尾；只放行这一个确切的名字
+
+
+def secret_name_ok(name: str) -> bool:
+    return bool(SECRET_NAME_RE.match(name)) or name in EXTRA_SECRET_NAMES
 
 
 def env_line_re(name: str) -> re.Pattern:
@@ -312,7 +337,7 @@ def _quote(value: str) -> str:
 
 def set_env(path: Path, name: str, value: str | None) -> None:
     """设置（value 为 None 时删除）.env 中的一个变量，并同步当前进程的环境变量。"""
-    if not SECRET_NAME_RE.match(name):
+    if not secret_name_ok(name):
         raise EditError(f"环境变量名不合法：{name}（只能是大写字母、数字、下划线，并以 _KEY / _TOKEN / _SECRET / _WEBHOOK 结尾）")
     if value is not None and ("\n" in value or "\r" in value):
         raise EditError("值不能包含换行")

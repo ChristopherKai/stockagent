@@ -53,7 +53,8 @@ PROFILE_LABELS = {
 }
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,40}$")
 SEARCH_KEYS = {"EXA_API_KEY": "Exa 搜索", "BOCHA_API_KEY": "博查搜索", "TAVILY_API_KEY": "Tavily 搜索", "SERPER_API_KEY": "Serper 搜索"}
-SECTIONS = {"sources": "数据源", "report": "简报", "agent": "研究 agent", "consensus": "业绩 vs 一致预期", "notify": "推送",
+TWITTER_KEYS = {"TWITTER_AUTH_TOKEN": "推特 auth_token（Cookie）", "TWITTER_CT0": "推特 ct0（Cookie）"}
+SECTIONS = {"sources": "数据源", "twitter": "推特 / X", "report": "简报", "agent": "研究 agent", "consensus": "业绩 vs 一致预期", "notify": "推送",
             "web": "WebUI", "chat": "报告研读对话"}
 for k, v in PROFILE_LABELS.items():
     forms.LABELS[f"profile.{k}"] = v
@@ -292,7 +293,24 @@ async def schedule_save(request: Request):
 # ---------------------------------------------------------------- 标的追踪与通用设置
 
 def _section_models(settings: Settings) -> dict:
-    return {s: getattr(settings, s) for s in ("tracker", *SECTIONS)}
+    return {s: (settings.sources.twitter if s == "twitter" else getattr(settings, s)) for s in ("tracker", *SECTIONS)}
+
+
+def _twitter_candidates(h) -> list[dict]:
+    from .. import twitterfeed
+
+    return twitterfeed.candidates(h.app) if h.app.settings.sources.twitter.discover else []
+
+
+def _twitter_note(h) -> str:
+    from ..sources import twitter
+
+    if twitter.BIN is None:
+        return "未找到 twitter-cli：先安装（pipx install twitter-cli）。"
+    if twitter.credentials() is None:
+        return "twitter-cli 已安装，但没有凭证：到「密钥」页填 TWITTER_AUTH_TOKEN 与 TWITTER_CT0（x.com 登录后用 Cookie-Editor 导出的 auth_token 与 ct0）。凭证齐全前，下面两个开关都不会生效。"
+    return ("twitter-cli 与凭证就绪。Cookie 会过期，失效时工具报错并暂停 60 分钟。新闻源抓三类：下面的全局共享账号、每家公司编辑页里填的官方号 / 媒体·快讯·关键人物账号，以及按公司名、代号、跟踪词检索到的高互动帖子。"
+            "你登记的账号（共享、官方、媒体 / 快讯 / 关键人物）按已证实的消息处理，研究 agent 也据此引用；检索来的任意作者仍是未经证实，分级后重要性由代码封顶。")
 
 
 @router.get("/tracker")
@@ -309,7 +327,51 @@ def general_settings(request: Request):
     _, etag = yamledit.load(h.config_path)
     models = _section_models(h.app.settings)
     return page(request, "settings_form.html", title="通用设置", etag=etag, active="general",
-                sections=[(s, label, forms.fields(s, models[s])) for s, label in SECTIONS.items()])
+                sections=[(s, label, forms.fields(s, models[s])) for s, label in SECTIONS.items()],
+                notes={"twitter": _twitter_note(h)}, twitter_candidates=_twitter_candidates(h))
+
+
+@router.post("/twitter/accept")
+async def twitter_accept(request: Request):
+    """账号发现：把候选账号加入全局共享账号，或某家公司的官方号 / 媒体号。"""
+    h, data, _ = _config(request)
+    form = await request.form()
+    handle = (form.get("handle") or "").strip().lstrip("@")
+    target = form.get("target") or ""
+    url = "/settings/general"
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,15}", handle):
+        return back(url, err="账号名不合法")
+    try:
+        if target == "shared":
+            tw = data.setdefault("sources", CommentedMap()).setdefault("twitter", CommentedMap())
+            seq = tw.get("shared_accounts")
+            if seq is None:
+                tw["shared_accounts"] = yamledit._flow_seq([handle])
+            elif handle.lower() not in [str(x).lower() for x in seq]:
+                seq.append(handle)
+            yamledit.save_config(h.config_path, data, form.get("etag"), h.backup_dir)
+            where = "全局共享账号"
+        else:
+            field, _, cid = target.partition(":")
+            if field not in ("official", "accounts") or h.app.watchlist.get(cid) is None:
+                return back(url, err="目标不合法")
+            yamledit.add_company_handle(h.watchlist_path, cid, f"twitter_{field}", handle, h.backup_dir)
+            where = f"{h.app.watchlist.get(cid).name}的{'官方号' if field == 'official' else '媒体 / 关键人物账号'}"
+        h.reload()
+    except yamledit.EditError as e:
+        return back(url, err=str(e))
+    return back(url, ok=f"已把 @{handle} 加入{where}")
+
+
+@router.post("/twitter/dismiss")
+async def twitter_dismiss(request: Request):
+    h = holder(request)
+    form = await request.form()
+    handle = (form.get("handle") or "").strip().lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,15}", handle):
+        return back("/settings/general", err="账号名不合法")
+    h.app.db.twitter_dismiss(handle)
+    return back("/settings/general", ok=f"已忽略 @{handle}（不再列为候选）")
 
 
 @router.post("/section/{section}")
@@ -326,9 +388,10 @@ async def section_save(request: Request, section: str):
         return back(url, err=str(e))
     model = models[section]
     defaults = {k: f.default for k, f in type(model).model_fields.items() if not f.is_required()}
-    target = data.get(section)
+    parent = data.setdefault("sources", CommentedMap()) if section == "twitter" else data
+    target = parent.get(section)
     if target is None:
-        target = data[section] = CommentedMap()
+        target = parent[section] = CommentedMap()
     yamledit.update_map(target, values, defaults)
     label = "标的追踪" if section == "tracker" else SECTIONS[section]
     return _save(request, h, data, form.get("etag"), f"已保存「{label}」设置", url)
@@ -346,7 +409,7 @@ def _secret_names(h) -> dict[str, list[str]]:
                          ("wecom_webhook_env", "企业微信 webhook"), ("telegram_token_env", "Telegram token")):
         if env := getattr(s.notify, field):
             names.setdefault(env, []).append(label)
-    for env, label in SEARCH_KEYS.items():
+    for env, label in {**SEARCH_KEYS, **TWITTER_KEYS}.items():
         names.setdefault(env, []).append(label)
     return names
 
@@ -354,7 +417,7 @@ def _secret_names(h) -> dict[str, list[str]]:
 @router.get("/secrets")
 def secrets_page(request: Request):
     h = holder(request)
-    rows = [{"name": n, "used": used, "mask": yamledit.mask(_env_value(h, n)), "valid": bool(yamledit.SECRET_NAME_RE.match(n))}
+    rows = [{"name": n, "used": used, "mask": yamledit.mask(_env_value(h, n)), "valid": yamledit.secret_name_ok(n)}
             for n, used in _secret_names(h).items()]
     return page(request, "settings_secrets.html", rows=rows, env_path=h.env_path)
 

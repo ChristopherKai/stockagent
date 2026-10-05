@@ -56,6 +56,14 @@
       {% endfor %}
       </div>
     </fieldset>
+    <fieldset><legend>推特账号（推特新闻源开启时使用；每行或逗号分隔一个，不带 @）</legend>
+      <div class="row3">
+        <label>官方号<textarea name="twitter_official" rows="2" placeholder="XPENG_Global">{{ val('twitter_official', company.twitter_official | join('\n') if company else '') }}</textarea>
+          <small>按已证实的消息；帖子全部收录，营销图文由分级过滤</small></label>
+        <label>媒体 / 快讯号 / 关键人物<textarea name="twitter_accounts" rows="2" placeholder="wallstengine">{{ val('twitter_accounts', company.twitter_accounts | join('\n') if company else '') }}</textarea>
+          <small>按已证实的消息；帖子不做关键词匹配，由分级结合本公司画像判断相关性；研究 agent 也按已证实引用</small></label>
+      </div>
+    </fieldset>
     <div class="actions"><button class="btn">保存到 watchlist.yaml</button>
       <span class="muted small">保存前会完整校验；原文件自动备份到 data/backups/。</span></div>
   </form>

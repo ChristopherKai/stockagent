@@ -27,6 +27,8 @@ from . import anchor, imafeed, verify
 from .app import MARKET_LABEL, App
 from .config import Company
 from .llm import LLMError
+from . import twitterfeed
+from .sources import twitter
 from .sources.web import search_failed
 from .tools import ToolBox, fcf_snapshot, hk_consensus, resolve_ticker, tool_log_markdown
 from .valuation import card_stats, stats_line
@@ -438,6 +440,8 @@ def research(app: App, company: Company, key: str, title: str, questions: str, m
               app.company_context(company)]
     if imafeed.enabled(app):
         system.append(imafeed.AGENT_HINT)
+    if "twitter_search" in box.tools:
+        system += [twitter.HINT, line] if (line := twitterfeed.accounts_line(app, company)) else [twitter.HINT]
     alerts = previous_alerts(app, company)
     revs = previous_revisions(app, company)
     note = pricing_note(company)
@@ -502,6 +506,8 @@ def fill_gaps(app: App, company: Company, notes: dict, market: str, progress) ->
               app.company_context(company)]
     if imafeed.enabled(app):
         system.append(imafeed.AGENT_HINT)
+    if "twitter_search" in box.tools:
+        system += [twitter.HINT, line] if (line := twitterfeed.accounts_line(app, company)) else [twitter.HINT]
     user = ("需要补齐的关键数据：\n"
             + "\n".join(f"{i}. {g['name']}——为什么关键：{g['why']}；建议检索：{'；'.join(g['queries'])}；可能来源：{'、'.join(g['sources'])}"
                         for i, g in enumerate(gaps, 1))

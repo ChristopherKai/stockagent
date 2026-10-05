@@ -102,8 +102,9 @@ def page(request: Request, template: str, status_code: int = 200, **ctx) -> HTML
 
 
 def create_app(config_path: str | Path = "config.yaml", allowed_hosts: list[str] | None = None,
-               start_background: bool = True) -> FastAPI:
-    """start_background：启动任务执行器与调度器（测试里关闭）。同一台机器只有一个 stock web 进程会运行它们（web 锁）。"""
+               start_background: bool = True, start_scheduler: bool = True) -> FastAPI:
+    """start_background：启动任务执行器与调度器（测试里关闭）；start_scheduler=False 时只启动任务执行器（WebUI 里提交的任务会执行，但不按日程自动运行）。
+    同一台机器只有一个 stock web 进程会运行它们（web 锁）。"""
     holder = AppHolder(config_path)
     runner = JobRunner(holder)
     sched = scheduler.Scheduler(holder)
@@ -117,9 +118,10 @@ def create_app(config_path: str | Path = "config.yaml", allowed_hosts: list[str]
             if stack.enter_context(holder.app.lock("web")):
                 holder.app.db.fail_pending_chat_messages(chat.INTERRUPTED)  # 上次退出时没写完的回答
                 runner.start()
-                sched.start()
                 stack.callback(runner.stop)
-                stack.callback(sched.stop)
+                if start_scheduler:
+                    sched.start()
+                    stack.callback(sched.stop)
             else:
                 log.warning("已有 stock web 在运行：本进程不启动任务执行器与调度器")
         try:
@@ -130,6 +132,7 @@ def create_app(config_path: str | Path = "config.yaml", allowed_hosts: list[str]
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None, title="stockagent")
     app.state.holder = holder
     app.state.runner = runner
+    app.state.scheduler = sched
     app.state.chat_pool = chat_pool
     app.middleware("http")(security_middleware)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts or LOOPBACK_HOSTS)  # 最外层：先挡掉非本机 Host
@@ -152,17 +155,20 @@ def create_app(config_path: str | Path = "config.yaml", allowed_hosts: list[str]
     return app
 
 
-def serve(config_path: str | Path, port: int | None = None, background: bool = True, open_browser: bool = False) -> None:
+def serve(config_path: str | Path, port: int | None = None, background: bool = True, open_browser: bool = False,
+          scheduler_on: bool = True) -> None:
     import uvicorn  # noqa: PLC0415 - 只有 stock web 需要
 
-    app = create_app(config_path, start_background=background)
+    app = create_app(config_path, start_background=background, start_scheduler=scheduler_on)
     holder: AppHolder = app.state.holder
     port = port or holder.app.settings.web.port
     if websrc.MCPORTER is None and shutil.which("mcporter", path="/opt/homebrew/bin:/usr/local/bin"):
         print("提示：PATH 中找不到 mcporter（Exa 搜索会不可用）。用 launchd / cron 启动时，请在环境变量 PATH 里加上 /opt/homebrew/bin")
     url = f"http://127.0.0.1:{port}/"
     print(f"stockagent WebUI：{url}（只监听本机；Ctrl+C 退出）")
-    if not holder.app.settings.scheduler.enabled:
+    if background and not scheduler_on:
+        print("只启动后台任务执行器（--jobs-only）：WebUI 里提交的任务会执行，但内置调度器未启动，不会按日程自动运行")
+    elif not holder.app.settings.scheduler.enabled:
         print("内置调度器已关闭（config.yaml 的 scheduler.enabled）")
     if open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
