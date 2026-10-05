@@ -352,6 +352,31 @@ def _store_release(app: App, company: Company, x: dict, head: str, full: str, ur
         tmp.unlink(missing_ok=True)
 
 
+def backfill_releases(app: App, company: Company, limit: int = 8, days: int = 500) -> list[str]:
+    """已有的业绩公告（8-K Item 2.02）补入全文：fetch_filings 只处理新出现的申报，之前入库的 8-K 没有存过新闻稿。
+    每份用 kv `release:<accession>` 记一笔，只补最近 limit 份，重复运行不会再下载。"""
+    listing = company.listing("US")
+    ua = app.settings.sources.sec_user_agent
+    if not listing or not ua:
+        return []
+    cik = ids.sec_cik(app.db, app.session, listing, ua)
+    if not cik:
+        return []
+    rows = [x for x in sec.filings(app.session, cik, ua, days_ago(days), {"8-K"}) if "2.02" in x["title"]]
+    rows = sorted(rows, key=lambda x: x["published_at"], reverse=True)[:limit]
+    stored = 0
+    for x in rows:
+        key = f"release:{x['source_id']}"
+        if app.db.kv_get(key):
+            continue
+        got = sec.exhibit_text(app.session, cik, x["source_id"], ua, with_full=True)
+        if got:
+            _store_release(app, company, x, got[0], got[2], got[3])
+            stored += 1
+        app.db.kv_set(key, "1")
+    return [f"{company.name}：补入业绩新闻稿 {stored} 份"] if stored else []
+
+
 def fetch_filings(app: App, company: Company, listing: Listing) -> list[str]:
     src = app.settings.sources
     key = f"fetched:filings:{listing.key}"
