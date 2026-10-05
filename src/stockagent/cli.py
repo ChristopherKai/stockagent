@@ -16,7 +16,7 @@ import requests
 
 from . import app as appmod
 from . import brief, consensus, docs, dossier, evaluate, imafeed, jobs, monitor, newco, notify, profile, tracker, triage, twitterfeed
-from .app import SOURCE_LABEL, App, refine_news_dates
+from .app import SOURCE_LABEL, App, backfill_releases, refine_news_dates
 from .config import ConfigError
 from .llm import LLMError
 from .utils import fmt_local, iso, lock_holder, pct, today_local, utcnow
@@ -119,6 +119,7 @@ def _ensure_reports(app: App, companies) -> list[str]:
             continue
         try:
             msgs += docs.fetch_reports(app.db, app.session, app.data_dir, c, app.settings.sources.sec_user_agent)
+            msgs += backfill_releases(app, c)
             app.db.kv_set(key, today)
         except Exception as e:
             msgs.append(f"✗ {c.name} 定期报告检查失败：{e}")
@@ -638,7 +639,8 @@ def cmd_docs(args) -> None:
     app = _load(args)
     if args.docs_cmd == "fetch":
         for c in app.watchlist.select(args.company):
-            _print(docs.fetch_reports(app.db, app.session, app.data_dir, c, app.settings.sources.sec_user_agent) or [f"{c.name}：定期报告已是最新"])
+            _print((docs.fetch_reports(app.db, app.session, app.data_dir, c, app.settings.sources.sec_user_agent) + backfill_releases(app, c))
+                   or [f"{c.name}：定期报告已是最新"])
     elif args.docs_cmd == "add":
         c = app.watchlist.get(args.company)
         if c is None:

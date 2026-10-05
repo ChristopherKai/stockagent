@@ -327,3 +327,19 @@ def test_us_only_company_also_gets_prior_10ks_and_proxy(app):
     docs.fetch_reports(app.db, _Session(subs, HTML.encode()), app.data_dir, co, "me@example.com")
     got = {(d["doc_type"], d["period"]) for d in app.db.documents("bloom")}
     assert got == {("annual_report", "2025"), ("annual_report", "2024"), ("annual_report", "2023"), ("other", "DEF14A-2026")}
+
+
+def test_backfill_releases_stores_old_item_202_once(app, monkeypatch):
+    from stockagent import app as appmod
+
+    co = Company(id="bloom", name="Bloom", listings=[Listing(market="US", code="BE", exchange="NYSE")])
+    app.settings.sources.sec_user_agent = "ua"
+    app.db.kv_set("sec_cik:BE", "1664703")
+    rows = [{"source_id": "0001-26-1", "title": "8-K（8-K items: 2.02,9.01 · 业绩公告）", "category": "8-K", "published_at": datetime.now(timezone.utc)},
+            {"source_id": "0001-26-2", "title": "8-K（8-K items: 5.02 · 董事/高管变动）", "category": "8-K", "published_at": datetime.now(timezone.utc)}]
+    monkeypatch.setattr(sec, "filings", lambda *a, **k: rows)
+    calls = []
+    monkeypatch.setattr(sec, "exhibit_text", lambda s, cik, acc, ua, with_full=False: calls.append(acc) or ("Q2 Results", "b", "Revenue up.", "https://x/ex.htm"))
+    assert appmod.backfill_releases(app, co) == ["Bloom：补入业绩新闻稿 1 份"]
+    assert calls == ["0001-26-1"] and len(app.db.documents("bloom")) == 1
+    assert appmod.backfill_releases(app, co) == [] and calls == ["0001-26-1"]  # 第二次不再下载
