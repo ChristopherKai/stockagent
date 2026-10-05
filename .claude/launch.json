@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "stock-web-preview",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "stock", "web", "--port", "8766", "--no-scheduler"],
+      "port": 8766
+    }
+  ]
+}
