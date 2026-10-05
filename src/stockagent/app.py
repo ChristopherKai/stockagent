@@ -301,6 +301,30 @@ def fetch_prices(app: App, listing: Listing) -> list[str]:
     return [f"{listing.display} 日线 {len(bars)} 根，最新 {bars[-1]['date']}（{source}）"]
 
 
+EXHIBITS_PER_RUN = 12  # 每次最多为多少份新的 8-K / 6-K 取新闻稿正文（SEC 限速 10 次/秒，每份 2 次请求）
+
+
+def _add_exhibits(app: App, company: Company, listing: Listing, cik: int, rows: list[dict]) -> None:
+    """新的 8-K / 6-K 只有标题没有内容，分级无从判断：取 EX-99.1 新闻稿开头作摘要（6-K 的标题也换成新闻稿首行）。"""
+    ua, left = app.settings.sources.sec_user_agent, EXHIBITS_PER_RUN
+    for x in rows:
+        if left <= 0:
+            break
+        if x["category"] not in sec.EXHIBIT_FORMS or app.db.has_item(_item(company, listing, "announcement", "sec", x, None)["uid"]):
+            continue
+        left -= 1
+        try:
+            got = sec.exhibit_text(app.session, cik, x["source_id"], ua)
+        except Exception as e:  # 取不到正文不影响公告本身入库
+            log.warning("%s %s 附件抽取失败：%s", listing.display, x["source_id"], e)
+            continue
+        if got:
+            head, body = got
+            x["snippet"] = f"[新闻稿正文] {body}"
+            if x["category"] == "6-K":
+                x["title"] = f"6-K {head}"
+
+
 def fetch_filings(app: App, company: Company, listing: Listing) -> list[str]:
     src = app.settings.sources
     key = f"fetched:filings:{listing.key}"
@@ -324,6 +348,8 @@ def fetch_filings(app: App, company: Company, listing: Listing) -> list[str]:
         if not cik:
             return [f"✗ SEC 找不到 {listing.code}"]
         rows, source = sec.filings(app.session, cik, src.sec_user_agent, start, set(src.sec_forms)), "sec"
+    if source == "sec":
+        _add_exhibits(app, company, listing, cik, rows)
     new = sum(
         app.db.add_item(_item(company, listing, "announcement", source, x, x.get("category") or SOURCE_LABEL[source]))
         for x in rows
