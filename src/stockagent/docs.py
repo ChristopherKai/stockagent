@@ -11,7 +11,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from .config import Company, Watchlist
-from .sources import cninfo, hkex, ids
+from .sources import cninfo, hkex, ids, sec
 from .utils import iso, log, sha256_file, to_float, today_local, utcnow
 
 DOC_TYPES = {
@@ -111,10 +111,47 @@ def extract_text(path: Path) -> tuple[str, int | None]:
                 lines.append(" | ".join(c.text.strip() for c in row.cells))
         return "\n".join(lines), None
     if suffix in (".html", ".htm"):
-        from bs4 import BeautifulSoup
-
-        return BeautifulSoup(_read_text(path), "html.parser").get_text("\n", strip=True), None
+        return html_text(_read_text(path))
     return _read_text(path), None
+
+
+_PAGE_MARK = "\x00PAGE\x00"
+_BREAK_BEFORE = re.compile(r"page-break-before\s*:\s*always|break-before\s*:\s*page", re.I)
+_BREAK_AFTER = re.compile(r"page-break-after\s*:\s*always|break-after\s*:\s*page", re.I)
+_HIDDEN = re.compile(r"display\s*:\s*none", re.I)
+
+
+def html_text(html: str) -> tuple[str, int | None]:
+    """HTML → (文本, 页数)。表格每行一行（单元格用 | 隔开，「$」「)」「%」并入相邻数字）；
+    SEC 申报文件的 iXBRL 隐藏头（ix:header）与 display:none 的块去掉；文件按「分页」样式切页并插入 [第N页]，没有分页样式则不分页。"""
+    from bs4 import BeautifulSoup, NavigableString
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "head", "ix:header"]):
+        tag.decompose()
+    for tag in soup.find_all(style=_HIDDEN):
+        tag.decompose()
+    for tr in soup.find_all("tr"):
+        cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
+        cells = [c for c in cells if c and c != "$"]
+        merged: list[str] = []
+        for c in cells:
+            if merged and c in (")", "%", ")%"):
+                merged[-1] += c
+            elif merged and merged[-1] == "(":
+                merged[-1] = "(" + c
+            else:
+                merged.append(c)
+        tr.replace_with(NavigableString("\n" + " | ".join(merged) + "\n"))
+    for tag in soup.find_all(style=_BREAK_BEFORE):
+        tag.insert_before(NavigableString(_PAGE_MARK))
+    for tag in soup.find_all(style=_BREAK_AFTER):
+        tag.insert_after(NavigableString(_PAGE_MARK))
+    text = soup.get_text("\n", strip=True)
+    if _PAGE_MARK not in text:
+        return text, None
+    pages = [t for t in (re.sub(r"\n{2,}", "\n", p).strip() for p in text.split(_PAGE_MARK)) if t]
+    return "\n\n".join(f"[第{i}页]\n{t}" for i, t in enumerate(pages, 1)), len(pages)
 
 
 def store_document(db, data_dir: Path, company_id: str, src: Path, *, doc_type: str, period: str | None,
@@ -240,10 +277,10 @@ def import_inbox(db, data_dir: Path, watchlist: Watchlist) -> list[str]:
 
 # ---------------------------------------------------------------- 定期报告自动下载
 
-def report_candidates(db, session, company: Company, days: int = 500) -> list[dict]:
-    """最新年报/中期报告列表。A+H 公司优先用巨潮的 A 股简体全文。"""
+def report_candidates(db, session, company: Company, days: int = 500, sec_user_agent: str | None = None) -> list[dict]:
+    """最新年报/中期报告列表。A+H 公司优先用巨潮的 A 股简体全文；只在美股上市的公司取 SEC 的 10-K / 20-F / 10-Q。"""
     end, start = utcnow(), utcnow() - timedelta(days=days)
-    a, h = company.listing("A"), company.listing("HK")
+    a, h, u = company.listing("A"), company.listing("HK"), company.listing("US")
     if a:
         org = ids.cninfo_org_id(db, session, a)
         if org:
@@ -254,26 +291,41 @@ def report_candidates(db, session, company: Company, days: int = 500) -> list[di
         sid = ids.hkex_stock_id(db, session, h)
         if sid:
             return [{**x, "source": "hkex"} for x in hkex.reports(session, sid, start, end)]
+    if u and not a and not h and sec_user_agent:
+        cik = ids.sec_cik(db, session, u, sec_user_agent)
+        if cik:
+            return [{**x, "source": "sec"} for x in sec.reports(session, cik, sec_user_agent, start, end)]
     return []
 
 
-def fetch_reports(db, session, data_dir: Path, company: Company) -> list[str]:
+def fetch_reports(db, session, data_dir: Path, company: Company, sec_user_agent: str | None = None) -> list[str]:
     msgs = []
-    candidates = report_candidates(db, session, company)
-    for doc_type in ("annual_report", "interim_report"):
-        latest = next((c for c in candidates if c["doc_type"] == doc_type), None)
+    candidates = report_candidates(db, session, company, sec_user_agent=sec_user_agent)
+    us_only = bool(company.listing("US")) and not company.listing("A") and not company.listing("HK")
+    if us_only and not sec_user_agent:
+        return [f"{company.name}：跳过美股定期报告，config.yaml 未设置 sources.sec_user_agent"]
+    # 美股公司另外取最新一份 10-Q（季报）；10-K / 20-F 记为年报
+    for doc_type in ("annual_report", "interim_report", "quarterly_report"):
+        if doc_type == "quarterly_report" and not any(c["doc_type"] == doc_type for c in candidates):
+            continue
+        if doc_type == "interim_report" and us_only:
+            continue
         label = DOC_TYPES[doc_type]
+        latest = next((c for c in candidates if c["doc_type"] == doc_type), None)
         if latest is None:
             msgs.append(f"{company.name}：未找到{label}")
             continue
-        period = infer_period(latest["title"], doc_type)
+        period = latest.get("period") or infer_period(latest["title"], doc_type)
         if db.has_document(company.id, doc_type, period):
             continue
         tmp_dir = data_dir / "tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        tmp = tmp_dir / (re.sub(r"[^\w.\-]+", "_", f"{company.name}_{latest['title']}")[:80] + ".pdf")
+        suffix = Path(latest["url"].split("?")[0]).suffix.lower()
+        suffix = suffix if suffix in (".htm", ".html") else ".pdf"
+        tmp = tmp_dir / (re.sub(r"[^\w.\-]+", "_", f"{company.name}_{latest['title']}")[:80] + suffix)
+        headers = {"User-Agent": sec_user_agent} if latest["source"] == "sec" else None  # SEC 要求带联系方式的 User-Agent
         try:
-            with session.get(latest["url"], stream=True, timeout=180) as r:
+            with session.get(latest["url"], headers=headers, stream=True, timeout=180) as r:
                 r.raise_for_status()
                 with open(tmp, "wb") as f:
                     for chunk in r.iter_content(1 << 16):
@@ -282,7 +334,7 @@ def fetch_reports(db, session, data_dir: Path, company: Company) -> list[str]:
                 db, data_dir, company.id, tmp, doc_type=doc_type, period=period, title=latest["title"],
                 source=latest["source"], source_url=latest["url"], published_at=iso(latest["published_at"]),
             )
-            msgs.append(f"下载：{company.name} · {latest['title']}（{doc['pages']} 页，{doc['chars']:,} 字）")
+            msgs.append(f"下载：{company.name} · {latest['title']}（{doc['pages'] or '—'} 页，{doc['chars']:,} 字）")
         except Exception as e:
             msgs.append(f"✗ 下载 {company.name} {latest['title']} 失败：{e}")
         finally:

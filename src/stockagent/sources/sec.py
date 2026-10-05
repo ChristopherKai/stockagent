@@ -48,6 +48,33 @@ def filings(session: requests.Session, cik: int, user_agent: str, start: datetim
     return out
 
 
+def reports(session: requests.Session, cik: int, user_agent: str, start: datetime, end: datetime) -> list[dict]:
+    """年报（10-K / 20-F / 40-F）与季报（10-Q），按申报时间倒序；doc_type 与港股、A 股的口径一致。
+    period 取报告期截止日所在年份（年报）或 YYYY-MM-DD（季报，财年不一定是日历年，不硬套 Q1–Q4）。"""
+    r = session.get(SUBMISSIONS_URL.format(cik=cik), headers={"User-Agent": user_agent}, timeout=30)
+    r.raise_for_status()
+    recent = (r.json() or {}).get("filings", {}).get("recent", {})
+    out = []
+    for i, form in enumerate(recent.get("form", [])):
+        doc_type = "annual_report" if form in ("10-K", "20-F", "40-F") else "quarterly_report" if form == "10-Q" else None
+        if doc_type is None:
+            continue
+        published = datetime.fromisoformat(recent["acceptanceDateTime"][i].replace("Z", "+00:00")).astimezone(timezone.utc)
+        if not start <= published <= end:
+            continue
+        acc, doc = recent["accessionNumber"][i], recent["primaryDocument"][i]
+        period_end = (recent.get("reportDate") or [""] * (i + 1))[i] or published.date().isoformat()
+        out.append({
+            "doc_type": doc_type,
+            "title": f"{form} {period_end}",
+            "period": period_end[:4] if doc_type == "annual_report" else period_end,
+            "period_end": period_end,
+            "url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc.replace('-', '')}/{doc}",
+            "published_at": published,
+        })
+    return sorted(out, key=lambda x: x["published_at"], reverse=True)
+
+
 # ---------------------------------------------------------------- XBRL 财务数据（companyfacts）
 
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
@@ -108,9 +135,9 @@ _facts_cache: dict[int, tuple[float, dict]] = {}
 FACTS_TTL = 3600  # 同一进程内复用（深度报告的 4 个研究 agent 会各查一次，文件有几 MB）
 
 
-def company_facts(session: requests.Session, cik: int, user_agent: str) -> dict:
+def company_facts(session: requests.Session, cik: int, user_agent: str, fresh: bool = False) -> dict:
     hit = _facts_cache.get(cik)
-    if hit and time.time() - hit[0] < FACTS_TTL:
+    if hit and not fresh and time.time() - hit[0] < FACTS_TTL:
         return hit[1]
     r = session.get(FACTS_URL.format(cik=cik), headers={"User-Agent": user_agent}, timeout=60)
     r.raise_for_status()

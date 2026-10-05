@@ -106,9 +106,11 @@ def company_gaps(app: App, company: Company, snaps) -> list[str]:
     have = {(d["doc_type"], d["period"]) for d in docs}
     annual, interim = expected_periods(today_local())
     inbox = f"data/inbox/{company.id}/"
-    if ("annual_report", annual) not in have:
+    us_only = company.listing("US") and not company.listing("A") and not company.listing("HK")
+    have_annual = any(t == "annual_report" and p and p >= annual for t, p in have) if us_only else ("annual_report", annual) in have
+    if not have_annual:  # 美股财年不一定是日历年：有不早于应有期间的 10-K / 20-F 即可
         gaps.append(f"缺 {annual} 年报：运行 `stock docs fetch {company.id}` 自动下载，或把 PDF 放进 `{inbox}`")
-    if ("interim_report", interim) not in have:
+    if not us_only and ("interim_report", interim) not in have:  # 纯美股公司只披露 10-Q，不要求中期报告
         gaps.append(f"缺 {interim} 中期报告：运行 `stock docs fetch {company.id}`，或把 PDF 放进 `{inbox}`")
     for d in docs:
         if (d["chars"] or 0) < 1000 and (d["file_path"] or "").lower().endswith(".pdf"):

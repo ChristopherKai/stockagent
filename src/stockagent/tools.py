@@ -23,7 +23,7 @@ from .config import Company, Listing
 from .docs import DOC_TYPES, read_document_text
 from .sources import ccass, eastmoney, emdata, ids, ima, nasdaq, sec, tencent, twitter, web
 from .triage import DIRECTIONS, event_label
-from .utils import CST, big_num, fmt_local, iso, lock_holder, num, pct, to_simplified, today_local, utcnow
+from .utils import CST, big_num, fmt_local, iso, lock_holder, log, num, pct, to_simplified, today_local, utcnow
 
 
 
@@ -489,6 +489,26 @@ def _cell(label: str, v: float | None) -> str:
     return f"{v:,.2f}" if "每股" in label else f"{v / 1e8:,.2f}"
 
 
+def _us_stale_note(app: App, listing: Listing, cik: int, ua: str, data: dict, kind: str, periods: int,
+                   annual_only: bool) -> str | dict | None:
+    """XBRL 最新一期落后于已申报的 10-K / 10-Q（companyfacts 比申报晚更新）：先绕过缓存重取一次，
+    仍落后就返回提示（说明最新一期要看申报文件原文），追上了返回新的报表数据；检查失败不影响报表本身。"""
+    try:
+        now = utcnow()
+        filed = sec.reports(app.session, cik, ua, now - timedelta(days=200), now)
+        newest = max((x["period_end"] for x in filed if not annual_only or x["doc_type"] == "annual_report"), default=None)
+        if newest is None or newest <= data["periods"][0]["date"]:
+            return None
+        fresh = sec.statement_from_facts(sec.company_facts(app.session, cik, ua, fresh=True), kind, periods, annual_only)
+        if fresh and fresh["rows"] and fresh["periods"][0]["date"] >= newest:
+            return fresh
+        return (f"XBRL 数据最新只到 {data['periods'][0]['date']}，但 SEC 已有截至 {newest} 的"
+                f"{'年报' if annual_only else '10-K/10-Q'}（结构化数据尚未更新，该期数字请查申报原文 documents）")
+    except Exception as e:  # 校验是附加提示，失败只记日志
+        log.warning("%s XBRL 新鲜度检查失败：%s", listing.display, e)
+        return None
+
+
 def statement_table(app: App, listing: Listing, kind: str, periods: int, annual_only: bool) -> str:
     """一张报表的 Markdown 表：科目为行、期间为列（金额单位亿，每股指标为原值）。"""
     name = emdata.STATEMENT_KINDS[kind]
@@ -501,6 +521,11 @@ def statement_table(app: App, listing: Listing, kind: str, periods: int, annual_
             return f"{listing.display}：SEC 找不到这个代码"
         data = sec.statement_from_facts(sec.company_facts(app.session, cik, ua), kind, periods, annual_only)
         src, cur = "SEC XBRL（10-K/10-Q/20-F 申报数据）", (data or {}).get("currency", "")
+        if data and data["rows"] and (stale := _us_stale_note(app, listing, cik, ua, data, kind, periods, annual_only)):
+            if isinstance(stale, dict):  # 重新取过 companyfacts（绕过进程内缓存）后追上了最新申报
+                data = stale
+            else:
+                src += f"；⚠ {stale}"
     else:
         data = emdata.statement(app.session, listing, kind, periods, annual_only)
         src = "东方财富数据中心"
