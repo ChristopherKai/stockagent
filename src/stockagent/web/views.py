@@ -104,6 +104,10 @@ def _lines(text: str | None) -> list[str]:
     return [x.strip() for x in (text or "").splitlines() if x.strip()]
 
 
+def _handles(text: str | None) -> list[str]:
+    return [x for x in re.split(r"[\s,，、]+", text or "") if x]
+
+
 def _company_from_form(form, cid: str | None = None) -> dict:
     """表单 → 观察清单条目（经 Company 校验，代码按市场规范化，如港股补足 5 位）。"""
     listings = []
@@ -131,8 +135,10 @@ def _company_from_form(form, cid: str | None = None) -> dict:
         "notes": (form.get("notes") or "").strip().replace("\r\n", "\n") or None,
         "watch_items": _lines(form.get("watch_items")),
         "news_queries": {loc: _lines(form.get(f"q_{loc}")) for loc in ("zh-CN", "zh-HK", "en-US") if _lines(form.get(f"q_{loc}"))},
+        "twitter_official": _handles(form.get("twitter_official")), "twitter_accounts": _handles(form.get("twitter_accounts")),
     }
     c = Company.model_validate(data)  # 抛出 ValueError（含 pydantic 校验错误）
+    data["twitter_official"], data["twitter_accounts"] = c.twitter_official, c.twitter_accounts  # 已去掉 @ 并去重
     data["listings"] = [{"market": l.market, "code": l.code, "exchange": l.exchange if l.market != "HK" else None,
                          "benchmark": l.benchmark, "ads_ratio": l.ads_ratio} for l in c.listings]
     return data

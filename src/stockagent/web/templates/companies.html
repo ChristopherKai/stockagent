@@ -13,7 +13,7 @@
   <div class="tblwrap">
   <table class="tbl">
     <thead><tr><th><input type="checkbox" data-select-all="ids" title="全选"></th><th>公司</th><th>上市地</th><th>行业</th>
-      <th>深度报告</th><th>画像</th><th class="r">文档</th><th class="r">7 日事件</th><th class="r">待补充</th><th>追踪</th><th></th></tr></thead>
+      <th>推特账号</th><th>深度报告</th><th>画像</th><th class="r">文档</th><th class="r">7 日事件</th><th class="r">待补充</th><th>追踪</th><th></th></tr></thead>
     <tbody>
     {% for row in rows %}{% set c = row.company %}
       <tr>
@@ -21,6 +21,7 @@
         <td><a href="/c/{{ c.id }}"><b>{{ c.name }}</b></a><div class="muted small">{{ c.id }}</div></td>
         <td class="small">{{ c.listings | map(attribute='display') | join(' / ') }}</td>
         <td class="small clip">{{ c.sector or '' }}</td>
+        <td class="small">{% for h in c.twitter_official %}<b>@{{ h }}</b> {% endfor %}{% for h in c.twitter_accounts %}@{{ h }} {% endfor %}{% if not c.twitter_official and not c.twitter_accounts %}<span class="muted">—</span>{% endif %}</td>
         <td class="small">{% if row.dossier %}<a href="/c/{{ c.id }}/report">{{ row.dossier.created_at | when(false) }}</a>{% else %}<span class="muted">无</span>{% endif %}</td>
         <td class="small">{{ row.profile.updated_at | when(false) if row.profile else '—' }}</td>
         <td class="r">{{ row.docs }}</td>

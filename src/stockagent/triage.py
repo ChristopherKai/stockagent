@@ -9,6 +9,7 @@ from datetime import timedelta
 from pydantic import BaseModel, field_validator
 
 from .app import SOURCE_LABEL, App
+from .sources import twitter
 from .config import Company
 from .llm import LLMError
 from .utils import fmt_local, iso, log, today_local, utcnow
@@ -46,6 +47,10 @@ TRIAGE_SYSTEM = """你是一名覆盖港股、A股和美股的买方研究员，
 9. 定期报告、业绩公告等如果只有标题、看不到具体数字，重要性按 3 处理，在 follow_up 中写明需要阅读原文核实哪些数字；有数字时再按超预期程度打分。
 10. 摘要里带有「[跟踪词：…]」的条目，是按深度报告给出的产业链线索检索到的，要判断它与本公司的关联。
 11. 来源为「一致预期对比」的条目（摘要以「[程序计算]」开头）是程序算好的「实际业绩 vs 发布前一致预期」：数字可直接引用，expectation 以它为准（写明偏离幅度与口径）；event_type 用 earnings 或 guidance。它不是任何公告的重复，duplicate_of 留空。重要性按偏离幅度：年报偏离或中报/季报外推全年偏离 ≥30% → 5；≥15%，或与市场预期方向相反 → 4；±5% 以内且没有其他新信息 → 3；带「样本少」「外推仅供参考」等标注时酌情降一级。
+12. 来源为「推特/X」且摘要以「[推特·未经证实]」开头的条目是社交媒体帖子（按公司名、跟踪词检索到的任意作者），只当线索、不当事实：个人观点、喊单、情绪、营销图文、无信息量的转发，relevant 为 false 或重要性 1；发布了具体事件（交付量、财报、发布会、合作公告）的可按内容分级，但 expectation 要写明「社交媒体消息，未经证实」；与公告或其他媒体报道的是同一件事时，duplicate_of 指向非推特的那一条。
+13. 摘要以「[共享账号·已分流]」开头的帖子来自使用者指定的财经快讯号，按已证实的新闻处理（不要写「未经证实」），重要性按规则 5 正常打分。程序已用一次模型调用把它从全部自选股里粗筛到「可能与本公司有关」（宁可多选），请结合本公司画像（业务、产业链上下游、竞争对手、所属行业的政策与价格、对汇率利率关税大宗价格等宏观变量的敏感度）再判断：对本公司确无实质影响的 relevant 为 false；不要因为它是快讯号发的或数字醒目就判为相关。
+14. 摘要以「[官方账号]」开头的帖子是本公司自己的官方推特账号发布的，按公司的一手披露处理（不要写「未经证实」）：交付量、订单、合作、融资、人事、业绩等具体经营信息按规则 5 正常打分；营销图文、产品宣传、活动预告等没有新的经营信息的，relevant 为 false 或重要性 1。
+15. 摘要以「[登记账号]」开头的帖子来自使用者登记在本公司名下的媒体 / 快讯号 / 关键人物账号，按已证实的新闻处理（不要写「未经证实」），重要性按规则 5 正常打分。这些账号发帖面很广、程序没有按公司筛选，请结合本公司画像判断：对本公司确无实质影响的 relevant 为 false；关键人物（管理层、行业人士）的公开表态按其内容与影响力判断。
 
 字段说明：
 - event_type：earnings 业绩/财报；guidance 业绩预告/指引；orders_customers 订单/客户；product_tech 产品/技术；capacity 产能/扩产；financing 融资/配售/增发；buyback_dividend 回购/分红；insider_trade 股东/高管增减持；lockup 解禁；index_connect 指数/港股通调整；policy_regulation 政策/监管；litigation 诉讼/合规；governance 治理/人事；mna 并购/分拆；industry_chain 行业/产业链；macro_geo 宏观/地缘；market_move 行情/资金面；analyst 研报/评级；routine 例行公告；other 其他
@@ -236,6 +241,9 @@ def triage_company(app: App, company: Company) -> tuple[int, list[str]]:
             r["duplicate_of"] = dup["uid"] if dup and dup["uid"] != it["uid"] else ""
             if it["source"] == "consensus":  # 程序计算的业绩对比：不是公告的重复，必须保留
                 r["duplicate_of"], r["relevant"] = "", True
+            if it["source"] == "twitter" and (it.get("snippet") or "").startswith(twitter.TAG):
+                # 未经证实的社交内容（检索词 / 跟踪词 / 媒体账号来源）：重要性由代码封顶（默认不进入标的追踪）；共享账号与官方号按已证实的消息，不封顶
+                r["materiality"] = min(int(r["materiality"]), app.settings.sources.twitter.feed_max_materiality)
             app.db.save_triage(it["uid"], r, res.model)
             returned.add(it["uid"])
         missing = [it["uid"] for it in batch if it["uid"] not in returned]

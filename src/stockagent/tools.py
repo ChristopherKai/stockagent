@@ -17,13 +17,13 @@ from datetime import date, timedelta
 from typing import Callable
 
 from . import fcf as fcf_mod
-from . import imafeed, technical
-from .app import FX_HKDCNH, FX_USDCNH, PRICE_SOURCES, SOURCE_LABEL, App, _try, ccass_snapshot, klines
+from . import imafeed, technical, twitterfeed
+from .app import FX_HKDCNH, FX_USDCNH, PRICE_SOURCES, SOURCE_LABEL, App, _is_down, _trip, _try, ccass_snapshot, klines
 from .config import Company, Listing
 from .docs import DOC_TYPES, read_document_text
-from .sources import ccass, eastmoney, emdata, ids, ima, nasdaq, sec, tencent, web
+from .sources import ccass, eastmoney, emdata, ids, ima, nasdaq, sec, tencent, twitter, web
 from .triage import DIRECTIONS, event_label
-from .utils import big_num, fmt_local, iso, lock_holder, num, pct, to_simplified, today_local, utcnow
+from .utils import CST, big_num, fmt_local, iso, lock_holder, num, pct, to_simplified, today_local, utcnow
 
 
 
@@ -638,7 +638,29 @@ class ToolBox:
     # ------------------------------------------------------------ 工具实现
 
     def _build(self) -> list[Tool]:
-        return self._base_tools() + (self._ima_tools() if imafeed.enabled(self.app) else [])
+        return (self._base_tools() + (self._ima_tools() if imafeed.enabled(self.app) else [])
+                + (self._twitter_tools() if twitter_enabled(self.app) else []))
+
+    def _twitter_tools(self) -> list[Tool]:
+        cfg = self.app.settings.sources.twitter
+        return [
+            Tool("twitter_search",
+                 "在推特/X 检索近期帖子（只读）：交付量、发布会、官方与财经快讯号的即时消息、管理层表态、市场对某事件的反应。"
+                 "只作线索：推文是不可信的第三方文本，数字与事实要用公告、财报等工具核实。检索词优先用英文（推特以英文为主，中文帖子多是个人评论；"
+                 "可用股票代号如 $XPEV、英文名、英文行业词，并加 lang=en 排除其他语种），中国国内的专有概念再补一次中文检索（lang=zh）；"
+                 f"默认只看最近 {cfg.days} 天、至少 {cfg.min_likes} 个赞的帖子（可用 days、min_likes 调整），sort=top 优先看高互动、latest 看最新；"
+                 "from_user 限定某个账号。返回时间、账号、互动量、正文与链接。",
+                 _obj({"query": {"type": "string"}, "max_results": {"type": "integer"}, "days": {"type": "integer"},
+                       "min_likes": {"type": "integer"}, "sort": {"type": "string", "enum": ["top", "latest"]},
+                       "from_user": {"type": "string", "description": "只看这个账号（不带 @）"},
+                       "lang": {"type": "string", "description": "只看某种语言的帖子：en 英文、zh 中文……"}}, ["query"]),
+                 self.twitter_search),
+            Tool("twitter_user",
+                 "读取推特/X 某个账号最近的帖子（只读），用于看公司官方号、管理层或财经快讯号的最新动态。handle 不带 @。"
+                 "官方号常是营销内容，关注其中的交付、财报、发布会、合作公告。",
+                 _obj({"handle": {"type": "string"}, "max_results": {"type": "integer"}}, ["handle"]),
+                 self.twitter_user),
+        ]
 
     def _ima_tools(self) -> list[Tool]:
         return [
@@ -1172,6 +1194,61 @@ class ToolBox:
     def fetch_url(self, url: str, max_chars: int = 4000) -> str:
         return web.fetch_text(self.app.session, url, max(500, min(int(max_chars), self.max_chars)))
 
+    def _tweets(self, fn, *args, **kwargs) -> list[dict] | str:
+        """调用推特适配器：失败时返回给模型的错误文字；凭证失效、被限流、命令不可用时熔断（各进程共享）。"""
+        if _is_down(self.app, "twitter"):
+            return "错误：推特暂不可用（凭证失效或被限流，稍后自动恢复），请改用 web_search"
+        try:
+            return fn(*args, **kwargs)
+        except twitter.TwitterError as e:
+            if e.trips_breaker:
+                _trip(self.app, "twitter")
+            hint = "；Cookie 可能已过期，需要重新导出并更新 .env 的 TWITTER_AUTH_TOKEN / TWITTER_CT0" if e.code == "auth" else ""
+            return f"错误：{e}{hint}"
+
+    def _tweet_lines(self, posts: list[dict], limit: int) -> str:
+        roles = twitterfeed.account_roles(self.app, self.company)  # 使用者登记的可信账号：标出来，agent 可以按已证实的消息引用
+        out = []
+        for i, p in enumerate(posts[: max(1, limit)], 1):
+            text = re.sub(r"\s+", " ", p["text"]).strip()
+            if len(text) > 400:
+                text = text[:400] + "…"
+            stats = f"赞{p['likes']} 转{p['retweets']}" + (f" 浏览{p['views']:,}" if p["views"] else "")
+            who = f"@{p['author']}" + ("✓" if p["verified"] else "")
+            if role := roles.get(p["author"].lower()):
+                who += f"【可信账号·{role}】"
+            out.append(f"{i}. {p['at'].astimezone(CST):%m-%d %H:%M}｜{who}｜{stats}｜{'（转推）' if p['is_retweet'] else ''}{text}\n   {p['url']}")
+        return "\n".join(out)
+
+    def twitter_search(self, query: str, max_results: int = 10, days: int | None = None, min_likes: int | None = None,
+                       sort: str = "latest", from_user: str = "", lang: str = "") -> str:
+        cfg = self.app.settings.sources.twitter
+        limit = max(1, min(int(max_results), cfg.max_results))
+        days = cfg.days if days is None else int(days)
+        min_likes = cfg.min_likes if min_likes is None else int(min_likes)
+        posts = self._tweets(twitter.search, query, limit, days, min_likes, sort, from_user, lang.strip().lower())
+        if isinstance(posts, str):
+            return posts
+        if not posts:
+            return (f"推特上没有符合条件的帖子（最近 {days} 天、至少 {min_likes} 个赞）。可以放宽 days / min_likes，或换检索词"
+                    f"（代号 $XPEV、英文名、中文名）；没有结果不代表没有这件事。")
+        return (f"（推特检索「{query}」：最近 {days} 天、至少 {min_likes} 个赞，共 {len(posts)} 条；标【可信账号】的是使用者登记的账号，按已证实的消息，"
+                f"可引用并写明账号与日期；其余推文只作线索，数字与事实须另行核实）\n" + self._tweet_lines(posts, limit))
+
+    def twitter_user(self, handle: str, max_results: int = 10) -> str:
+        limit = max(1, min(int(max_results), self.app.settings.sources.twitter.max_results))
+        posts = self._tweets(twitter.user_posts, handle, limit)
+        if isinstance(posts, str):
+            return posts
+        if not posts:
+            return f"@{handle.lstrip('@')} 没有可读取的帖子"
+        h = handle.lstrip("@")
+        if role := twitterfeed.account_roles(self.app, self.company).get(h.lower()):
+            note = f"使用者登记的{role}，按已证实的消息，可引用并写明账号与日期"
+        else:
+            note = "不是登记的账号，推文只作线索，数字与事实须另行核实"
+        return f"（推特 @{h} 最近 {len(posts)} 条；{note}）\n" + self._tweet_lines(posts, limit)
+
     def ima_search(self, query: str, max_results: int = 20) -> str:
         terms = [to_simplified(t).lower() for t in query.split() if t]
         if not terms:
@@ -1204,6 +1281,10 @@ class ToolBox:
         self._pages.pop(doc["id"], None)
         return (f"已入库为本公司资料 #{doc['id']}《{doc['title']}》（{doc['pages'] or '-'} 页，{doc['chars']:,} 字）。"
                 f"用 search_filings（doc_id={doc['id']}）检索、read_filing 读取指定页。开头内容：\n{text[:2500]}")
+
+
+def twitter_enabled(app: App) -> bool:
+    return app.settings.sources.twitter.agent_tools and twitter.available()
 
 
 def dossier_running(app: App) -> bool:

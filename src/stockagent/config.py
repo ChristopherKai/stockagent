@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -103,6 +104,53 @@ class ImaConfig(BaseModel):
     in_alert: bool = False        # 盘中 stock alert 是否也检索（默认只在 stock run / fetch 时）
 
 
+class TwitterConfig(BaseModel):
+    """推特 / X（经 twitter-cli；需要 .env 的 TWITTER_AUTH_TOKEN 与 TWITTER_CT0）。两个开关互相独立：
+    agent_tools = 研究 agent 与标的追踪可以按需调用 twitter_search / twitter_user；
+    news_feed = stock run 时自动抓取（公司的账号白名单 + 检索词），新帖子进入事件分级。"""
+
+    agent_tools: bool = True
+    news_feed: bool = True
+    # agent 工具
+    max_results: int = 20   # 单次工具调用最多返回几条
+    days: int = 7           # twitter_search 默认只看最近几天
+    min_likes: int = 3      # twitter_search 默认的最低点赞数（过滤 0 互动的刷屏）
+    # 新闻源
+    shared_accounts: list[str] = Field(default_factory=list)  # 全局共享账号（财经快讯号等）：帖子不做关键词匹配，用一次模型调用按全部自选股分流，再由分到的公司逐条分级
+    shared_max_per_account: int = 100  # 共享账号每次读取最近几条（最多 200）：快讯号发帖很密（FirstSquawk 约 8 条/小时），读少了两次运行之间的帖子会漏掉
+    shared_route_max: int = 6         # 共享账号的一条帖子最多分给几家公司（宏观快讯可能与很多公司沾边，按相关度取前几家）
+    # 检索语种：英文优先、适当用中文（推特以英文为主，中文帖子多是个人评论）
+    feed_queries_per_company: int = 3   # 公司的英文叫法（美股代号 $XPEV、英文名）最多几个，并成一条 OR 检索式（只看英文帖子）
+    feed_chinese_name: bool = True      # 再用中文公司名检索一次（只看中文帖子）
+    feed_plan_keywords: int = 2         # 每家公司用深度报告跟踪计划里的前几个新闻跟踪词的英文译文检索（只看英文帖子；0 = 不用）；命中不要求提到公司名，交给分级判断关联
+    feed_plan_keywords_zh: int = 1      # 再用前几个跟踪词的中文原词检索（只看中文帖子；0 = 不用）
+    feed_scope: Literal["all", "tracked"] = "all"  # 新闻源覆盖的公司：all 全部自选股；tracked 只有标的追踪中的公司（调用预算有限，追踪中的公司刷新更勤）
+    feed_max_calls: int = 40            # 每次运行最多调用推特几次（读账号 + 检索；0 = 不限）：超出的公司留到下次运行、轮流覆盖。X 的网页接口对检索大约每 15 分钟只给 50 次左右，超了返回 429（会熔断 60 分钟）；共享账号每读 100 条约 5 次请求
+    feed_min_likes: int = 10            # 新闻源只收录至少这么多赞的帖子
+    feed_max_per_query: int = 10        # 每个检索词、每个账号每次最多取几条
+    feed_languages: list[str] = Field(default_factory=lambda: ["en", "zh"])  # 只收录这些语种（推特的 lang 代码）的帖子；留空 = 不限
+    discover: bool = True               # 账号发现：新闻源检索时记下反复出现的作者，在设置页列为候选账号，由你决定是否加入
+    discover_days: int = 30             # 候选账号统计最近几天
+    discover_min_posts: int = 2         # 至少出现几次才列为候选
+    feed_max_materiality: int = 2       # 推特帖子分级后重要性的上限（1–5）：社交内容未经证实，默认不进入标的追踪与重要事件
+
+    @field_validator("shared_accounts", mode="before")
+    @classmethod
+    def _handles(cls, v):
+        return _clean_handles(v)
+
+
+def _clean_handles(v):
+    out = []
+    for h in v or []:
+        h = str(h).strip().lstrip("@")
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,15}", h):
+            raise ValueError(f"推特账号名不合法：{h}（只能是字母、数字、下划线，最长 15 个字符，不带 @）")
+        if h.lower() not in [x.lower() for x in out]:
+            out.append(h)
+    return out
+
+
 class SourcesConfig(BaseModel):
     announcements_lookback_days: int = 30
     news_lookback_days: int = 7
@@ -120,6 +168,7 @@ class SourcesConfig(BaseModel):
     blocked_title_patterns: list[str] = Field(default_factory=list)
     auto_download_reports: bool = True
     ima: ImaConfig = Field(default_factory=ImaConfig)
+    twitter: TwitterConfig = Field(default_factory=TwitterConfig)
     sec_user_agent: str | None = None  # SEC 要求 User-Agent 带联系方式（「姓名 邮箱」）；美股公告与 XBRL 财报都要用
     ccass: bool = True           # 每天记录自选港股的 CCASS（中央结算系统）持股快照
     ccass_alert_pct: float = 1.0  # 相邻两份快照间某参与者持股变化 ≥ 此值（占已发行股份的百分点）时生成一条「数据异动」进入分级
@@ -378,6 +427,14 @@ class Company(BaseModel):
     watch_items: list[str] = Field(default_factory=list)
     # 可按语言指定新闻检索词；未指定时用 name / 第一个别名 / name_en
     news_queries: dict[str, list[str]] = Field(default_factory=dict)
+    # 推特新闻源（sources.twitter.news_feed 开启时）：官方号的帖子全部收录；其他账号（媒体、财经快讯号、关键人物）只收录提到本公司的帖子
+    twitter_official: list[str] = Field(default_factory=list)
+    twitter_accounts: list[str] = Field(default_factory=list)
+
+    @field_validator("twitter_official", "twitter_accounts", mode="before")
+    @classmethod
+    def _handles(cls, v):
+        return _clean_handles(v)
 
     @field_validator("id")
     @classmethod

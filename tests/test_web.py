@@ -216,6 +216,72 @@ def test_schedule_and_section_settings(web):
     assert t.min_materiality == 4 and t.target == "base" and t.auto_rebaseline is False and t.web_search is True
 
 
+# ---------------------------------------------------------------- 推特开关
+
+def test_twitter_switches_and_secrets(web, monkeypatch):
+    path = web.holder.config_path
+    page = web.get("/settings/general").text
+    assert "推特 / X" in page and "研究 agent 可用推特" in page and "推特新闻源" in page and "未找到 twitter-cli" in page
+    form = {"twitter.agent_tools": "on", "twitter.news_feed": "on", "twitter.max_results": "15", "twitter.days": "5", "twitter.min_likes": "3",
+            "twitter.feed_queries_per_company": "3", "twitter.feed_min_likes": "25", "twitter.feed_max_per_query": "8", "twitter.shared_max_per_account": "30", "twitter.shared_route_max": "4", "twitter.feed_plan_keywords": "3", "twitter.feed_plan_keywords_zh": "1", "twitter.feed_chinese_name": "on", "twitter.feed_scope": "tracked", "twitter.feed_max_calls": "60", "twitter.discover": "on", "twitter.discover_days": "30", "twitter.discover_min_posts": "2",
+            "twitter.feed_languages": "en\nzh\nja", "twitter.shared_accounts": "@wallstengine\nFirstSquawk\nwallstengine", "twitter.feed_max_materiality": "2", "etag": yamledit.digest(path.read_text(encoding="utf-8"))}
+    r = post(web, "/settings/section/twitter", form)
+    assert r.status_code == 303 and "ok=" in r.headers["location"], requests.utils.unquote(r.headers["location"])
+    t = web.holder.app.settings.sources.twitter
+    assert t.agent_tools and t.news_feed and t.feed_min_likes == 25 and t.max_results == 15 and t.feed_languages == ["en", "zh", "ja"]
+    assert t.shared_accounts == ["wallstengine", "FirstSquawk"]  # 去 @、去重
+    assert t.feed_scope == "tracked" and t.feed_plan_keywords_zh == 1 and t.feed_chinese_name is True
+    assert "全局共享账号" in web.get("/settings/general").text and "新闻源的抓取范围" not in web.get("/settings/general").text
+    text = path.read_text(encoding="utf-8")
+    assert "twitter:" in text and "feed_min_likes: 25" in text and "google_news: false" in text  # 只改这一节，其他设置还在；与默认值相同的开关不写入
+    # 关掉 agent 工具和新闻源（复选框不提交 = 关闭）
+    form.pop("twitter.agent_tools")
+    form.pop("twitter.news_feed")
+    form["etag"] = yamledit.digest(text)
+    assert post(web, "/settings/section/twitter", form).status_code == 303
+    t = web.holder.app.settings.sources.twitter
+    assert t.agent_tools is False and t.news_feed is False and "news_feed: false" in path.read_text(encoding="utf-8")
+    # 非法值：不写入
+    badh = post(web, "/settings/section/twitter", {**form, "twitter.shared_accounts": "bad handle!", "etag": yamledit.digest(path.read_text(encoding="utf-8"))})
+    assert "err=" in badh.headers["location"] and "推特账号名不合法" in requests.utils.unquote(badh.headers["location"])
+    before = path.read_text(encoding="utf-8")
+    bad = post(web, "/settings/section/twitter", {**form, "twitter.feed_min_likes": "很多", "etag": yamledit.digest(before)})
+    assert "err=" in bad.headers["location"] and path.read_text(encoding="utf-8") == before
+    # 密钥页：TWITTER_AUTH_TOKEN 与 TWITTER_CT0（后者不以 _KEY/_TOKEN 结尾，但是确切放行的名字）
+    assert "TWITTER_CT0" in web.get("/settings/secrets").text
+    r = post(web, "/settings/secrets", {"val_TWITTER_AUTH_TOKEN": "auth-secret-123456", "val_TWITTER_CT0": "ct0-secret-7890"})
+    assert r.status_code == 303 and "ok=" in r.headers["location"]
+    env = (path.parent / ".env").read_text(encoding="utf-8")
+    assert "TWITTER_AUTH_TOKEN=auth-secret-123456" in env and "TWITTER_CT0=ct0-secret-7890" in env
+    page = web.get("/settings/secrets").text
+    assert "auth-secret-123456" not in page and "ct0-secret-7890" not in page
+    monkeypatch.delenv("TWITTER_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("TWITTER_CT0", raising=False)
+    with pytest.raises(yamledit.EditError):
+        yamledit.set_env(path.parent / ".env", "TWITTER_CT1", "x")  # 只放行确切的名字
+
+
+def test_company_twitter_accounts_roundtrip(web):
+    path = web.holder.watchlist_path
+    base = {"id": "dongyue", "name": "东岳集团", "listing0_market": "HK", "listing0_code": "00189", "listing0_benchmark": "100.HSI",
+            "sector": "氟硅化工", "notes": "山东氟硅化工企业。", "watch_items": "R32 价格"}
+    etag = yamledit.digest(path.read_text(encoding="utf-8"))
+    r = post(web, "/companies/dongyue/edit", {**base, "twitter_official": "@DongyueOfficial, dongyue2", "twitter_accounts": "wallstengine\nFirstSquawk\nwallstengine",
+                                              "etag": etag})
+    assert r.status_code == 303, r.text[:300]
+    c = web.holder.app.watchlist.get("dongyue")
+    assert c.twitter_official == ["DongyueOfficial", "dongyue2"] and c.twitter_accounts == ["wallstengine", "FirstSquawk"]  # 去 @、去重
+    text = path.read_text(encoding="utf-8")
+    assert "twitter_official: [DongyueOfficial, dongyue2]" in text and "# 自选股清单（测试）" in text
+    assert "DongyueOfficial" in web.get("/companies/dongyue/edit").text
+    before = path.read_text(encoding="utf-8")
+    bad = post(web, "/companies/dongyue/edit", {**base, "twitter_official": "bad handle!", "etag": yamledit.digest(before)})
+    assert bad.status_code == 400 and "推特账号名不合法" in bad.text and path.read_text(encoding="utf-8") == before
+    # 清空：从文件里删掉这两个键
+    r = post(web, "/companies/dongyue/edit", {**base, "etag": yamledit.digest(before)})
+    assert r.status_code == 303 and "twitter_" not in path.read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------- 任务与上传
 
 def test_job_submit_log_and_cancel(web):
@@ -322,3 +388,56 @@ def test_revision_page_layout_and_chat(web):
     assert web.get(f"/c/dongyue/chats?revision={rid}").json()["chats"][0]["id"] == r.json()["chat_id"]
     assert "改了什么？" in web.get(f"/c/dongyue/revisions/{rid}").text
     assert "改了什么？" not in web.get("/c/dongyue/report").text  # 修正页的对话不出现在报告页
+
+
+def test_twitter_account_discovery_accept_and_dismiss(web):
+    from stockagent.sources import twitter
+    from stockagent import twitterfeed
+    from datetime import timedelta
+    from stockagent.utils import utcnow
+
+    app = web.holder.app
+    app.settings.sources.twitter.discover_min_posts = 2
+    for i, h in enumerate(["analystA", "analystA", "analystB", "analystB", "lonely"]):
+        app.db.twitter_author_add("dongyue", {"id": str(i), "author": h, "name": h, "verified": False, "likes": 40 + i, "at": utcnow() - timedelta(hours=i),
+                                              "text": f"东岳集团 R32 观点 {i}", "url": f"https://x.com/{h}/status/{i}"})
+    page = web.get("/settings/general").text
+    assert "账号发现" in page and "@analystA" in page and "@analystB" in page and "@lonely" not in page and "东岳集团" in page
+    cfg_path, wl_path = web.holder.config_path, web.holder.watchlist_path
+    etag = yamledit.digest(cfg_path.read_text(encoding="utf-8"))
+    # 加入全局共享账号
+    r = post(web, "/settings/twitter/accept", {"handle": "analystA", "target": "shared", "etag": etag})
+    assert r.status_code == 303 and "ok=" in r.headers["location"], requests.utils.unquote(r.headers["location"])
+    assert web.holder.app.settings.sources.twitter.shared_accounts == ["analystA"]
+    # 加入公司的媒体号：写进 watchlist，注释保留
+    r = post(web, "/settings/twitter/accept", {"handle": "analystB", "target": "accounts:dongyue"})
+    assert r.status_code == 303 and "ok=" in r.headers["location"]
+    assert web.holder.app.watchlist.get("dongyue").twitter_accounts == ["analystB"]
+    text = wl_path.read_text(encoding="utf-8")
+    assert "twitter_accounts: [analystB]" in text and "# 自选股清单（测试）" in text and "# " in text
+    assert not twitterfeed.candidates(web.holder.app)  # 已登记的不再列出
+    # 忽略
+    app.db.twitter_author_add("dongyue", {"id": "9", "author": "dismissme", "name": "d", "verified": False, "likes": 10, "at": utcnow(), "text": "东岳集团", "url": "https://x.com/d/status/9"})
+    app.db.twitter_author_add("dongyue", {"id": "10", "author": "dismissme", "name": "d", "verified": False, "likes": 10, "at": utcnow(), "text": "东岳集团", "url": "https://x.com/d/status/10"})
+    assert "@dismissme" in web.get("/settings/general").text
+    assert post(web, "/settings/twitter/dismiss", {"handle": "dismissme"}).status_code == 303
+    assert "@dismissme" not in web.get("/settings/general").text
+    # 非法输入
+    for data in ({"handle": "bad handle", "target": "shared"}, {"handle": "ok_name", "target": "official:nonexistent"},
+                 {"handle": "ok_name", "target": "evil:dongyue"}):
+        assert "err=" in post(web, "/settings/twitter/accept", data).headers["location"]
+    assert "err=" in post(web, "/settings/twitter/dismiss", {"handle": "x y"}).headers["location"]
+
+
+def test_jobs_only_starts_job_runner_without_scheduler(project):
+    """stock web --jobs-only：WebUI 里提交的任务会执行（任务执行器在跑），但内置调度器不启动，不会按日程自动运行。"""
+    app = create_app(project / "config.yaml", allowed_hosts=["testserver"], start_background=True, start_scheduler=False)
+    with TestClient(app):  # 进入 lifespan
+        assert app.state.runner._thread is not None and app.state.runner._thread.is_alive()
+        assert app.state.scheduler._thread is None
+    app = create_app(project / "config.yaml", allowed_hosts=["testserver"], start_background=True)  # 默认：两个都启动
+    with TestClient(app):
+        assert app.state.runner._thread.is_alive() and app.state.scheduler._thread.is_alive()
+    app = create_app(project / "config.yaml", allowed_hosts=["testserver"], start_background=False)  # --no-scheduler：都不启动（任务会一直排队）
+    with TestClient(app):
+        assert app.state.runner._thread is None and app.state.scheduler._thread is None

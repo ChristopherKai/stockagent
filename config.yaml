@@ -126,6 +126,33 @@ sources:
     max_download_mb: 40
     max_downloads_per_day: 25       # ima 对取原文有未公开的每日上限（实测约几十次），agent 的 ima_read 也计入
     in_alert: false                 # 盘中 stock alert 是否也检索（默认只在 stock run 时）
+  # 推特 / X（经 agent-reach 的 twitter-cli；.env 填 TWITTER_AUTH_TOKEN / TWITTER_CT0，或用 `agent-reach configure twitter-cookies` 保存的 Cookie）。
+  # 两个开关互相独立，WebUI「设置 → 通用 → 推特 / X」可改：
+  #   agent_tools：研究 agent 与标的追踪可按需调用 twitter_search / twitter_user；
+  #   news_feed：stock run 时自动抓取公司的推特账号（watchlist 的 twitter_official / twitter_accounts）与检索词，新帖子进入事件分级。
+  # 你登记的账号（共享账号、公司的官方号、媒体 / 快讯 / 关键人物账号）按已证实的消息处理；公司名 / 跟踪词检索到的任意作者是未经证实，分级后重要性由代码封顶 feed_max_materiality。
+  twitter:
+    agent_tools: true
+    news_feed: true
+    max_results: 20                 # agent 单次工具调用最多返回几条
+    days: 7                         # twitter_search 默认只看最近几天
+    min_likes: 3                    # twitter_search 默认的最低点赞数（过滤 0 互动的刷屏）
+    shared_accounts: [DeItaone, wallstengine, FirstSquawk]   # 新闻源：全局共享账号（财经快讯号等）；帖子不做关键词匹配：连同全部自选股简介批量分流（每 20 条一次调用），只有分到的公司才分级
+    shared_max_per_account: 100     # 新闻源：共享账号每次读取最近几条（最多 200）；快讯号发帖很密，读少了会漏
+    shared_route_max: 6             # 新闻源：一条共享账号帖子最多分给几家公司
+    discover: true                  # 账号发现：新闻源检索时记下反复出现的作者，设置页列为候选账号，由你决定是否加入
+    discover_days: 30
+    discover_min_posts: 2
+    feed_plan_keywords: 2           # 新闻源：每家公司用深度报告跟踪计划里的前几个新闻跟踪词的英文译文检索（只看英文帖子；0 = 不用）
+    feed_plan_keywords_zh: 1        # 新闻源：再用前几个跟踪词的中文原词检索（只看中文帖子；0 = 不用）
+    feed_max_calls: 40              # 新闻源：每次运行最多调用推特几次（读账号 + 检索；0 = 不限），超出的公司留到下次、轮流覆盖；X 对检索约 15 分钟 50 次，超了会 429
+    feed_queries_per_company: 3     # 新闻源：公司英文叫法（美股代号 $XPEV、英文名）最多几个，并成一条 OR 检索式（只看英文帖子）
+    feed_chinese_name: true         # 新闻源：再用中文公司名检索一次（只看中文帖子）：英文优先、适当用中文
+    feed_scope: all                 # 新闻源覆盖的公司：all 全部自选股 / tracked 只有标的追踪中的公司
+    feed_min_likes: 10              # 新闻源：最低点赞数
+    feed_max_per_query: 10          # 新闻源：每个检索词 / 账号最多取几条
+    feed_languages: [en, zh]        # 新闻源：只收录这些语种的帖子（推特 lang 代码；留空 = 不限）
+    feed_max_materiality: 2         # 未经证实的推特帖子（公司名 / 跟踪词检索的任意作者）分级后重要性的上限（1–5）；登记账号不封顶
   sec_user_agent: "your.email@example.com"   # 跟踪美股时必填，格式 "姓名 邮箱"（SEC 要求）；美股公告与 XBRL 报表（statements 工具）都要用
   ccass: true                       # 每天记录自选港股的 CCASS（中央结算系统）持股快照（港交所，T+1 可查）
   ccass_alert_pct: 1.0              # 相邻两份快照间某参与者持股变化 ≥ 此值（占已发行股份的百分点）时，生成一条数据异动进入分级

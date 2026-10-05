@@ -24,7 +24,7 @@ FX_USDCNH = "133.USDCNH"
 MARKET_LABEL = {"HK": "港股", "A": "A股", "US": "美股"}
 SOURCE_LABEL = {
     "hkex": "港交所", "cninfo": "巨潮", "sec": "SEC", "eastmoney": "东方财富",
-    "google_news": "Google新闻", "ima": "ima知识库", "ccass": "港交所CCASS", "manual": "手动",
+    "google_news": "Google新闻", "ima": "ima知识库", "twitter": "推特/X", "ccass": "港交所CCASS", "manual": "手动",
     "consensus": "一致预期对比",
 }
 
@@ -202,7 +202,7 @@ def _guard(label: str, fn, *args) -> list[str]:
 
 
 def fetch(app: App, companies: list[Company], *, prices: bool = True, filings: bool = True,
-          news: bool = True, market: bool = True, ima: bool = True) -> list[str]:
+          news: bool = True, market: bool = True, ima: bool = True, twitter: bool = True) -> list[str]:
     msgs: list[str] = []
     for c in companies:
         for l in c.listings:
@@ -216,6 +216,10 @@ def fetch(app: App, companies: list[Company], *, prices: bool = True, filings: b
         from . import imafeed  # imafeed 依赖本模块
 
         msgs += _guard("ima 知识库", imafeed.fetch, app, companies)
+    if news and twitter:
+        from . import twitterfeed  # twitterfeed 依赖本模块
+
+        msgs += _guard("推特", twitterfeed.fetch, app, companies)
     if market and prices:
         msgs += _guard("市场行情", fetch_market, app, companies)
         if app.settings.sources.ccass:  # 日终数据，每天一次；盘中 alert（market=False）不查
@@ -242,6 +246,12 @@ def _is_down(app: App, source: str) -> bool:
     return False
 
 
+def _trip(app: App, source: str) -> None:
+    """熔断某个数据源：本进程与其他进程在 DOWN_MINUTES 分钟内都跳过它。"""
+    app.down.add(source)
+    app.db.kv_set(f"down:{source}", iso(utcnow()))
+
+
 def _try(app: App, source: str, fn, *args, **kwargs):
     """调用某个数据源；连接被拒时熔断该源（本次运行及之后 DOWN_MINUTES 分钟内跳过），避免每个请求都卡在重试上。"""
     if _is_down(app, source):
@@ -249,8 +259,7 @@ def _try(app: App, source: str, fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
     except (requests.ConnectionError, requests.exceptions.RetryError) as e:
-        app.down.add(source)
-        app.db.kv_set(f"down:{source}", iso(utcnow()))
+        _trip(app, source)
         log.warning("%s 连接失败，%d 分钟内不再使用：%s", source, DOWN_MINUTES, str(e)[:120])
     except requests.RequestException as e:
         log.info("%s 请求失败：%s", source, str(e)[:120])

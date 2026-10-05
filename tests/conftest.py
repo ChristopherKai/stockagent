@@ -63,6 +63,13 @@ def _no_external_search(monkeypatch):
     monkeypatch.delenv(ima.ENV_CLIENT_ID, raising=False)  # 本机 .env 里的 ima 凭证不带进测试；需要的测试自行设置
     monkeypatch.delenv(ima.ENV_API_KEY, raising=False)
     monkeypatch.setattr(ima, "MIN_INTERVAL", 0)
+    from stockagent.sources import twitter
+
+    monkeypatch.setattr(twitter, "BIN", None)  # 推特：不调用本机的 twitter-cli，也不读 ~/.agent-reach 里的 Cookie；需要的测试自行设置
+    monkeypatch.setattr(twitter, "AGENT_REACH_CONFIG", Path("/nonexistent/agent-reach.yaml"))
+    monkeypatch.delenv(twitter.ENV_AUTH, raising=False)
+    monkeypatch.delenv(twitter.ENV_CT0, raising=False)
+    monkeypatch.setattr(twitter, "MIN_INTERVAL", 0)
 
 
 @pytest.fixture

@@ -114,6 +114,25 @@ CREATE TABLE IF NOT EXISTS ccass (            -- 港股中央结算系统（CCAS
     PRIMARY KEY (code, date)
 );
 
+CREATE TABLE IF NOT EXISTS twitter_authors (  -- 推特新闻源按检索词找到的帖子的作者（账号发现用；每个帖子对每家公司一行）
+    post_id      TEXT NOT NULL,
+    company_id   TEXT NOT NULL,
+    handle       TEXT NOT NULL,
+    name         TEXT,
+    verified     INTEGER NOT NULL DEFAULT 0,
+    likes        INTEGER NOT NULL DEFAULT 0,
+    published_at TEXT NOT NULL,
+    text         TEXT,
+    url          TEXT,
+    PRIMARY KEY (post_id, company_id)
+);
+CREATE TABLE IF NOT EXISTS twitter_routed (   -- 共享账号的帖子已经分流过（不论分到哪些公司、是否无关），不再重复送模型
+    post_id    TEXT PRIMARY KEY,
+    routed_at  TEXT NOT NULL,
+    companies  TEXT NOT NULL DEFAULT ''          -- 分到的公司 id，逗号分隔；空 = 与所有自选股无关
+);
+CREATE TABLE IF NOT EXISTS twitter_dismissed (handle TEXT PRIMARY KEY, dismissed_at TEXT NOT NULL);  -- 账号发现里被忽略的账号（小写）
+
 CREATE TABLE IF NOT EXISTS ima_seen (         -- ima 知识库中已处理过的条目（按公司检索到的；收录与否都记）
     media_id    TEXT NOT NULL,
     company_id  TEXT NOT NULL,
@@ -536,6 +555,40 @@ class DB:
     def ima_mark_seen(self, media_id: str, company_id: str, kb_id: str, title: str) -> None:
         self._exec("INSERT OR IGNORE INTO ima_seen(media_id, company_id, kb_id, title, seen_at) VALUES(?, ?, ?, ?, ?)",
                    (media_id, company_id, kb_id, title, iso(utcnow())))
+
+    # ------------------------------------------------------------ 推特账号发现
+
+    def twitter_author_add(self, company_id: str, p: dict) -> None:
+        """记录一条检索到的帖子的作者（点赞数随时间增长，重复出现时更新）。"""
+        self._exec("INSERT OR REPLACE INTO twitter_authors(post_id, company_id, handle, name, verified, likes, published_at, text, url) "
+                   "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   (p["id"], company_id, p["author"], p.get("name"), int(bool(p.get("verified"))), p["likes"], iso(p["at"]),
+                    p["text"][:500], p["url"]))
+
+    def twitter_authors_since(self, since: str) -> list[dict]:
+        return self._all("SELECT * FROM twitter_authors WHERE published_at>=? ORDER BY published_at DESC", (since,))
+
+    def twitter_author_prune(self, before: str) -> None:
+        self._exec("DELETE FROM twitter_authors WHERE published_at<?", (before,))
+
+    def twitter_routed_ids(self, post_ids: list[str]) -> set[str]:
+        if not post_ids:
+            return set()
+        rows = self._all(f"SELECT post_id FROM twitter_routed WHERE post_id IN ({','.join('?' * len(post_ids))})", tuple(post_ids))
+        return {r["post_id"] for r in rows}
+
+    def twitter_mark_routed(self, post_id: str, companies: list[str]) -> None:
+        self._exec("INSERT OR REPLACE INTO twitter_routed(post_id, routed_at, companies) VALUES(?, ?, ?)",
+                   (post_id, iso(utcnow()), ",".join(companies)))
+
+    def twitter_routed_prune(self, before: str) -> None:
+        self._exec("DELETE FROM twitter_routed WHERE routed_at<?", (before,))
+
+    def twitter_dismissed(self) -> set[str]:
+        return {r["handle"] for r in self._all("SELECT handle FROM twitter_dismissed")}
+
+    def twitter_dismiss(self, handle: str) -> None:
+        self._exec("INSERT OR IGNORE INTO twitter_dismissed(handle, dismissed_at) VALUES(?, ?)", (handle.lower(), iso(utcnow())))
 
     # ------------------------------------------------------------ 文档
 
