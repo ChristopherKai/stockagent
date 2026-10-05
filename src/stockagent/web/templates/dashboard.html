@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import thesis_badge, stance_badge, kind_badge, trigger_badge, delta %}
+{% from "_macros.html" import thesis_badge, stance_badge, kind_badge, trigger_badge, delta, view_cells, scene_stance, filter_bar %}
 {% block title %}仪表盘{% endblock %}
 {% block content %}
 {% if llm_reason %}<div class="flash err">标的追踪的模型暂不可用：{{ llm_reason }}（到「设置 → LLM」配置）</div>{% endif %}
@@ -7,27 +7,34 @@
 <section class="card">
   <div class="card-head"><h2>追踪中的标的</h2><a class="btn small" href="/companies">管理观察清单</a></div>
   {% if rows %}
+  {{ filter_bar('#watch', tracked=False) }}
   <div class="tblwrap">
-  <table class="tbl">
-    <thead><tr><th>公司</th><th class="r">现价</th><th class="r">{{ TARGET_LABEL }}</th><th class="r">空间</th>
-      <th class="r">牛 / 基准 / 熊</th><th title="深度报告核心判断的状态">论点</th><th>最近修正</th></tr></thead>
-    <tbody>
-    {% for row in rows %}{% set s = row.s %}{% set rev = s.revision %}
-      <tr>
-        <td><a href="/c/{{ row.company.id }}"><b>{{ row.company.name }}</b></a>
-          <div class="muted small">{{ row.company.listings | map(attribute='display') | join(' / ') }}</div></td>
-        <td class="r nowrap">{{ s.price | num }}<div class="muted small">{{ s.price_date[5:] if s.price_date else '' }}</div></td>
-        <td class="r"><b>{{ s.live_target | num }}</b> <span class="muted small">{{ s.currency }}</span>
-          {% if rev.prev_target and rev.kind != 'baseline' %}<div class="small">较上次 {{ delta(rev.target, rev.prev_target) }}</div>{% endif %}</td>
-        <td class="r"><b class="{{ s.upside | dirclass }}">{{ s.upside | pct }}</b></td>
-        <td class="r small nowrap">{{ rev.bull | num }} / {{ rev.base | num }} / {{ rev.bear | num }}</td>
-        <td>{{ stance_badge(rev.stance) }} {{ thesis_badge(rev.thesis_status) }}
+  <table class="tbl watch" id="watch">
+    <thead><tr><th>公司</th><th>上市地</th><th class="r">现价</th><th class="r" title="{{ TARGET_LABEL }}">目标价 / 空间</th>
+      <th title="最新深度报告的立场">报告立场</th><th title="按情景数字与该上市地现价由代码算出的立场">情景立场</th>
+      <th title="深度报告核心判断的状态（完好时不显示）">论点</th><th>最近修正</th><th></th></tr></thead>
+    {% for row in rows %}{% set c = row.company %}{% set s = row.s %}{% set rev = s.revision %}
+    <tbody data-group data-i="{{ loop.index0 }}" data-k-stance="{{ row.key[0] }}" data-k-upside="{{ -row.key[1] }}" data-k-ratio="{{ -row.key[2] }}"
+           data-k-date="{{ row.report_at or '' }}" data-tracked="1" data-pinned="{{ 1 if row.pinned else 0 }}"
+           data-text="{{ (c.name ~ ' ' ~ c.id ~ ' ' ~ (c.name_en or '') ~ ' ' ~ (c.aliases | join(' ')) ~ ' ' ~ (c.listings | map(attribute='code') | join(' '))) | lower }}">
+    {% for v in row.views %}
+      <tr class="{{ 'lead' if loop.first }}" data-market="{{ v.listing.market }}" data-stance="{{ v.stance or 'none' }}">
+        <td class="grp name-cell">{% if row.pinned %}<span class="pin on" title="已置顶">★</span> {% endif %}<a href="/c/{{ c.id }}"><b>{{ c.name }}</b></a>
+          {% if rev.prev_target and rev.kind != 'baseline' and v.primary %}<div class="small muted">较上次 {{ delta(rev.target, rev.prev_target) }}</div>{% endif %}</td>
+        {{ view_cells(v, scen=False) }}
+        <td class="grp">{% if row.report_stance %}{{ stance_badge(row.report_stance) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td>{{ scene_stance(v) }}</td>
+        <td class="grp">{{ thesis_badge(rev.thesis_status, quiet=True) }}
           {% if s.redo %}<a class="badge warn" href="/jobs/{{ s.redo.id }}">重跑报告{{ '排队中' if s.redo.status == 'queued' else '运行中' }}</a>{% endif %}</td>
-        <td class="small">{{ kind_badge(rev.kind) }} {{ rev.created_at | when }}<div class="clip">{{ rev.summary }}</div></td>
+        <td class="grp small rev-cell">{{ kind_badge(rev.kind) }} {{ rev.created_at | when }}<div>{{ rev.summary }}</div></td>
+        <td class="grp nowrap"><form method="post" action="/c/{{ c.id }}/check" class="inline" title="抓取、分级后按新依据修正估值">{{ csrf_field }}<input type="hidden" name="next" value="/">
+          <button class="btn tiny">立即检查</button></form></td>
       </tr>
     {% endfor %}
     </tbody>
+    {% endfor %}
   </table>
+  <p class="muted" data-filter-empty hidden>没有符合筛选条件的标的。</p>
   </div>
   {% else %}
   <p class="muted">还没有追踪中的标的。在下方或「观察清单」里开始追踪：追踪以最新深度报告的估值矩阵为基线（由代码重建，不调用模型），之后每次运行按新事件修正估值假设。</p>
@@ -53,7 +60,7 @@
         <div>{{ kind_badge(r.kind) }} <b>{{ names.get(r.company_id, r.company_id) }}</b>
           <span class="muted small">{{ r.created_at | when }}</span>
           {% if r.prev_target %}<span class="small">{{ r.prev_target | num }} → <b>{{ r.target | num }}</b> {{ delta(r.target, r.prev_target) }}</span>{% endif %}
-          {{ thesis_badge(r.thesis_status, r.stance) }}</div>
+          {{ thesis_badge(r.thesis_status, r.stance, quiet=True) }}</div>
         <div class="clip small">{{ r.summary }}</div>
       </a>
     {% else %}

@@ -804,6 +804,64 @@ class DB:
         return self._all(sql + (" WHERE company_id=?" if company_id else "") + " ORDER BY id DESC",
                          (company_id,) if company_id else ())
 
+    def delete_dossier(self, company_id: str, dossier_id: int) -> dict:
+        """删除一版深度报告及依附于它的记录：证伪条件、基于它的估值修正、对话。
+        报告若是当前最新一版，则把上一版的证伪条件重新启用，催化剂与跟踪计划按上一版的跟踪卡恢复（计划里已解析的 secid 沿用）。
+        追踪器指向被删记录时改指向剩下的最新修正；没有可指的就删掉追踪器。返回 {revisions, chats, restored}。"""
+        with self.lock:
+            row = self.conn.execute("SELECT id FROM dossiers WHERE id=? AND company_id=?", (dossier_id, company_id)).fetchone()
+            if row is None:
+                raise KeyError(dossier_id)
+            was_latest = self.conn.execute("SELECT MAX(id) FROM dossiers WHERE company_id=?", (company_id,)).fetchone()[0] == dossier_id
+            revs = [r[0] for r in self.conn.execute("SELECT id FROM revisions WHERE company_id=? AND dossier_id=?", (company_id, dossier_id))]
+            chat_ids = [r[0] for r in self.conn.execute("SELECT id FROM chats WHERE company_id=? AND (dossier_id=? OR revision_id IN (%s))"
+                                                        % ",".join("?" * len(revs)), (company_id, dossier_id, *revs))]
+            for cid in chat_ids:
+                self.conn.execute("DELETE FROM chat_messages WHERE chat_id=?", (cid,))
+                self.conn.execute("DELETE FROM chats WHERE id=?", (cid,))
+            for rid in revs:
+                self.conn.execute("UPDATE tracker_refs SET revision_id=NULL WHERE revision_id=?", (rid,))
+                self.conn.execute("DELETE FROM revisions WHERE id=?", (rid,))
+            self.conn.execute("DELETE FROM triggers WHERE company_id=? AND dossier_id=?", (company_id, dossier_id))
+            self.conn.execute("DELETE FROM dossiers WHERE id=?", (dossier_id,))
+            tr = self.conn.execute("SELECT * FROM trackers WHERE company_id=?", (company_id,)).fetchone()
+            if tr and (tr["dossier_id"] == dossier_id or tr["revision_id"] in revs):
+                last = self.conn.execute("SELECT id, dossier_id FROM revisions WHERE company_id=? ORDER BY id DESC LIMIT 1", (company_id,)).fetchone()
+                if last:
+                    self.conn.execute("UPDATE trackers SET dossier_id=?, revision_id=?, updated_at=? WHERE company_id=?",
+                                      (last["dossier_id"], last["id"], iso(utcnow()), company_id))
+                else:
+                    self.conn.execute("DELETE FROM trackers WHERE company_id=?", (company_id,))
+            self.conn.commit()
+        restored = None
+        if was_latest and (prev := self.latest_dossier(company_id)):
+            restored = prev["id"]
+        return {"revisions": len(revs), "chats": len(chat_ids), "restored": restored, "was_latest": was_latest}
+
+    def restore_dossier_state(self, company_id: str, dossier_id: int, catalysts: list[dict], plan: dict) -> None:
+        """删除最新一版后，让上一版重新成为「当前」：启用它的证伪条件，换回它的催化剂与跟踪计划。"""
+        now = iso(utcnow())
+        with self.lock:
+            self.conn.execute("UPDATE triggers SET active=0 WHERE company_id=?", (company_id,))
+            self.conn.execute("UPDATE triggers SET active=1 WHERE company_id=? AND dossier_id=?", (company_id, dossier_id))
+            self.conn.execute("DELETE FROM catalysts WHERE company_id=?", (company_id,))
+            self.conn.executemany(
+                "INSERT INTO catalysts(company_id, dossier_id, when_text, due_date, event, kpi) VALUES(?,?,?,?,?,?)",
+                [(company_id, dossier_id, c.get("when"), c.get("due_date"), c["event"], c.get("kpi")) for c in catalysts])
+            self.conn.execute(
+                "INSERT INTO plans(company_id, dossier_id, plan_json, updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(company_id) DO UPDATE SET dossier_id=excluded.dossier_id, plan_json=excluded.plan_json, updated_at=excluded.updated_at",
+                (company_id, dossier_id, json.dumps(plan, ensure_ascii=False), now))
+            self.conn.commit()
+
+    def dossier_history(self, company_id: str) -> list[dict]:
+        """某公司的全部报告版本（含跟踪卡，不含正文与笔记），新的在前。"""
+        rows = self._all("SELECT id, company_id, created_at, model, html_path, pdf_path, card_json, LENGTH(report_md) AS chars "
+                         "FROM dossiers WHERE company_id=? ORDER BY id DESC", (company_id,))
+        for r in rows:
+            r["card"] = json.loads(r.pop("card_json"))
+        return rows
+
     # ------------------------------------------------------------ 标的追踪
 
     def tracker(self, company_id: str) -> dict | None:

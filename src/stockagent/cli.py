@@ -22,8 +22,8 @@ from .llm import LLMError
 from .utils import fmt_local, iso, lock_holder, pct, today_local, utcnow
 from .valuation import TARGET_LABEL, describe, fmt
 
-LLM_TASKS = ("triage", "stock_brief", "market_brief", "profile", "research", "dossier", "monitor", "tracker", "screen",
-             "screen_theme")
+LLM_TASKS = ("triage", "stock_brief", "market_brief", "profile", "research", "dossier", "monitor", "tracker", "chat",
+             "screen", "screen_theme")
 
 
 def _print(msgs: list[str]) -> None:

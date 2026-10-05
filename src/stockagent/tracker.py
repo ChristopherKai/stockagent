@@ -31,8 +31,8 @@ from .tools import ToolBox, dossier_running
 from .triage import DIRECTIONS, event_label, listing_market, short_id
 from .utils import fmt_local, iso, log, parse_iso, pct, sha1, today_local, utcnow
 from .valuation import (
-    FACT_PATHS, TARGET_LABEL, ValuationModel, apply_op, build_baseline, check_value, describe, fmt, get_values,
-    load_model, path_label, paths, refresh_fx, risk_stats, set_value, stance_check,
+    FACT_PATHS, SCENARIOS, TARGET_LABEL, ValuationModel, _range_model, apply_op, build_baseline, check_value, describe, fmt,
+    get_values, listing_views, load_model, path_label, paths, refresh_fx, risk_stats, set_value, stance_check,
 )
 
 THESIS_STATUS = {"intact": "完好", "strengthened": "加强", "weakened": "削弱", "broken": "失效"}
@@ -257,6 +257,7 @@ def status(app: App, company: Company) -> dict | None:
     stats = risk_stats(live_model, price)
     base = live_model.scenario("base")
     return {
+        "views": listing_views(app, company, live_model, app.settings.tracker.stance_band, app.settings.tracker.target),
         "stats": stats, "stance_check": stance_check(rev.get("stance"), stats, app.settings.tracker.stance_band),
         "anchor_check": anchor.check(model.anchor, live_model.price(base), app.settings.tracker.anchor_band) if base else None,
         "enabled": bool(tr["enabled"]), "tracker": tr, "revision": rev, "model": model, "live_model": live_model,
@@ -265,6 +266,17 @@ def status(app: App, company: Company) -> dict | None:
         "baseline": app.db.latest_revision(company.id, kind="baseline"),
         "redo": redo if redo and redo["status"] in ("queued", "running") else None,
     }
+
+
+def card_views(app: App, company: Company, dossier: dict) -> list[dict]:
+    """没有追踪的公司：按深度报告跟踪卡的情景区间（中值）算各上市地的视图；卡片没有情景价格时为空。"""
+    card = dossier["card"]
+    scen = [x for x in card.get("scenarios", []) if x.get("name") in SCENARIOS and x.get("price_low") and x.get("price_high")]
+    if not scen:
+        return []
+    listing = next((l for l in company.listings if l.key == card.get("price_listing")), company.listings[0])
+    model = _range_model(scen, listing.key, listing.currency, f"深度报告 #{dossier['id']} · 跟踪卡情景区间")
+    return listing_views(app, company, model, app.settings.tracker.stance_band, app.settings.tracker.target)
 
 
 def status_line(app: App, company: Company) -> str | None:

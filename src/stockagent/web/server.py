@@ -43,6 +43,17 @@ templates.env.globals.update(
 )
 
 
+def asset_url(name: str) -> str:
+    """静态文件地址带上修改时间：改了 JS / CSS 后浏览器不会继续用缓存的旧文件。"""
+    try:
+        return f"/static/{name}?v={(HERE / 'static' / name).stat().st_mtime_ns // 1_000_000}"
+    except OSError:
+        return f"/static/{name}"
+
+
+templates.env.globals["asset_url"] = asset_url
+
+
 class AppHolder:
     """当前的 App（配置、观察清单、数据库、模型）。保存配置后 reload：复用数据库连接，重建 LLM（清掉客户端缓存）。
     后台任务（如「新增公司」）改了 watchlist.yaml 时，下次取 app 自动重新加载。"""

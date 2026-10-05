@@ -1,6 +1,7 @@
 {# 论点指深度报告的核心判断（立场 + 核心论点），与公司好坏无关：偏空报告遇到新的利空属于「加强」 #}
-{% macro thesis_badge(status, stance=None) -%}
-{%- if status -%}<span class="badge th-{{ status }}" title="{{ THESIS_HELP.get(status, '') }}">论点{{ THESIS_STATUS.get(status, status) }}</span>{%- endif -%}
+{# quiet：论点完好时不展示（仪表盘、观察清单只提示加强 / 削弱 / 失效） #}
+{% macro thesis_badge(status, stance=None, quiet=False) -%}
+{%- if status and not (quiet and status == 'intact') -%}<span class="badge th-{{ status }}" title="{{ THESIS_HELP.get(status, '') }}">论点{{ THESIS_STATUS.get(status, status) }}</span>{%- endif -%}
 {%- endmacro %}
 
 {% macro stance_badge(stance) -%}
@@ -59,4 +60,45 @@
   {% endif %}
   · {{ target_label }} = {{ '各情景股价按概率加权' if mode == 'expected' else '基准情景股价' }} = <b>{{ live_target | num }} {{ currency }}</b> · 来源：{{ model.source }}
 </p>
+{%- endmacro %}
+
+
+{# 各上市地的视图单元格：上市地、现价、目标价（相对现价）、牛 / 基准 / 熊价格（各自相对现价）。v 来自 valuation.listing_views #}
+{% macro view_cells(v, scen=True) -%}
+<td class="lst"><span class="mk mk-{{ v.listing.market }}">{{ MARKET_LABEL.get(v.listing.market, v.listing.market) }}</span>
+  <span class="small">{{ v.label }}</span>{% if v.primary and v.multi %} <span class="muted small" title="估值按这个上市地定价，其他上市地按汇率平价折算">·定价</span>{% endif %}
+  {%- if v.premium is not none %}<div class="muted small" title="按汇率平价折回定价上市地口径的溢价（正）/ 折价（负）">较定价地 <span class="{{ v.premium | dirclass }}">{{ v.premium | pct(0) }}</span></div>{% endif %}</td>
+<td class="r nowrap">{% if v.price %}<b>{{ v.price | num }}</b><div class="muted small" title="{{ v.price_date or '' }}">{{ v.currency }}</div>{% else %}<span class="muted">—</span>{% endif %}</td>
+<td class="r nowrap">{% if v.target is not none %}<b>{{ v.target | num }}</b><div class="small {{ v.upside | dirclass }}">{{ v.upside | pct }}</div>
+  {%- elif v.price and not v.convertible %}<span class="muted small" title="缺汇率数据或美股 ADS 换股比例，无法按平价折算">无法折算</span>
+  {%- else %}<span class="muted">—</span>{% endif %}</td>
+{% if scen %}<td class="r nowrap small scn-cell">{% for n, lab in [('bull', '牛'), ('base', '基'), ('bear', '熊')] %}{% set x = v.scenarios.get(n) %}{% if x -%}
+  <div><span class="muted">{{ lab }}</span> {{ x.price | num }} <span class="{{ x.upside | dirclass }}">{{ x.upside | pct(0) }}</span></div>{% endif %}{% endfor %}
+  {%- if not v.scenarios %}<span class="muted">—</span>{% endif %}</td>{% endif %}
+{%- endmacro %}
+
+{# 多空比：上行 / 下行（期望幅度之比）；没有下行部分时写「无下行」 #}
+{% macro ratio_cell(v) -%}
+<td class="r small">{% if v.stats %}{% if v.stats.ratio is not none %}{% if v.stats.ratio >= 100 %}<b title="{{ '%.0f' | format(v.stats.ratio) }}">&gt;100</b>{% else %}<b>{{ '%.2f' | format(v.stats.ratio) }}</b>{% endif %}{% else %}<span class="muted" title="所有情景都高于现价">无下行</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+{%- endmacro %}
+
+{# 立场：stance_badge + 悬停说明；没有观点时显示「—」 #}
+{% macro scene_stance(v) -%}
+{%- if v.stance %}<span title="{{ v.reason }}">{{ stance_badge(v.stance) }}</span>{% else %}<span class="muted">—</span>{% endif -%}
+{%- endmacro %}
+
+{# 筛选栏：target 为表格的 CSS 选择器（表格里每家公司一个 tbody[data-group]，每个上市地一行 tr[data-market][data-stance]） #}
+{% macro filter_bar(target, tracked=True) -%}
+<div class="filterbar" data-filter-bar="{{ target }}">
+  <input type="search" data-f="q" placeholder="搜索名称 / 代码" aria-label="搜索名称或代码" autocomplete="off">
+  <select data-f="market" aria-label="市场"><option value="">全部市场</option><option value="HK">港股</option><option value="A">A 股</option><option value="US">美股</option></select>
+  <select data-f="stance" aria-label="观点"><option value="">全部观点</option><option value="bullish">偏多</option><option value="neutral">中性</option>
+    <option value="bearish">偏空</option><option value="none">暂无观点</option></select>
+  {% if tracked %}<select data-f="tracked" aria-label="追踪状态"><option value="">全部状态</option><option value="1">追踪中</option><option value="0">未追踪</option></select>{% endif %}
+  <label class="check inline"><input type="checkbox" data-f="pinned"> 仅置顶</label>
+  <select data-f="sort" aria-label="排序"><option value="">按情景立场排序</option><option value="upside">按空间排序</option><option value="ratio">按多空比排序</option>
+    <option value="date">按报告日期排序</option></select>
+  <button type="button" class="btn tiny ghost" data-filter-reset>清除</button>
+  <span class="muted small" data-filter-count></span>
+</div>
 {%- endmacro %}

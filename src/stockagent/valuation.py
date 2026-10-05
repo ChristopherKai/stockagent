@@ -654,3 +654,48 @@ def equivalents(app, model: ValuationModel, company, target: float) -> list[str]
             line += f"；汇率平价 {fmt(target * r[0] * _ads(l) / _ads(base))} {l.currency}（不计溢价）"
         out.append(line)
     return out
+
+
+def _last_bar(app, listing) -> tuple[float | None, str | None]:
+    bars = app.bars(app.secid(listing), limit=5)
+    return (float(bars["close"].iloc[-1]), str(bars["date"].iloc[-1])) if bars is not None else (None, None)
+
+
+STANCE_RANK = {"bullish": 0, "neutral": 1, "bearish": 2}
+
+
+def listing_views(app, company, model: ValuationModel, band: float, mode: str = "expected") -> list[dict]:
+    """每个上市地各自的视图（只读库，不联网）：现价、目标价、牛 / 基准 / 熊价格与各自的空间、按该地现价算的参考立场。
+    定价上市地直接用模型；其他上市地按同股同权的汇率平价折算（ADS 乘换股比例，缺汇率或缺 ads_ratio 时折算不了），
+    所以 AH / ADS 溢价会体现为两地不同的空间与立场（例如 H 股折价→偏多，A 股溢价→偏空）。
+    统计量（空间、跌破概率、参考立场）用「该地现价折回定价上市地口径」代入 risk_stats，与定价上市地的算法一致。"""
+    base = next((l for l in company.listings if l.key == model.listing), None) or company.pricing_listing
+    p0, _ = _last_bar(app, base)
+    out = []
+    for l in company.listings:
+        price, day = _last_bar(app, l)
+        k: float | None = 1.0
+        if l.key != base.key:
+            r = fx_rate(app, model.price_currency, l.currency)
+            a, b = _ads(l), _ads(base)
+            k = r[0] * a / b if r and a and b else None
+        v = {"listing": l, "key": l.key, "label": l.display, "currency": l.currency, "price": price, "price_date": day,
+             "primary": l.key == base.key, "multi": len(company.listings) > 1, "convertible": k is not None, "target": None, "upside": None, "scenarios": {},
+             "stats": None, "stance": None, "reason": "", "premium": None}
+        if k is not None and price:
+            eq = price / k
+            st = risk_stats(model, eq)
+            v["stats"] = st
+            v["target"] = model.target(mode) * k
+            v["upside"] = v["target"] / price - 1
+            v["scenarios"] = {s.name: {"price": model.price(s) * k, "upside": model.price(s) * k / price - 1} for s in model.scenarios}
+            v["stance"], v["reason"] = reference_stance(st, band)
+            v["premium"] = eq / p0 - 1 if p0 and not v["primary"] else None
+        out.append(v)
+    return out
+
+
+def view_sort_key(views: list[dict]) -> tuple:
+    """观点排序：偏多在前，同观点按空间从大到小，再按上行 / 下行比（多空比）从大到小；没有观点的排最后。取各上市地中最靠前的一个。"""
+    keys = [(STANCE_RANK[v["stance"]], -v["upside"], -(v["stats"]["ratio"] if v["stats"]["ratio"] is not None else 1e9)) for v in views if v["stance"] and v["upside"] is not None]
+    return min(keys) if keys else (9, 0, 0)
