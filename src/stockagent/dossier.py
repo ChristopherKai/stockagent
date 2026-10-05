@@ -1002,3 +1002,44 @@ def _print_pdf(chrome: str, html_path: Path, pdf: Path, profile_dir: Path, timeo
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
     return pdf if pdf.exists() and pdf.stat().st_size > 0 else None
+
+
+# ---------------------------------------------------------------- 删除历史版本
+
+def delete_version(app: App, company: Company, dossier_id: int) -> str:
+    """删除一版深度报告（库里的记录与 data/dossiers 下的文件）。正在作为追踪基线的报告不能删：先停止追踪。"""
+    d = app.db.dossier(dossier_id)
+    if d is None or d["company_id"] != company.id:
+        raise ValueError(f"没有这版报告：#{dossier_id}")
+    tr = app.db.tracker(company.id)
+    if tr and tr["enabled"] and tr["dossier_id"] == dossier_id:
+        raise ValueError(f"报告 #{dossier_id} 是正在追踪的估值基线：先停止追踪（或重新生成报告并重建基线）再删除")
+    old_plan = app.db.plan(company.id) or {}
+    info = app.db.delete_dossier(company.id, dossier_id)
+    if info["restored"]:
+        prev = app.db.latest_dossier(company.id)
+        card = prev["card"]
+        known = {r.get("code"): r.get("secid") for r in old_plan.get("related_tickers", [])}
+        plan = {"related_tickers": [{**r, "secid": known.get(r["code"])} for r in card.get("related_tickers", [])],
+                "news_keywords": card.get("news_keywords", [])[:8], "watch_metrics": card.get("watch_metrics", []),
+                "data_gaps": card.get("data_gaps", [])}
+        app.db.restore_dossier_state(company.id, prev["id"], [{**c, "due_date": parse_due(c["when"])} for c in card.get("catalysts", [])], plan)
+    out_dir = (app.data_dir / "dossiers").resolve()
+    removed = 0
+    for p in (d.get("html_path"), d.get("pdf_path"), d.get("html_path") and str(Path(d["html_path"]).with_suffix(".md"))):
+        if p and (f := Path(p).resolve()).parent == out_dir and f.is_file():
+            f.unlink()
+            removed += 1
+    latest_copy = out_dir / f"{company.id}_latest.html"
+    if info["was_latest"] and latest_copy.exists():
+        prev_html = app.db.latest_dossier(company.id) and app.db.latest_dossier(company.id)["html_path"]
+        if prev_html and Path(prev_html).is_file():
+            shutil.copyfile(prev_html, latest_copy)
+        else:
+            latest_copy.unlink()
+    msg = f"已删除 {company.name} 的深度报告 #{dossier_id}"
+    if info["revisions"] or info["chats"]:
+        msg += f"（同时删除 {info['revisions']} 条估值修正记录、{info['chats']} 个对话）"
+    if info["restored"]:
+        msg += f"；报告 #{info['restored']} 恢复为当前版本"
+    return msg

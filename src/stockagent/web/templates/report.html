@@ -10,7 +10,10 @@
       <div class="muted small">{{ d.created_at | when }} · 模型 {{ d.model or '—' }}
         {% if d.html_path %} · <a href="/files/dossiers/{{ d.html_path.split('/')[-1] }}" target="_blank">原始 HTML</a>{% endif %}
         {% if d.pdf_path %} · <a href="/files/dossiers/{{ d.pdf_path.split('/')[-1] }}" target="_blank">PDF</a>{% endif %}</div></div>
-    <div class="btns"><button type="button" class="btn small" data-chat-toggle>研读对话</button>
+    <div class="btns">
+      {% if versions | length > 1 %}<form method="get" class="inline"><select name="did" data-autosubmit aria-label="切换报告版本">
+        {% for v in versions %}<option value="{{ v.id }}" {{ 'selected' if v.id == d.id }}>#{{ v.id }} · {{ v.created_at | when(false) }}{{ '（最新）' if loop.first }}</option>{% endfor %}</select></form>{% endif %}
+      <a class="btn ghost small" href="/c/{{ c.id }}/reports">报告历史</a>
       <a class="btn ghost small" href="/c/{{ c.id }}">返回标的页面</a></div>
   </div>
   {% set changed = revisions | selectattr('kind', 'equalto', 'revision') | list %}
@@ -30,6 +33,9 @@
   <p class="muted small">这份报告还没有作为追踪基线（在标的页面开始追踪后，估值修正会列在这里）。</p>
   {% endif %}
 </section>
+<section class="card toc-card" data-toc-card hidden>
+  <details open><summary><b>目录</b> <span class="muted small">点击标题跳到对应章节</span></summary><nav class="toc" data-toc aria-label="报告目录"></nav></details>
+</section>
 <section class="card">
   <div class="md report" data-report-body>{{ d.report_md | md }}</div>
 </section>
@@ -44,7 +50,7 @@
   {% endif %}
 </section>
 </div>
-{% set chat_title = "研读对话" %}{% set chat_dossier = d.id %}{% set chat_revision = "" %}{% set chat_page = "report" %}
+{% set chat_toc = true %}{% set chat_title = "研读对话" %}{% set chat_dossier = d.id %}{% set chat_revision = "" %}{% set chat_page = "report" %}
 {% include "_chat.html" %}
 </div>
 {% endblock %}

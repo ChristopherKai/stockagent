@@ -31,3 +31,11 @@
   </form>
 </aside>
 <button type="button" class="chat-ask" data-chat-ask hidden>问这段</button>
+
+{# 悬浮按钮：滚动时始终在页面内（目录只在报告页；对话收起时才显示「研读对话」） #}
+<div class="fab-bar" data-fab-bar>
+  {% if chat_toc %}<button type="button" class="fab" data-toc-toggle aria-expanded="false" title="目录" hidden><span aria-hidden="true">☰</span> 目录</button>{% endif %}
+  <button type="button" class="fab main" data-chat-toggle title="打开研读对话（再点收起）"><span aria-hidden="true">💬</span> <span data-chat-toggle-label>研读对话</span></button>
+  <button type="button" class="fab round" data-to-top title="回到顶部" aria-label="回到顶部" hidden>↑</button>
+</div>
+{% if chat_toc %}<div class="toc-pop" data-toc-pop hidden><div class="toc-pop-head"><b>目录</b><button type="button" class="btn tiny ghost" data-toc-close aria-label="关闭目录">✕</button></div><nav class="toc" data-toc aria-label="报告目录（悬浮）"></nav></div>{% endif %}

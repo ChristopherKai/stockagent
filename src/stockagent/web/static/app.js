@@ -16,7 +16,7 @@
     if (!target) return;
     e.preventDefault();
     for (let d = target; d; d = d.parentElement) if (d.tagName === "DETAILS") d.open = true;
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.scrollIntoView({ behavior: "smooth", block: target.matches("h1, h2, h3, h4") ? "start" : "center" });
     target.classList.remove("target-hit");
     void target.offsetWidth;
     target.classList.add("target-hit");
@@ -29,7 +29,7 @@
   // 全选：<input type="checkbox" data-select-all="name">
   document.querySelectorAll("[data-select-all]").forEach((box) => {
     box.addEventListener("change", () => {
-      document.querySelectorAll(`input[type=checkbox][name="${box.dataset.selectAll}"]`).forEach((b) => { b.checked = box.checked; });
+      document.querySelectorAll(`input[type=checkbox][name="${box.dataset.selectAll}"]`).forEach((b) => { b.checked = box.checked && !b.closest("tr")?.hidden && !b.closest("tbody")?.hidden; });
     });
   });
 
@@ -113,6 +113,69 @@
     if (log.dataset.status === "queued" || log.dataset.status === "running") setTimeout(poll, 1000);
     log.scrollTop = log.scrollHeight;
   }
+
+  // 列表筛选（仪表盘、观察清单）：<div data-filter-bar="#表格">；每家公司一个 tbody[data-group]，每个上市地一行 tr[data-market][data-stance]。
+  // 隐藏的行不占位；每家公司第一条可见的行标 .lead（公司级的单元格只在它里面显示）。
+  document.querySelectorAll("[data-filter-bar]").forEach((bar) => {
+    const table = document.querySelector(bar.dataset.filterBar);
+    if (!table) return;
+    const groups = [...table.querySelectorAll("tbody[data-group]")];
+    const ctl = {};
+    bar.querySelectorAll("[data-f]").forEach((c) => { ctl[c.dataset.f] = c; });
+    const count = bar.querySelector("[data-filter-count]");
+    const empty = document.querySelector("[data-filter-empty]");
+    const KEY = `stockagent.filter.${location.pathname}`;
+    const value = (c) => (c ? (c.type === "checkbox" ? (c.checked ? "1" : "") : c.value.trim().toLowerCase()) : "");
+    const save = () => {
+      try { localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(Object.entries(ctl).map(([k, c]) => [k, c.type === "checkbox" ? c.checked : c.value])))); } catch { /* 不记忆 */ }
+    };
+    const apply = () => {
+      const q = value(ctl.q), market = ctl.market?.value || "", stance = ctl.stance?.value || "";
+      const tracked = ctl.tracked?.value || "", pinned = value(ctl.pinned);
+      // 排序：置顶永远在前；默认（服务端给的）顺序 = 情景立场 → 空间 → 多空比
+      const mode = ctl.sort?.value || "";
+      table.querySelectorAll("th.sortable").forEach((th) => th.classList.toggle("sorted", th.dataset.sort === mode));
+      const num = (g, k) => Number(g.dataset[k]) || 0;
+      const by = {
+        "": (a, b) => num(a, "kStance") - num(b, "kStance") || num(b, "kUpside") - num(a, "kUpside") || num(b, "kRatio") - num(a, "kRatio"),
+        upside: (a, b) => (num(a, "kStance") === 9) - (num(b, "kStance") === 9) || num(b, "kUpside") - num(a, "kUpside"),
+        ratio: (a, b) => (num(a, "kStance") === 9) - (num(b, "kStance") === 9) || num(b, "kRatio") - num(a, "kRatio"),
+        date: (a, b) => (b.dataset.kDate || "").localeCompare(a.dataset.kDate || ""),
+      }[mode];
+      [...groups].sort((a, b) => (b.dataset.pinned === "1") - (a.dataset.pinned === "1") || by(a, b) || num(a, "i") - num(b, "i"))
+        .forEach((g) => table.appendChild(g));
+      let shown = 0;
+      groups.forEach((g) => {
+        const gOk = (!q || g.dataset.text.includes(q)) && (!tracked || g.dataset.tracked === tracked) && (!pinned || g.dataset.pinned === "1");
+        let first = true, any = false;
+        g.querySelectorAll("tr").forEach((r) => {
+          const ok = gOk && (!market || r.dataset.market === market) && (!stance || r.dataset.stance === stance);
+          r.hidden = !ok;
+          r.classList.toggle("lead", ok && first);
+          if (ok) { first = false; any = true; }
+        });
+        g.hidden = !any;
+        if (any) shown += 1;
+      });
+      if (count) count.textContent = `${shown} / ${groups.length} 家`;
+      if (empty) empty.hidden = shown > 0;
+    };
+    try {
+      const saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+      Object.entries(saved).forEach(([k, v]) => { const c = ctl[k]; if (!c) return; if (c.type === "checkbox") c.checked = !!v; else c.value = v; });
+    } catch { /* 不记忆 */ }
+    Object.values(ctl).forEach((c) => c.addEventListener(c.tagName === "INPUT" && c.type !== "checkbox" ? "input" : "change", () => { apply(); save(); }));
+    table.querySelectorAll("th.sortable").forEach((th) => th.addEventListener("click", () => {
+      if (!ctl.sort) return;
+      ctl.sort.value = th.dataset.sort === ctl.sort.value ? "" : th.dataset.sort; // 再点一次回到默认
+      apply(); save();
+    }));
+    bar.querySelector("[data-filter-reset]")?.addEventListener("click", () => {
+      Object.values(ctl).forEach((c) => { if (c.type === "checkbox") c.checked = false; else c.value = ""; });
+      apply(); save();
+    });
+    apply();
+  });
 })();
 
 
@@ -170,10 +233,10 @@
     if (narrow.matches) layout.classList.remove("chat-open");
     else { layout.classList.add("chat-off"); save(KEY_OFF, "1"); }
   };
-  document.querySelector("[data-chat-toggle]")?.addEventListener("click", () => {
+  document.querySelectorAll("[data-chat-toggle]").forEach((b) => b.addEventListener("click", () => {
     if (isOpen()) close();
     else { open(); input.focus(); }
-  });
+  }));
   $("[data-chat-close]").addEventListener("click", close);
   fullBtn.addEventListener("click", () => { if (!isFull()) open(); setFull(!isFull()); input.focus(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && isFull()) setFull(false); });
@@ -587,4 +650,57 @@
       input.focus();
     });
   }
+})();
+
+
+// 报告页：目录（从正文的标题生成，支持页内跳转与滚动高亮）、悬浮按钮（目录 / 回到顶部）。
+(function () {
+  "use strict";
+  const body = document.querySelector("[data-report-body]");
+  const bar = document.querySelector("[data-fab-bar]");
+  const top = document.querySelector("[data-to-top]");
+  if (top) {
+    top.addEventListener("click", () => window.scrollTo({ top: 0, behavior: "smooth" }));
+    const sync = () => { top.hidden = window.scrollY < 600; };
+    window.addEventListener("scroll", sync, { passive: true });
+    sync();
+  }
+  const containers = document.querySelectorAll("[data-toc]");
+  if (!body || !bar || !containers.length) return;
+  const heads = [...body.querySelectorAll("h1, h2, h3")].filter((h) => h.textContent.trim());
+  if (heads.length < 3) return;
+  const lowest = Math.min(...heads.map((h) => Number(h.tagName[1])));
+  const links = [];
+  heads.forEach((h, i) => {
+    h.id = `rp-${i + 1}`; // 标题的 id 由这里统一生成（服务端净化后的正文不带 id）
+    h.classList.add("rp-head");
+  });
+  containers.forEach((box) => {
+    heads.forEach((h) => {
+      const a = document.createElement("a");
+      a.href = `#${h.id}`;
+      a.className = `toc-l${Math.min(Number(h.tagName[1]) - lowest + 1, 3)}`;
+      a.textContent = h.textContent.replace(/\s+/g, " ").trim();
+      box.appendChild(a);
+      links.push([h, a]);
+    });
+  });
+  document.querySelector("[data-toc-card]").hidden = false;
+  const pop = document.querySelector("[data-toc-pop]");
+  const toggle = document.querySelector("[data-toc-toggle]");
+  toggle.hidden = false;
+  const setPop = (on) => { pop.hidden = !on; toggle.setAttribute("aria-expanded", String(on)); };
+  toggle.addEventListener("click", (e) => { e.stopPropagation(); setPop(pop.hidden); });
+  document.querySelector("[data-toc-close]").addEventListener("click", () => setPop(false));
+  pop.addEventListener("click", (e) => { if (e.target.closest("a")) setPop(false); });
+  document.addEventListener("click", (e) => { if (!pop.hidden && !pop.contains(e.target)) setPop(false); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") setPop(false); });
+  // 滚动高亮：取最后一个已经滚过视口上沿的标题
+  const spy = () => {
+    let cur = null;
+    for (const [h] of links.slice(0, heads.length)) { if (h.getBoundingClientRect().top <= 90) cur = h; else break; }
+    links.forEach(([h, a]) => a.classList.toggle("on", h === cur));
+  };
+  window.addEventListener("scroll", spy, { passive: true });
+  spy();
 })();

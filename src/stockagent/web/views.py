@@ -18,10 +18,11 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from .. import app as appmod
 from .. import anchor, chat, docs, jobs, monitor, newco, notify, scheduler, tracker
 from .. import consensus as consensus_mod
+from .. import dossier as dossier_mod
 from ..config import Company
 from ..docs import DOC_TYPES, SUPPORTED
-from ..utils import iso, lock_holder, parse_iso, today_local, utcnow
-from ..valuation import SCENARIO_LABEL, equivalents, load_model, risk_stats, stance_check
+from ..utils import CST, iso, lock_holder, parse_iso, today_local, utcnow
+from ..valuation import SCENARIO_LABEL, _last_bar, _range_model, listing_views, load_model, risk_stats, stance_check, view_sort_key
 from . import charts, yamledit
 from .render import safe_url
 from .security import SANDBOX_CSP, verify_csrf
@@ -51,27 +52,64 @@ def company_or_404(app, cid: str) -> Company:
     return c
 
 
-def submit_job(request: Request, task: str, companies=None, flags=None, profile=None) -> RedirectResponse:
+def submit_job(request: Request, task: str, companies=None, flags=None, profile=None, to: str | None = None) -> RedirectResponse:
+    """to：提交后回到哪个页面（默认进任务页）；列表页上的按钮用它留在原页。"""
     app = holder(request).app
     try:
         jid = jobs.submit(app, task, companies, flags, profile, source="web")
     except jobs.JobError as e:
-        return back(request.headers.get("referer") or "/jobs", err=str(e))
-    return back(f"/jobs/{jid}", ok="任务已提交")
+        return back(to or request.headers.get("referer") or "/jobs", err=str(e))
+    return back(to or f"/jobs/{jid}", ok=f"任务 #{jid} 已提交" if to else "任务已提交")
+
+
+async def return_to(request: Request, default: str) -> str:
+    """表单里的 next 字段：只接受本站内的路径（列表页上的按钮做完动作后回到列表）。"""
+    n = str((await request.form()).get("next") or "")
+    return n if n.startswith("/") and not n.startswith("//") and "\\" not in n and "\n" not in n else default
 
 
 # ---------------------------------------------------------------- 仪表盘
 
+PIN_PREFIX = "pinned:"
+
+
+def _price_views(app, c: Company) -> list[dict]:
+    """没有估值模型（还没有深度报告或情景价格）时：各上市地只有现价。"""
+    out = []
+    for l in c.listings:
+        price, day = _last_bar(app, l)
+        out.append({"listing": l, "key": l.key, "label": l.display, "currency": l.currency, "price": price, "price_date": day,
+                    "primary": l.key == c.pricing_listing.key, "multi": len(c.listings) > 1, "convertible": True, "target": None, "upside": None,
+                    "scenarios": {}, "stats": None, "stance": None, "reason": "", "premium": None})
+    return out
+
+
+def watch_rows(app) -> list[dict]:
+    """观察清单与仪表盘共用的行：每家公司的追踪状态、各上市地视图（现价、目标价、情景价、立场）。
+    排序：置顶在前；然后按观点（偏多在前）、同观点按空间、再按上行/下行比（多空比）从高到低；没有观点的在最后。"""
+    pins = app.db.kv_prefix(PIN_PREFIX)
+    rows = []
+    for c in app.watchlist.companies:
+        d = app.db.latest_dossier(c.id)
+        t = app.db.tracker(c.id)
+        s = tracker.status(app, c)
+        views = (s["views"] if s else (tracker.card_views(app, c, d) if d else [])) or _price_views(app, c)
+        views = sorted(views, key=lambda v: (view_sort_key([v]), not v["primary"]))
+        rows.append({"company": c, "dossier": d, "tracker": t, "s": s, "views": views, "pinned": PIN_PREFIX + c.id in pins,
+                     "enabled": bool(s and s["enabled"]), "report_stance": d["card"].get("stance") if d else None,
+                     "thesis": d["card"].get("thesis") if d else None,
+                     "thesis_status": s["revision"]["thesis_status"] if s else None,
+                     "key": view_sort_key(views), "report_at": d["created_at"] if d else None})
+    rows.sort(key=lambda r: (not r["pinned"], r["key"], r["company"].name))
+    return rows
+
+
 @router.get("/")
 def dashboard(request: Request):
     app = holder(request).app
-    rows, untracked = [], []
-    for c in app.watchlist.companies:
-        s = tracker.status(app, c)
-        if s and s["enabled"]:
-            rows.append({"company": c, "s": s})
-        else:
-            untracked.append({"company": c, "dossier": app.db.latest_dossier(c.id) is not None})
+    all_rows = watch_rows(app)
+    rows = [r for r in all_rows if r["enabled"]]
+    untracked = [{"company": r["company"], "dossier": r["dossier"] is not None} for r in all_rows if not r["enabled"]]
     names = {c.id: c.name for c in app.watchlist.companies}
     alerts = [(names.get(c.id, c.id), t) for c in app.watchlist.companies for t in app.db.triggers(c.id) if t["status"] != "ok"]
     catalysts = sorted(((names[c.id], x) for c in app.watchlist.companies for x in monitor.upcoming(app, c, days=30)),
@@ -88,16 +126,21 @@ def dashboard(request: Request):
 @router.get("/companies")
 def companies(request: Request):
     app = holder(request).app
-    week = iso(utcnow() - timedelta(days=7))
-    rows = []
-    for c in app.watchlist.companies:
-        d = app.db.latest_dossier(c.id)
-        t = app.db.tracker(c.id)
-        rows.append({"company": c, "dossier": d, "tracker": t, "profile": app.db.profile(c.id),
-                     "docs": len(app.db.documents(c.id)), "events": len(app.db.items_since(c.id, week, min_materiality=3)),
-                     "requests": len(app.db.requests(c.id))})
     _, etag = yamledit.load(holder(request).watchlist_path)
-    return page(request, "companies.html", rows=rows, etag=etag)
+    return page(request, "companies.html", rows=watch_rows(app), etag=etag)
+
+
+@router.post("/companies/{cid}/pin")
+async def company_pin(request: Request, cid: str):
+    app = holder(request).app
+    c = company_or_404(app, cid)
+    if (await request.form()).get("pinned") == "1":
+        app.db.kv_set(PIN_PREFIX + cid, iso(utcnow()))
+        msg = f"已置顶 {c.name}"
+    else:
+        app.db.kv_delete(PIN_PREFIX + cid)
+        msg = f"已取消置顶 {c.name}"
+    return back(await return_to(request, "/companies"), ok=msg)
 
 
 def _lines(text: str | None) -> list[str]:
@@ -317,7 +360,7 @@ def company_page(request: Request, cid: str, span: str = Query("180", alias="ran
                 chart=chart, span=span, timeline=_timeline(app, c, since), dossier=d, triggers=app.db.triggers(c.id),
                 catalysts=cats, requests=app.db.requests(c.id), plan=app.db.plan(c.id) or {},
                 doc_types=DOC_TYPES, supported=sorted(SUPPORTED), confirmed=tracker.confirmed_refs(app, c),
-                equivalents=equivalents(app, model, c, s["live_target"]) if s else [],
+                views=(s["views"] if s else (tracker.card_views(app, c, d) if d else [])) or _price_views(app, c),
                 earnings=app.db.earnings(c.id, 6), snapshots=_snapshots(app, c), today=today_local(),
                 stance_now=monitor.current_stance(app, c),
                 pending=[(r, i, x) for r in revs if r["id"] > (base_rev["id"] if base_rev else 0)
@@ -360,22 +403,23 @@ def company_consensus_delete(request: Request, cid: str, rid: int):
 
 
 @router.post("/c/{cid}/track")
-def company_track(request: Request, cid: str):
+async def company_track(request: Request, cid: str):
     app = holder(request).app
     c = company_or_404(app, cid)
+    to = await return_to(request, f"/c/{cid}")
     if app.db.latest_dossier(cid) is None:
-        return submit_job(request, "target_add", [cid], ["--dossier"])
+        return submit_job(request, "target_add", [cid], ["--dossier"], to=to if to != f"/c/{cid}" else None)
     try:
         msg = tracker.add(app, c, origin="web")
     except (tracker.TrackerError, ValueError) as e:
-        return back(f"/c/{cid}", err=str(e))
-    return back(f"/c/{cid}", ok=msg.replace("\n", " "))
+        return back(to, err=str(e))
+    return back(to, ok=msg.replace("\n", " "))
 
 
 @router.post("/c/{cid}/untrack")
-def company_untrack(request: Request, cid: str):
+async def company_untrack(request: Request, cid: str):
     app = holder(request).app
-    return back(f"/c/{cid}", ok=tracker.remove(app, company_or_404(app, cid)))
+    return back(await return_to(request, f"/c/{cid}"), ok=tracker.remove(app, company_or_404(app, cid)))
 
 
 @router.post("/c/{cid}/rebase")
@@ -390,15 +434,16 @@ def company_rebase(request: Request, cid: str):
 
 
 @router.post("/c/{cid}/check")
-def company_check(request: Request, cid: str):
+async def company_check(request: Request, cid: str):
     company_or_404(holder(request).app, cid)
-    return submit_job(request, "target_run", [cid])
+    to = await return_to(request, "")
+    return submit_job(request, "target_run", [cid], to=to or None)
 
 
 @router.post("/c/{cid}/dossier")
-def company_dossier(request: Request, cid: str):
+async def company_dossier(request: Request, cid: str):
     company_or_404(holder(request).app, cid)
-    return submit_job(request, "dossier", [cid])
+    return submit_job(request, "dossier", [cid], to=await return_to(request, "") or None)
 
 
 @router.post("/c/{cid}/onboard")
@@ -571,10 +616,65 @@ def report_page(request: Request, cid: str, did: int | None = None):
         raise HTTPException(404, "还没有深度报告")
     s = tracker.status(app, c)
     revs = [r for r in app.db.revisions(cid) if r["dossier_id"] == d["id"]]
-    return page(request, "report.html", c=c, d=d, s=s, revisions=revs,
+    return page(request, "report.html", c=c, d=d, s=s, revisions=revs, versions=app.db.dossiers(cid),
                 baseline=next((r for r in reversed(revs) if r["kind"] == "baseline"), None),
                 chats=[x for x in app.db.chats(cid) if x["dossier_id"] == d["id"] and not x["revision_id"]], quick=chat.QUICK_QUESTIONS,
                 chat_reason=app.llm.unavailable_reason("chat"), chat_model=app.llm.describe("chat"))
+
+
+def utc_day(ts: str) -> str:
+    """UTC 时间戳 → 北京时间的日期（YYYY-MM-DD）。"""
+    return parse_iso(ts).astimezone(CST).date().isoformat()
+
+
+def _bar_close_on(app, listing, day: str) -> float | None:
+    """day（含）之前最近一个交易日的收盘价（只读库）。"""
+    bars = app.bars(app.secid(listing), limit=4000)
+    if bars is None:
+        return None
+    older = bars[bars["date"] <= day]
+    return float(older["close"].iloc[-1]) if len(older) else None
+
+
+def _history(app, c: Company) -> list[dict]:
+    """每一版深度报告的摘要：报告日价格、立场、情景价格（跟踪卡区间中值）、情景加权目标价与空间、至今涨跌。"""
+    tr = app.db.tracker(c.id)
+    baselines = {r["dossier_id"]: r for r in app.db.revisions(c.id) if r["kind"] == "baseline"}
+    mode = app.settings.tracker.target
+    rows = []
+    for i, d in enumerate(app.db.dossier_history(c.id)):
+        card = d["card"]
+        listing = next((l for l in c.listings if l.key == card.get("price_listing")), c.listings[0])
+        day = utc_day(d["created_at"])
+        price = (card.get("stats") or {}).get("price") or (baselines.get(d["id"]) or {}).get("price") or _bar_close_on(app, listing, day)
+        scen = [x for x in card.get("scenarios", []) if x.get("name") in SCENARIO_LABEL and x.get("price_low") and x.get("price_high")]
+        mids = {x["name"]: (x["price_low"] + x["price_high"]) / 2 for x in scen}
+        target = _range_model(scen, listing.key, listing.currency, "").target(mode) if scen else None
+        now, _ = _last_bar(app, listing)
+        rows.append({"d": d, "day": day, "listing": listing, "price": price, "stance": card.get("stance"), "thesis": card.get("thesis"),
+                     "mids": mids, "probs": {x["name"]: x.get("probability") for x in scen}, "target": target,
+                     "upside": target / price - 1 if target and price else None, "now": now,
+                     "since": now / price - 1 if now and price else None, "latest": i == 0,
+                     "baseline": bool(tr and tr["enabled"] and tr["dossier_id"] == d["id"]), "revisions": d["id"] in baselines})
+    return rows
+
+
+@router.get("/c/{cid}/reports")
+def company_reports(request: Request, cid: str):
+    app = holder(request).app
+    c = company_or_404(app, cid)
+    return page(request, "company_reports.html", c=c, rows=_history(app, c), mode=app.settings.tracker.target)
+
+
+@router.post("/c/{cid}/reports/{did}/delete")
+def company_report_delete(request: Request, cid: str, did: int):
+    app = holder(request).app
+    c = company_or_404(app, cid)
+    try:
+        msg = dossier_mod.delete_version(app, c, did)
+    except ValueError as e:
+        return back(f"/c/{cid}/reports", err=str(e))
+    return back(f"/c/{cid}/reports", ok=msg)
 
 
 # ---------------------------------------------------------------- 事件与文件

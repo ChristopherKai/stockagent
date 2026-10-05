@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stance_badge %}
+{% block title %}{{ c.name }} · 报告历史{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="card-head">
+    <div><h1>{{ c.name }} · 研究报告历史</h1>
+      <div class="muted small">每重新生成一次深度报告就多一个版本；这里列出各版本在报告日的价格、立场与情景价格，可以回看或删除。</div></div>
+    <div class="btns"><a class="btn ghost small" href="/c/{{ c.id }}">返回标的页面</a></div>
+  </div>
+  <div class="tblwrap">
+  <table class="tbl">
+    <thead><tr><th>版本</th><th>报告日期</th><th class="r">报告日价格</th><th>立场</th>
+      <th class="r">牛 / 基 / 熊（报告区间中值）</th><th class="r" title="{{ TARGET_LABEL }}，按跟踪卡的情景概率加权">目标价 / 空间</th>
+      <th class="r" title="现价相对报告日价格的涨跌">至今</th><th>核心论点</th><th></th></tr></thead>
+    <tbody>
+    {% for r in rows %}{% set d = r.d %}
+      <tr>
+        <td class="nowrap"><b>#{{ d.id }}</b>{% if r.latest %} <span class="badge ok">最新</span>{% endif %}{% if r.baseline %} <span class="badge kind-revision" title="正在作为追踪的估值基线">追踪基线</span>{% endif %}
+          <div class="muted small">{{ d.model or '—' }}</div></td>
+        <td class="nowrap">{{ d.created_at | when }}</td>
+        <td class="r nowrap">{% if r.price %}<b>{{ r.price | num }}</b><div class="muted small">{{ r.listing.currency }} · {{ r.listing.display }}</div>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td>{% if r.stance %}{{ stance_badge(r.stance) }}{% else %}—{% endif %}</td>
+        <td class="r nowrap small">{% for n, lab in [('bull', '牛'), ('base', '基'), ('bear', '熊')] %}{% if r.mids.get(n) %}<div><span class="muted">{{ lab }}</span> {{ r.mids[n] | num }}
+          {% if r.price %}<span class="{{ (r.mids[n] / r.price - 1) | dirclass }}">{{ (r.mids[n] / r.price - 1) | pct(0) }}</span>{% endif %}
+          <span class="muted">{{ (r.probs[n] * 100) | round | int if r.probs[n] is not none }}%</span></div>{% endif %}{% endfor %}{% if not r.mids %}—{% endif %}</td>
+        <td class="r nowrap">{% if r.target %}<b>{{ r.target | num }}</b><div class="small {{ r.upside | dirclass }}">{{ r.upside | pct }}</div>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="r nowrap {{ r.since | dirclass }}">{{ r.since | pct }}{% if r.now %}<div class="muted small">现价 {{ r.now | num }}</div>{% endif %}</td>
+        <td class="small"><div class="clip" title="{{ r.thesis }}">{{ r.thesis }}</div></td>
+        <td class="nowrap">
+          <a class="btn tiny" href="/c/{{ c.id }}/report?did={{ d.id }}">查看</a>
+          {% if d.html_path %}<a class="btn tiny ghost" href="/files/dossiers/{{ d.html_path.split('/')[-1] }}" target="_blank">HTML</a>{% endif %}
+          {% if d.pdf_path %}<a class="btn tiny ghost" href="/files/dossiers/{{ d.pdf_path.split('/')[-1] }}" target="_blank">PDF</a>{% endif %}
+          <form method="post" action="/c/{{ c.id }}/reports/{{ d.id }}/delete" class="inline"
+                data-confirm="删除报告 #{{ d.id }}（{{ r.day }}）？{% if r.revisions %}基于它的估值修正记录和对话也会一并删除。{% endif %}{% if r.latest %}它是最新版本，删除后上一版恢复为当前版本。{% endif %}此操作不可恢复。">{{ csrf_field }}
+            <button class="btn tiny danger" {% if r.baseline %}disabled title="正在作为追踪基线：先停止追踪再删除"{% endif %}>删除</button></form></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="9" class="muted">还没有深度报告。</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="muted small">报告日价格取自报告生成时写入的行情（没有则取报告日当天或之前最近的收盘价）；情景价格与目标价按各版本的跟踪卡计算（区间中值、按卡片概率加权），与后续的估值修正无关。{{ DISCLAIMER }}</p>
+</section>
+{% endblock %}

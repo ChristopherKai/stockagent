@@ -29,7 +29,8 @@ router = APIRouter(prefix="/settings", dependencies=[Depends(verify_csrf)])
 
 TASK_LABEL = {"triage": "事件分级", "stock_brief": "个股研判", "market_brief": "今日要点", "profile": "公司画像",
               "research": "深度报告·研究 agent", "dossier": "深度报告·撰写与跟踪卡", "monitor": "证伪条件检查",
-              "tracker": "标的追踪·估值修正", "chat": "报告研读对话"}
+              "tracker": "标的追踪·估值修正", "chat": "报告研读对话", "screen": "选股·快筛",
+              "screen_theme": "选股·主题建议"}
 PROFILE_LABELS = {
     "protocol": ("协议", "openai：OpenAI 兼容接口（本地网关、DeepSeek、通义、Ollama 等）；anthropic：Claude 官方 SDK；mock：离线模拟"),
     "base_url": ("接口地址", "如 http://127.0.0.1:18080/v1；anthropic 协议留空为官方地址"),
@@ -115,6 +116,8 @@ async def llm_routing(request: Request):
     llm["default_profile"] = default
     tasks = llm.setdefault("tasks", CommentedMap())
     for t in LLM_TASKS:
+        if f"task_{t}" not in form:  # 表单里没有这一项就不动它（以前漏掉的任务会被误删路由）
+            continue
         v = form.get(f"task_{t}") or ""
         if v and v not in names:
             return back("/settings/llm", err=f"{TASK_LABEL[t]}：profile {v} 不存在")

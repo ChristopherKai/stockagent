@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import thesis_badge, stance_badge, kind_badge, trigger_badge, delta, valuation_table %}
+{% from "_macros.html" import thesis_badge, stance_badge, kind_badge, trigger_badge, delta, valuation_table, view_cells, scene_stance %}
 {% block title %}{{ c.name }}{% endblock %}
 {% block content %}
 <section class="card hero">
@@ -17,7 +17,7 @@
         <form method="post" action="/c/{{ c.id }}/track" class="inline">{{ csrf_field }}<button class="btn">开始追踪</button></form>
       {% endif %}
       <form method="post" action="/c/{{ c.id }}/dossier" class="inline" data-confirm="重新生成深度报告需要数分钟，同一时间只运行一个。继续？">{{ csrf_field }}<button class="btn ghost">重跑深度报告</button></form>
-      {% if dossier %}<a class="btn ghost" href="/c/{{ c.id }}/report">报告（当前版本）</a>{% endif %}
+      {% if dossier %}<a class="btn ghost" href="/c/{{ c.id }}/report">报告（当前版本）</a><a class="btn ghost" href="/c/{{ c.id }}/reports">报告历史</a>{% endif %}
       <a class="btn ghost" href="/companies/{{ c.id }}/edit">编辑</a>
     </div>
   </div>
@@ -34,7 +34,16 @@
     <div class="kpi"><div class="k">立场 / 论点</div><div class="v small">{{ stance_badge(rev.stance) }} {{ thesis_badge(rev.thesis_status) }}</div>
       <div class="s">{{ THESIS_HELP.get(rev.thesis_status, '') }}</div></div>
   </div>
-  {% for e in equivalents %}<div class="muted small">{{ e }}</div>{% endfor %}
+  {% if views | length > 1 %}
+  <h3>各上市地的视图</h3>
+  <div class="tblwrap"><table class="tbl watch">
+    <thead><tr><th>上市地</th><th class="r">现价</th><th class="r">目标价 / 空间</th><th class="r">牛 / 基 / 熊（相对现价）</th><th>情景立场</th><th class="r" title="跌破该地现价的概率">跌破现价</th><th class="r" title="上行 / 下行">多空比</th></tr></thead>
+    <tbody>{% for v in views %}<tr class="lead">{{ view_cells(v) }}<td>{{ scene_stance(v) }}</td>
+      <td class="r small">{% if v.stats %}{{ (v.stats.p_below * 100) | round | int }}%{% else %}—{% endif %}</td>
+      <td class="r small">{% if v.stats and v.stats.ratio is not none %}{{ '%.2f' | format(v.stats.ratio) }}{% else %}—{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  <p class="muted small">定价上市地（{{ c.pricing_listing.display }}）用报告的估值；其他上市地按同股同权的汇率平价折算（ADS 乘换股比例），两地溢价 / 折价体现为不同的空间与立场。立场由代码按该地现价重算。</p>
+  {% endif %}
   {% include "_stance_stats.html" %}
   {% if s.redo %}<div class="flash warn">深度报告重跑任务 <a href="/jobs/{{ s.redo.id }}">#{{ s.redo.id }}</a> {{ '排队中' if s.redo.status == 'queued' else '运行中' }}：{{ s.redo.note or '' }}</div>{% endif %}
   {% if not s.enabled %}<div class="flash warn">已停止追踪：数据保留，重新开始追踪会沿用原基线（深度报告没有更新时）。</div>{% endif %}

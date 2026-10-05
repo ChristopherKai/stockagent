@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="csrf-token" content="{{ csrf }}">
 <title>{% block title %}stockagent{% endblock %} · 自选股研究</title>
-<link rel="stylesheet" href="/static/app.css">
-<script src="/static/app.js" defer></script>
+<link rel="stylesheet" href="{{ asset_url('app.css') }}">
+<script src="{{ asset_url('app.js') }}" defer></script>
 </head>
 <body class="{{ 'red-up' if red_up else 'green-up' }}">
 {% set path = request.url.path %}

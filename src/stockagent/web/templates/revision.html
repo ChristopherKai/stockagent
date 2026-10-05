@@ -14,7 +14,7 @@
     <div><h1>{{ c.name }} · {{ KIND_LABEL[r.kind] }} #{{ r.id }}</h1>
       <div class="muted small">{{ r.created_at | when }} · 来源 {{ {'cli': '命令行', 'run': '日常流程', 'web': 'WebUI', 'scheduler': '日程', 'dossier': '深度报告', 'tracker': '标的追踪'}.get(r.origin, r.origin or '—') }}
         · 基线 <a href="/c/{{ c.id }}/report?did={{ r.dossier_id }}">深度报告 #{{ r.dossier_id }}</a>{% if r.llm_model %} · 模型 {{ r.llm_model }}{% endif %}</div></div>
-    <div class="btns"><button type="button" class="btn small" data-chat-toggle>研讨对话</button>
+    <div class="btns">
       <a class="btn ghost small" href="/c/{{ c.id }}#rev-{{ r.id }}">返回时间线</a></div>
   </div>
   <div class="kpis">
