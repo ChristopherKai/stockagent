@@ -20,6 +20,10 @@ themes:
       - name: 光纤光缆
         bottleneck: false
         tickers: ["601869", "600487"]
+      - name: 光电子/CPO 封测设备（耦合、封装、晶圆级测试）
+        bottleneck: true
+        tickers:
+          - "A:300757"
 
   - id: ai_pcb_materials
     name: AI 服务器 · PCB 与覆铜板材料

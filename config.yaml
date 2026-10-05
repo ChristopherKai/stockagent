@@ -9,7 +9,7 @@ data_dir: data                      # 数据库、文档、简报的存放位置
 #   protocol: mock      → 离线模拟，不调用任何模型（演练流程用）
 # tasks 决定每个环节用哪个 profile；换模型只需改这里。配置后用 `stock llm-test` 验证。
 llm:
-  default_profile: local
+  default_profile: free
   concurrency: 4
   max_continuations: 3                      # 文本输出达到 max_tokens 时，自动让模型从中断处续写的次数
   profiles:
@@ -84,23 +84,34 @@ llm:
       protocol: mock
       model: mock
 
+    free:
+      protocol: openai
+      base_url: http://127.0.0.1:18080/v1
+      model: global:deepseek-v4.1-flash
+      api_key_env: CCLOAD_KEY
+      max_tokens: 128000
+      effort: high
+      fallback: local
+    deepseek-v4-pro:
+      protocol: openai
+      base_url: http://127.0.0.1:18080/v1
+      model: cn:deepseek-v4-pro
+      api_key_env: CCLOAD_KEY
   tasks:
-    triage: local           # 事件分级
-    stock_brief: local      # 个股研判
-    market_brief: local     # 今日要点
-    profile: local          # 公司画像（读年报，输入很长）
-    research: local         # 深度报告：带工具的研究 agent
-    dossier: local          # 深度报告：撰写与跟踪卡
-    monitor: local          # 事件类证伪条件检查
-    tracker: local          # 标的追踪：按新事件修正估值假设（带工具的 agent + 结构化修正）
-    screen: local           # 选股器快筛：每家候选一次结构化判断（不带工具）
-    screen_theme: local     # 选股器主题 agent：按产业链主题找瓶颈环节公司（带工具，按月运行）
+    triage: free            # 事件分级
+    stock_brief: free       # 个股研判
+    market_brief: free      # 今日要点
+    profile: free           # 公司画像（读年报，输入很长）
+    research: free            # 深度报告：带工具的研究 agent
+    dossier: free            # 深度报告：撰写与跟踪卡
+    monitor: free           # 事件类证伪条件检查
+    tracker: free           # 标的追踪：按新事件修正估值假设（带工具的 agent + 结构化修正）
     chat: local             # 报告研读对话：WebUI 报告页讲解深度报告（带工具的 agent）
 
 # ------------------------------------------------------------------ 数据源
 sources:
-  announcements_lookback_days: 30   # 首次运行回溯多少天的公告
-  news_lookback_days: 7
+  announcements_lookback_days: 90   # 首次运行回溯多少天的公告
+  news_lookback_days: 30
   price_history_days: 400
   price_sources: [eastmoney, tencent]   # 行情源顺序：前一个失败自动切换到下一个
   request_delay: 0.6                # 同一网站两次请求的最小间隔（秒）；太小会被东方财富断开
@@ -132,8 +143,23 @@ sources:
   ccass_keep: 60                    # 每份快照保存持股最多的前几名参与者
 
 # ------------------------------------------------------------------ 研究 agent（深度报告）
+  sec_forms:
+    - 8-K
+    - 10-Q
+    - 10-K
+    - 6-K
+    - 20-F
+    - S-1
+    - S-3
+    - 424B4
+    - 424B5
+    - SC 13D
+    - SC 13G
+    - SC 13D/A
+    - SC 13G/A
+    - DEF 14A
 agent:
-  max_steps: 12                     # 每个研究子任务最多调用工具的轮数
+  max_steps: 20                     # 每个研究子任务最多调用工具的轮数
   tool_result_chars: 4000           # 单次工具结果最多返回给模型的字数
   # 网页搜索源。搜索 API 排在最前：exa（经 agent-reach 配置的 mcporter 调用，本机装了就启用）、
   # bocha 博查 / tavily / serper（.env 填了 key 才启用）；免费源中前三个轮流使用，其余在它们都失败时备用
@@ -207,21 +233,24 @@ scheduler:
   enabled: true
   catchup_minutes: 120              # 电脑睡眠等原因错过的时点，醒来后在该窗口内补跑一次
   jobs:
-    - {name: 早盘日报, task: run, args: [--push], cron: "30 8 * * 1-5", enabled: true}
-    - {name: 收盘日报, task: run, args: [--push], cron: "30 17 * * 1-5", enabled: true}
-    - {name: 盘中提醒, task: alert, args: [], cron: "*/20 9-16 * * 1-5", enabled: true}
-    - {name: 周末深度报告, task: dossier, args: [], cron: "0 20 * * 6", enabled: false}   # 重大事件已会自动重跑单家报告
-    - {name: 选股·事件池, task: screen_run, args: [--event-only], cron: "0 18 * * 1-5", enabled: true}
-    - {name: 选股·长线池, task: screen_run, args: [--long-only], cron: "0 10 * * 6", enabled: true}
-    - {name: 选股·主题 agent, task: screen_themes, args: [], cron: "0 14 1 * *", enabled: true}
-
-# ------------------------------------------------------------------ 推送（webhook 地址写在 .env）
+    - {name: 早盘日报, task: run, args: [--push], cron: 30 8 * * 1-5, enabled: false}
+    - {name: 收盘日报, task: run, args: [--push], cron: 30 17 * * 1-5, enabled: false}
+    - {name: 盘中提醒, task: alert, args: [], cron: '*/20 9-16 * * 1-5', enabled: false}
+    - {name: 周末深度报告, task: dossier, args: [], cron: 0 20 * * 6, enabled: false}
+    - {name: 选股·事件池, task: screen_run, args: [--event-only], cron: 0 18 * * 1-5, enabled: true}
+    - {name: 选股·长线池, task: screen_run, args: [--long-only], cron: 0 10 * * 6, enabled: true}
+    - {name: 选股·主题 agent, task: screen_themes, args: [], cron: 0 14 1 * *, enabled: false}
+    - {name: 模拟基金·日线刷新, task: fund_refresh, args: [], cron: 0 19 * * 1-5, enabled: true}
+    - {name: 模拟基金·盘前计划, task: fund_plan, args: [--push], cron: 30 8 * * 1-5, enabled: true}
+    - {name: 模拟基金·盘中提醒, task: fund_alert, args: [--push], cron: '*/20 9-16 * * 1-5', enabled: true}
+    - {name: 模拟基金·盘后复盘, task: fund_close, args: [--push], cron: 30 17 * * 1-5, enabled: true}
+    - {name: 模拟基金·周报, task: fund_weekly, args: [--push], cron: 30 10 * * 6, enabled: true}
 notify:
   feishu_webhook_env: FEISHU_WEBHOOK
   feishu_secret_env: FEISHU_SECRET  # 飞书机器人开启"签名校验"时需要
   wecom_webhook_env: WECOM_WEBHOOK
   telegram_token_env: TELEGRAM_BOT_TOKEN
-  telegram_chat_id: null
+  telegram_chat_id: 'YOUR_TELEGRAM_CHAT_ID'
   alert_min_materiality: 4          # stock alert 推送的最低重要性（1–5）
 
 # ------------------------------------------------------------------ 简报
