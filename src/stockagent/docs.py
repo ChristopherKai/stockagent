@@ -262,43 +262,44 @@ def report_candidates(db, session, company: Company, days: int = 500, sec_user_a
 
 def fetch_reports(db, session, data_dir: Path, company: Company, sec_user_agent: str | None = None) -> list[str]:
     msgs = []
-    candidates = report_candidates(db, session, company, sec_user_agent=sec_user_agent)
     us_only = bool(company.listing("US")) and not company.listing("A") and not company.listing("HK")
+    candidates = report_candidates(db, session, company, days=1200 if us_only else 500, sec_user_agent=sec_user_agent)
     if us_only and not sec_user_agent:
         return [f"{company.name}：跳过美股定期报告，config.yaml 未设置 sources.sec_user_agent"]
-    # 美股公司另外取最新一份 10-Q（季报）；10-K / 20-F 记为年报
-    for doc_type in ("annual_report", "interim_report", "quarterly_report"):
-        if doc_type == "quarterly_report" and not any(c["doc_type"] == doc_type for c in candidates):
+    # 每类取最新几份：美股公司年报取 3 份（看分部、客户集中度等的多年趋势），另取最新一份 10-Q 与代理声明（DEF 14A，记为「其他」）
+    want = {"annual_report": 3 if us_only else 1, "interim_report": 1, "quarterly_report": 1, "other": 1}
+    for doc_type, n in want.items():
+        picks = [c for c in candidates if c["doc_type"] == doc_type][:n]
+        if doc_type in ("quarterly_report", "other") and not picks:
             continue
         if doc_type == "interim_report" and us_only:
             continue
-        label = DOC_TYPES[doc_type]
-        latest = next((c for c in candidates if c["doc_type"] == doc_type), None)
-        if latest is None:
-            msgs.append(f"{company.name}：未找到{label}")
+        if not picks:
+            msgs.append(f"{company.name}：未找到{DOC_TYPES[doc_type]}")
             continue
-        period = latest.get("period") or infer_period(latest["title"], doc_type)
-        if db.has_document(company.id, doc_type, period):
-            continue
-        tmp_dir = data_dir / "tmp"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        suffix = Path(latest["url"].split("?")[0]).suffix.lower()
-        suffix = suffix if suffix in (".htm", ".html") else ".pdf"
-        tmp = tmp_dir / (re.sub(r"[^\w.\-]+", "_", f"{company.name}_{latest['title']}")[:80] + suffix)
-        headers = {"User-Agent": sec_user_agent} if latest["source"] == "sec" else None  # SEC 要求带联系方式的 User-Agent
-        try:
-            with session.get(latest["url"], headers=headers, stream=True, timeout=180) as r:
-                r.raise_for_status()
-                with open(tmp, "wb") as f:
-                    for chunk in r.iter_content(1 << 16):
-                        f.write(chunk)
-            doc, _ = store_document(
-                db, data_dir, company.id, tmp, doc_type=doc_type, period=period, title=latest["title"],
-                source=latest["source"], source_url=latest["url"], published_at=iso(latest["published_at"]),
-            )
-            msgs.append(f"下载：{company.name} · {latest['title']}（{doc['pages'] or '—'} 页，{doc['chars']:,} 字）")
-        except Exception as e:
-            msgs.append(f"✗ 下载 {company.name} {latest['title']} 失败：{e}")
-        finally:
-            tmp.unlink(missing_ok=True)
+        for latest in picks:
+            period = latest.get("period") or infer_period(latest["title"], doc_type)
+            if db.has_document(company.id, doc_type, period):
+                continue
+            tmp_dir = data_dir / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            suffix = Path(latest["url"].split("?")[0]).suffix.lower()
+            suffix = suffix if suffix in (".htm", ".html") else ".pdf"
+            tmp = tmp_dir / (re.sub(r"[^\w.\-]+", "_", f"{company.name}_{latest['title']}")[:80] + suffix)
+            headers = {"User-Agent": sec_user_agent} if latest["source"] == "sec" else None  # SEC 要求带联系方式的 User-Agent
+            try:
+                with session.get(latest["url"], headers=headers, stream=True, timeout=180) as r:
+                    r.raise_for_status()
+                    with open(tmp, "wb") as f:
+                        for chunk in r.iter_content(1 << 16):
+                            f.write(chunk)
+                doc, _ = store_document(
+                    db, data_dir, company.id, tmp, doc_type=doc_type, period=period, title=latest["title"],
+                    source=latest["source"], source_url=latest["url"], published_at=iso(latest["published_at"]),
+                )
+                msgs.append(f"下载：{company.name} · {latest['title']}（{doc['pages'] or '—'} 页，{doc['chars']:,} 字）")
+            except Exception as e:
+                msgs.append(f"✗ 下载 {company.name} {latest['title']} 失败：{e}")
+            finally:
+                tmp.unlink(missing_ok=True)
     return msgs

@@ -89,10 +89,10 @@ def pick_documents(docs: list[dict]) -> list[dict]:
         cands = [d for d in docs if d["doc_type"] == doc_type and d["chars"]]
         return max(cands, key=lambda d: (d["period"] or "", d["published_at"] or d["added_at"]), default=None)
 
-    picked = [d for d in (latest("annual_report"), latest("interim_report")) if d]
+    picked = [d for d in (latest("annual_report"), latest("interim_report"), latest("quarterly_report")) if d]  # 季报（美股 10-Q）只取最新一份
     if not any(d["doc_type"] == "annual_report" for d in picked) and (p := latest("prospectus")):
         picked.append(p)
-    others = [d for d in docs if d["doc_type"] in ("research", "transcript", "note", "other", "quarterly_report") and d["chars"]]
+    others = [d for d in docs if d["doc_type"] in ("research", "transcript", "note", "other") and d["chars"]]
     picked += others[:3]  # documents() 已按时间倒序
     return picked
 

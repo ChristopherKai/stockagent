@@ -64,3 +64,54 @@ def earnings_surprise(session: requests.Session, ticker: str) -> list[dict]:
         out.append({"quarter": r.get("fiscalQtrEnd"), "reported": reported, "eps": to_float(r.get("eps")),
                     "consensus": to_float(r.get("consensusForecast")), "surprise_pct": to_float(r.get("percentageSurprise"))})
     return out
+
+
+def _num(v) -> float | None:
+    """「(366,261)」「$6,029,783」「-26.41%」→ 数字（括号为负）。"""
+    if v is None:
+        return None
+    t = str(v).strip()
+    neg = t.startswith("(") and t.endswith(")")
+    x = to_float(re.sub(r"[,$%()\s]", "", t))
+    return -x if neg and x is not None else x
+
+
+def institutions(session: requests.Session, ticker: str, limit: int = 15) -> dict | None:
+    """机构持仓（13F 汇总）：{"pct", "holders", "shares", "increased", "decreased", "new", "sold_out", "top": [{name, date, shares, change, change_pct, value_k}]}。"""
+    d = _get(session, ticker, f"institutional-holdings?limit={limit}&type=TOTAL&sortColumn=marketValue&sortOrder=DESC", kind="company")
+    if not d:
+        return None
+    rows = ((d.get("holdingsTransactions") or {}).get("table") or {}).get("rows") or []
+    pos = {r["positions"]: r for r in (d.get("activePositions") or {}).get("rows") or []}
+    ns = {r["positions"]: r for r in (d.get("newSoldOutPositions") or {}).get("rows") or []}
+    return {
+        "pct": _num(((d.get("ownershipSummary") or {}).get("SharesOutstandingPCT") or {}).get("value")),
+        "holders": _num((pos.get("Total Institutional Shares") or {}).get("holders")),
+        "shares": _num((pos.get("Total Institutional Shares") or {}).get("shares")),
+        "increased": _num((pos.get("Increased Positions") or {}).get("holders")), "decreased": _num((pos.get("Decreased Positions") or {}).get("holders")),
+        "new": _num((ns.get("New Positions") or {}).get("holders")), "sold_out": _num((ns.get("Sold Out Positions") or {}).get("holders")),
+        "top": [{"name": r["ownerName"], "date": r["date"], "shares": _num(r["sharesHeld"]), "change": _num(r["sharesChange"]),
+                 "change_pct": _num(r["sharesChangePCT"]), "value_k": _num(r["marketValue"])} for r in rows],
+    }
+
+
+def insiders(session: requests.Session, ticker: str, limit: int = 20) -> dict | None:
+    """内部人交易（Form 4 汇总）：{"summary": [(项目, 近 3 个月, 近 12 个月)], "recent": [{name, relation, date, type, shares, price, held}]}。"""
+    d = _get(session, ticker, f"insider-trades?limit={limit}&type=ALL", kind="company")
+    if not d:
+        return None
+    summary = []
+    for key in ("numberOfTrades", "numberOfSharesTraded"):
+        for r in ((d.get(key) or {}).get("rows") or []):
+            summary.append((r.get("insiderTrade"), r.get("months3"), r.get("months12")))
+    rows = (((d.get("transactionTable") or {}).get("table")) or {}).get("rows") or []
+    return {"summary": summary,
+            "recent": [{"name": r["insider"], "relation": r["relation"], "date": r["lastDate"], "type": r["transactionType"],
+                        "shares": _num(r["sharesTraded"]), "price": _num(r["lastPrice"]), "held": _num(r["sharesHeld"])} for r in rows]}
+
+
+def short_interest(session: requests.Session, ticker: str) -> list[dict]:
+    """Nasdaq 上市股票的做空持仓（双周）；NYSE / AMEX 上市的接口不支持，返回空（改用 finra）。"""
+    rows = ((_get(session, ticker, "short-interest?assetClass=stocks", kind="quote").get("shortInterestTable") or {}).get("rows")) or []
+    return [{"date": r["settlementDate"], "short": _num(r["interest"]), "avg_volume": _num(r["avgDailyShareVolume"]),
+             "days_to_cover": to_float(r.get("daysToCover"))} for r in rows]

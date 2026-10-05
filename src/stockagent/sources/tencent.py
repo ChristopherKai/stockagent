@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import requests
 
 from ..utils import to_float
@@ -52,6 +54,8 @@ def fetch_quote(session: requests.Session, secid: str) -> dict | None:
     sym = symbol_for(secid)
     if sym is None:
         return None
+    if sym.startswith("us"):  # 美股快照接口不认交易所后缀（usBE.N 返回 none_match），K 线接口才要后缀
+        sym = sym.rsplit(".", 1)[0] if re.search(r"\.(OQ|N|AM)$", sym) else sym
     r = session.get(QUOTE_URL.format(symbol=sym), timeout=15)
     r.raise_for_status()
     text = r.content.decode("gbk", errors="replace")

@@ -155,7 +155,7 @@ class SourcesConfig(BaseModel):
     announcements_lookback_days: int = 30
     news_lookback_days: int = 7
     price_history_days: int = 400
-    price_sources: list[Literal["eastmoney", "tencent"]] = ["eastmoney", "tencent"]
+    price_sources: list[Literal["eastmoney", "tencent", "sina"]] = ["eastmoney", "tencent", "sina"]  # sina 只覆盖美股
     request_delay: float = 0.6
     eastmoney_news: bool = True
     eastmoney_news_page_size: int = 20
