@@ -685,6 +685,8 @@ def us_valuation_series(app: App, l: Listing, years: int):
     if facts is None:
         return [], [], None, None
     points, cur = usdata.eps_bps_points(facts)
+    if cur != "USD" and not l.ads_ratio:  # 非美元报表多为 ADS 发行人：不知道每 ADS 对应几股，价格与每股 EPS 对不上
+        return [], [], None, None
     bars = ensure_bars(app, app.secid(l), min_bars=years * 250)
     if not points or bars is None:
         return [], [], None, None
@@ -709,12 +711,17 @@ def us_valuation_series(app: App, l: Listing, years: int):
             rate = 1 / last_fx  # 人民币金额 ÷ (CNH 每美元) = 美元
         px = close / ratio
         cur_pe = px / (eps * rate) if eps and eps > 0 else None
+        if cur_pe and cur_pe > US_PE_MAX:  # 微利期的 PE 动辄上千倍，不是估值信号；与亏损一样当作不适用
+            cur_pe = None
         cur_pb = px / (bps * rate) if bps and bps > 0 else None
         if cur_pe:
             pe.append(cur_pe)
         if cur_pb:
             pb.append(cur_pb)
     return pe, pb, cur_pe, cur_pb
+
+
+US_PE_MAX = 200.0  # 美股 PE(TTM) 高于此值（TTM 盈利接近 0）的日子不计入分位
 
 
 def hk_valuation_series(app: App, l: Listing, years: int):

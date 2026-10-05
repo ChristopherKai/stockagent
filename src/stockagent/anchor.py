@@ -5,8 +5,9 @@
 - 研究与撰写时作为程序计算的材料给模型看；valuation_matrix 自动补上一致预期净利行与历史 PE 分位列（augment）；
 - 跟踪卡抽出后，基准情景较参考价偏离超过 tracker.anchor_band 时标注 ⚠（立场与情景价格都不由代码修改）；
 - 估值基线沿用写作时的参考价，标的追踪的提示词、公司页与简报里提示偏离。
-只覆盖以 A 股或港股定价的公司（美股没有历史 PE 序列）：一致预期来自东方财富（A 股及 A+H，人民币口径），
-港股另可用使用者录入或 Nasdaq 快照。
+覆盖以 A 股、港股或美股定价的公司：一致预期来自东方财富（A 股及 A+H，人民币口径），
+港股与美股用使用者录入或 Nasdaq 快照（均先换成每股）。美股定价的是 ADS 时，历史 PE 用「价格 ÷ 换股比例 ÷ 每股 EPS」，
+参考价 = 每股 EPS × 每 ADS 股数（listing.ads_ratio）× PE 分位，口径与 ADS 股价一致；ADS 没有填 ads_ratio 且报表不是美元时不给分位。
 """
 
 from __future__ import annotations
@@ -49,15 +50,16 @@ def get(app: App, company: Company) -> dict | None:
 def compute(app: App, company: Company, today: date | None = None) -> dict | None:
     today = today or today_local()
     listing = company.pricing_listing
-    if listing.market not in ("A", "HK"):
+    if listing.market not in ("A", "HK", "US"):
         return None
+    ratio = (listing.ads_ratio or 1.0) if listing.market == "US" else 1.0  # 美股定价的 ADS：每 ADS 对应的普通股数
     try:
         pe, _, cur, _ = valuation_series(app, listing, YEARS)
     except (RequestException, ValueError, KeyError, TypeError) as e:
         log.info("%s：取历史 PE 失败：%s", company.name, e)
         pe, cur = [], None
     out: dict = {"date": today.isoformat(), "listing": listing.key, "listing_name": listing.display,
-                 "currency": listing.currency, "pe": None, "years": []}
+                 "currency": listing.currency, "pe": None, "years": [], "ads_ratio": ratio}
     if len(pe) >= MIN_DAYS:
         q = statistics.quantiles(pe, n=4)
         out["pe"] = {"p25": q[0], "p50": q[1], "p75": q[2], "current": cur if cur and cur > 0 else None,
@@ -69,7 +71,7 @@ def compute(app: App, company: Company, today: date | None = None) -> dict | Non
             continue
         y = {"fy": fy, "estimates": ests, "eps": ests[0]["eps"], "fx": ests[0]["fx"]}
         if out["pe"] and y["eps"] > 0 and y["fx"]:
-            y.update({k: y["eps"] * y["fx"] * out["pe"][p] for k, p in (("price", "p50"), ("low", "p25"), ("high", "p75"))})
+            y.update({k: y["eps"] * y["fx"] * ratio * out["pe"][p] for k, p in (("price", "p50"), ("low", "p25"), ("high", "p75"))})
         out["years"].append(y)
     return out if out["pe"] or out["years"] else None
 
@@ -126,10 +128,16 @@ def _year_line(anc: dict, y: dict) -> str:
     ests = "；".join(f"{e['eps']:.2f} {_unit(e['currency'])}（{e['source']}）" for e in y["estimates"])
     line = f"{y['fy']} 年一致预期 EPS：{ests}"
     if y.get("price"):
-        fx = f" × 汇率 {y['fx']:.4f}" if abs(y["fx"] - 1) > 1e-9 else ""
+        fx = (f" × 汇率 {y['fx']:.4f}" if abs(y["fx"] - 1) > 1e-9 else "") + _ads(anc)
         line += (f"→ 参考价 {y['eps']:.2f}{fx} × {anc['pe']['p50']:.2f} 倍 = {num(y['price'])} {anc['currency']}"
                  f"（按 25%–75% 分位 {num(y['low'])}–{num(y['high'])}）")
     return line
+
+
+def _ads(anc: dict) -> str:
+    """美股 ADS 定价时参考价里多乘的「每 ADS 股数」。"""
+    r = anc.get("ads_ratio") or 1.0
+    return f" × 每 ADS {r:g} 股" if abs(r - 1) > 1e-9 else ""
 
 
 def text(anc: dict | None, band: float) -> str:
@@ -156,7 +164,7 @@ def check(anc: dict | None, base_price: float | None, band: float) -> dict | Non
         return None
     gap = base_price / y["price"] - 1
     flag = abs(gap) > band
-    fx = f" × 汇率 {y['fx']:.4f}" if abs(y["fx"] - 1) > 1e-9 else ""
+    fx = (f" × 汇率 {y['fx']:.4f}" if abs(y["fx"] - 1) > 1e-9 else "") + _ads(anc)
     note = (f"基准情景 {num(base_price)} 较参考价 {num(y['price'])} {anc['currency']} {pct(gap)}；参考价 = {y['fy']} 年一致预期 EPS "
             f"{y['eps']:.2f} {_unit(y['estimates'][0]['currency'])}（{y['estimates'][0]['source']}）{fx} × {anc['listing_name']} "
             f"近 {anc['pe']['years']} 年 PE(TTM) 中位数 {anc['pe']['p50']:.2f} 倍（{anc['date']}）")
@@ -184,6 +192,10 @@ def augment(anc: dict, driver_label: str, drivers: list[float], multiple_label: 
             notes.append(f"程序已补上倍数列 {'、'.join(f'{m:g}×' for m in add)}（{_pe_line(anc)}）")
     fy = valuation._year(driver_label or "")
     y = next((y for y in anc.get("years", []) if y["fy"] == fy), None)
+    if (anc.get("ads_ratio") or 1.0) != 1.0 and y and _PROFIT.search(driver_label):
+        notes.append("定价上市地是 ADS，矩阵股本的口径（ADS 数还是普通股数）程序无法确认，未自动补一致预期净利行；"
+                     "请用 ADS 数对应的每 ADS EPS × 该股本自行核对")
+        y = None
     if y and _PROFIT.search(driver_label) and not _NOT_PROFIT.search(driver_label) and drivers:
         lo, hi = min(drivers), max(drivers)
         added = []

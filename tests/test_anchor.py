@@ -123,3 +123,69 @@ def test_unstable_seasonality_is_not_extrapolated():
     assert res["completion"] == pytest.approx(0.83 / 2.14) and "implied_gap" not in res
     assert "外推" not in res["headline"] and "近 3 年同期占比 47%–83%" in res["headline"]
     assert any("不外推全年" in f for f in res["flags"])
+
+
+# ---------------------------------------------------------------- 美股定价（含 ADS）
+
+def us_company(app, ads_ratio=None, per_ads=False):
+    from stockagent.config import Company, Listing
+
+    co = Company(id="usco", name="美股公司", listings=[Listing(market="US", code="USCO", exchange="NYSE", ads_ratio=ads_ratio)])
+    app.watchlist.companies.append(co)
+    # Nasdaq 一致预期快照：2027 年 EPS 4.00 美元（per_ads 时为每 ADS 口径）
+    app.db.save_consensus("usco", "nasdaq", "2026-10-03", [{"fiscal_year": 2027, "metric": "eps", "value": 4.0, "currency": "USD",
+                                                           "per_ads": per_ads, "n": 6}])
+    return co
+
+
+def test_anchor_us_ordinary_shares(app, monkeypatch):
+    co = us_company(app)
+    monkeypatch.setattr(anchor, "valuation_series", lambda *a, **k: ([20.0] * 100 + [30.0] * 100 + [40.0] * 100, [], 28.0, None))
+    anc = anchor.compute(app, co, today=TODAY)
+    y = anchor.primary(anc)
+    assert anc["listing"] == "US:USCO" and anc["currency"] == "USD" and anc["ads_ratio"] == 1.0
+    assert y["fy"] == 2027 and y["estimates"][0]["fx"] == 1.0 and y["estimates"][0]["n"] == 6
+    assert y["price"] == pytest.approx(4.0 * 30.0) and y["low"] == pytest.approx(80) and y["high"] == pytest.approx(160)
+    assert "每 ADS" not in anchor.text(anc, 0.25)
+
+
+def test_anchor_us_ads_price_uses_ads_ratio(app, monkeypatch):
+    # Nasdaq 给的是每 ADS 4.00 美元；换算成每股 2.00（ads_ratio=2），参考价按每股 EPS × 2（每 ADS 股数）× PE 回到 ADS 口径
+    co = us_company(app, ads_ratio=2, per_ads=True)
+    monkeypatch.setattr(anchor, "valuation_series", lambda *a, **k: ([20.0] * 100 + [30.0] * 100 + [40.0] * 100, [], 28.0, None))
+    anc = anchor.compute(app, co, today=TODAY)
+    y = anchor.primary(anc)
+    assert y["estimates"][0]["eps"] == pytest.approx(2.0) and anc["ads_ratio"] == 2
+    assert y["price"] == pytest.approx(2.0 * 2 * 30.0)  # = 每 ADS EPS 4.00 × 30 倍
+    text = anchor.text(anc, 0.25)
+    assert "每 ADS 2 股" in text and "120" in text
+    # 矩阵：PE 分位列照常补；一致预期净利行因为股本口径含糊不补，并说明
+    drivers, multiples, notes = anchor.augment(anc, "2027E归母净利(亿USD)", [10, 20], "PE(×)", [15, 25], 5.0, 1.0, "equity")
+    assert drivers == [10, 20] and 20.0 in multiples and any("无法确认" in n for n in notes)
+
+
+def test_anchor_us_ads_without_ratio_and_non_usd_reports_has_no_pe(app, monkeypatch):
+    from stockagent import tools, usdata
+    from stockagent.config import Listing
+
+    # 报表为人民币的 ADS 发行人没填 ads_ratio：不知道每 ADS 几股，历史 PE 不给（避免价格与每股 EPS 口径错位）
+    monkeypatch.setattr(usdata, "load_facts", lambda a, l: ({"x": 1}, ""))
+    monkeypatch.setattr(usdata, "eps_bps_points", lambda f: ([("2025-01-01", 1.0, 2.0)], "CNY"))
+    assert tools.us_valuation_series(app, Listing(market="US", code="KC", exchange="NASDAQ"), 3) == ([], [], None, None)
+
+
+def test_us_pe_ignores_near_zero_earnings(app, monkeypatch):
+    import pandas as pd
+
+    from stockagent import tools, usdata
+    from stockagent.config import Listing
+
+    monkeypatch.setattr(usdata, "load_facts", lambda a, l: ({"x": 1}, ""))
+    # 2025 年 TTM EPS 只有 0.05（价格 100 → PE 2000 倍，不是估值信号），2026 年 EPS 4.0（PE 25 倍）
+    monkeypatch.setattr(usdata, "eps_bps_points", lambda f: ([("2025-01-01", 0.05, 2.0), ("2026-01-01", 4.0, 2.5)], "USD"))
+    dates = [f"2025-{m:02d}-15" for m in range(2, 13)] + [f"2026-{m:02d}-15" for m in range(2, 10)]
+    bars = pd.DataFrame({"date": dates, "close": [100.0] * len(dates)})
+    monkeypatch.setattr(tools, "ensure_bars", lambda *a, **k: bars)
+    l = Listing(market="US", code="USCO", exchange="NYSE")
+    pe, pb, cur_pe, cur_pb = tools.us_valuation_series(app, l, 3)
+    assert pe and all(v == pytest.approx(25.0) for v in pe) and cur_pe == pytest.approx(25.0) and cur_pb == pytest.approx(40.0)
