@@ -17,6 +17,7 @@ from datetime import date, timedelta
 from typing import Callable
 
 from . import fcf as fcf_mod
+from . import usdata
 from . import imafeed, technical, twitterfeed
 from .app import FX_HKDCNH, FX_USDCNH, PRICE_SOURCES, SOURCE_LABEL, App, _is_down, _trip, _try, ccass_snapshot, klines
 from .config import Company, Listing
@@ -372,15 +373,24 @@ def fcf_snapshot(app: App, company: Company, ticker: str | None = None, growth: 
                  forward_fcf: float | None = None, forward_label: str = "") -> str:
     """EV、自由现金流与 FCF Yield（代码计算）。报表优先用 A 股（A+H 公司），市值按定价上市地的股价；
     多地上市的公司另列其他上市地股价下的 EV 与 FCF Yield（各地股价不同，FCF Yield 也不同）。"""
-    ls = listings_for(app, company, ticker)
+    ls = listings_for(app, company, ticker, markets=("A", "HK", "US"))
     if not ls:
-        return "EV 与自由现金流只支持 A 股和港股"
-    l = next((x for x in ls if x.market == "A"), ls[0])
-    data = emdata.fcf_data(app.session, l)
+        return "EV 与自由现金流只支持 A 股、港股和美股"
+    l = next((x for m in ("A", "HK", "US") for x in ls if x.market == m))  # A+H 用 A 股报表，港美两地用港股；只在美股上市才用 SEC XBRL
+    stale = ""
+    if l.market == "US":
+        facts, stale = usdata.load_facts(app, l)
+        if facts is None:
+            return f"{l.display}：{stale}"
+        data = usdata.fcf_data(facts)
+    else:
+        data = emdata.fcf_data(app.session, l)
     if not data:
         return f"{l.display}：没有取到现金流量表或资产负债表"
     cur = "CNY"
-    if l.market == "HK":
+    if l.market == "US":
+        cur = data["currency"]
+    elif l.market == "HK":
         rows = emdata.financials(app.session, l, 4)
         cur = rows[0].get("币种", "CNY") if rows else "CNY"
     target = company if not ticker else app.watchlist.get(ticker)
@@ -407,7 +417,8 @@ def fcf_snapshot(app: App, company: Company, ticker: str | None = None, growth: 
     def f(v: float) -> str:
         return f"{v / yi:,.2f}"
 
-    lines = [f"{l.display} EV 与自由现金流（程序按东方财富现金流量表/资产负债表计算；金额：亿 {cur}；资产负债表截至 {b['date']}"
+    src_name = "SEC XBRL（10-K/10-Q/20-F）现金流量表与资产负债表" if l.market == "US" else "东方财富现金流量表/资产负债表"
+    lines = [f"{l.display} EV 与自由现金流（程序按{src_name}计算；金额：亿 {cur}；资产负债表截至 {b['date']}"
              + (f"；市值按定价上市地 {main.display}" if len(caps) > 1 or main.key != l.key else "") + "）",
              f"- 市值 {f(mcap)}（{note}）",
              f"- 现金及存款 {f(b['cash'])}"
@@ -443,6 +454,11 @@ def fcf_snapshot(app: App, company: Company, ticker: str | None = None, growth: 
     if (ev2 := m["ev_conservative"]) is not None:
         lines.append(f"- 保守口径（EV = 市值 + 总负债 − 现金，雪球「价值投资新经济」框架的算法）：EV {f(ev2)}"
                      + (f"，{flows[0]['label']} FCF Yield {pct(base / ev2, sign=False)}" if flows and ev2 > 0 else ""))
+    if stale:
+        lines.append(f"- ⚠ {stale}")
+    if l.market == "US":
+        lines.append("- 美股口径：资本开支 = 购建物业厂房设备 + 资本化软件；有息负债 = 短期借款 + 一年内到期债务 + 长期债务（含可转债，不含经营租赁负债，"
+                     "也不含融资租赁与「融资义务」类科目，这类负债较多的公司请用 statements 的资产负债表核对）。")
     lines.append("- 说明：FCF = 经营现金流 − 购建长期资产支付的现金。周期股的 FCF 波动大，应看多年平均；资本开支扩张期 FCF 为负时 "
                  "FCF Yield 不适用，要看前瞻 FCF。现金未计入放在「其他流动资产」「债权投资」中的定期存款、大额存单，以报表附注为准。")
     return "\n".join(lines)
@@ -649,7 +665,7 @@ def ccass_text(app: App, l: Listing) -> str:
 
 
 def valuation_series(app: App, l: Listing, years: int) -> tuple[list[float], list[float], float | None, float | None]:
-    """A 股、港股近 years 年的每日 PE(TTM) 与 PB 序列（只保留正值）及当前值：(PE, PB, 当前 PE, 当前 PB)。"""
+    """A 股、港股、美股近 years 年的每日 PE(TTM) 与 PB 序列（只保留正值）及当前值：(PE, PB, 当前 PE, 当前 PB)。"""
     if l.market == "A":
         rows = emdata.valuation_history_a(app.session, l.code, days=years * 250)
         pe = [v for _, v, _ in rows if v is not None and v > 0]
@@ -657,7 +673,48 @@ def valuation_series(app: App, l: Listing, years: int) -> tuple[list[float], lis
         return pe, pb, (rows[-1][1] if rows else None), (rows[-1][2] if rows else None)
     if l.market == "HK":
         return hk_valuation_series(app, l, years)
+    if l.market == "US":
+        return us_valuation_series(app, l, years)
     return [], [], None, None
+
+
+def us_valuation_series(app: App, l: Listing, years: int):
+    """美股：日收盘价 ÷ 最近已披露的 EPS(TTM)/每股净资产（SEC XBRL；季报晚 45 天、年报晚 75 天视为可得）。
+    ADS 按换股比例折成每股；报表为人民币的发行人按 USD/CNH 换算。"""
+    facts, _ = usdata.load_facts(app, l)
+    if facts is None:
+        return [], [], None, None
+    points, cur = usdata.eps_bps_points(facts)
+    bars = ensure_bars(app, app.secid(l), min_bars=years * 250)
+    if not points or bars is None:
+        return [], [], None, None
+    fx_map = {}
+    if cur == "CNY":
+        fx = ensure_bars(app, FX_USDCNH, min_bars=years * 250 + 30)
+        fx_map = dict(zip(fx["date"], fx["close"])) if fx is not None else {}
+    elif cur != "USD":
+        return [], [], None, None
+    ratio = l.ads_ratio or 1.0
+    pe, pb, last_fx, cur_pe, cur_pb = [], [], None, None, None
+    for d, close in zip(bars["date"], bars["close"]):
+        last_fx = fx_map.get(d, last_fx)
+        known = [p for p in points if p[0] <= d]
+        if not known:
+            continue
+        _, eps, bps = known[-1]
+        rate = 1.0
+        if cur == "CNY":
+            if not last_fx:
+                continue
+            rate = 1 / last_fx  # 人民币金额 ÷ (CNH 每美元) = 美元
+        px = close / ratio
+        cur_pe = px / (eps * rate) if eps and eps > 0 else None
+        cur_pb = px / (bps * rate) if bps and bps > 0 else None
+        if cur_pe:
+            pe.append(cur_pe)
+        if cur_pb:
+            pb.append(cur_pb)
+    return pe, pb, cur_pe, cur_pb
 
 
 def hk_valuation_series(app: App, l: Listing, years: int):
@@ -849,7 +906,7 @@ class ToolBox:
                  _obj({"ticker": {"type": "string"}}, ["ticker"]),
                  self.market_data),
             Tool("financials",
-                 "结构化主要财务指标（东方财富数据中心，A 股与港股）：最近多期的收入、毛利率、归母净利、同比、净利率、ROE、EPS、"
+                 "结构化主要财务指标（A 股与港股来自东方财富数据中心，只在美股上市的公司由 SEC XBRL 派生）：最近多期的收入、毛利率、归母净利、同比、净利率、ROE、EPS、"
                  "每股净资产、经营现金流、负债率、周转天数等。核心财务数字优先用它，再用年报原文核对细节。ticker 不填表示本公司。",
                  _obj({"ticker": {"type": "string"}, "periods": {"type": "integer"}}, []),
                  self.financials),
@@ -865,6 +922,7 @@ class ToolBox:
             Tool("shareholders",
                  "股东结构。A 股：十大股东与十大流通股东（最近两期，含增减变化与股东性质）、股东户数与户均持股趋势（户数减少常见于筹码集中）；"
                  "港股：定期报告披露的主要股东与董事权益（同一批股份可能经多个受控法团重复披露，不能简单相加）。"
+                 "美股：机构持仓（13F 汇总，前十大持有人与增减）、内部人交易（Form 4 汇总与最近申报）、5% 以上大股东申报（13D/13G 链接）。"
                  "港股的券商/托管行持股分布用 ccass。ticker 不填表示本公司。",
                  _obj({"ticker": {"type": "string"}}, []),
                  self.shareholders),
@@ -874,6 +932,11 @@ class ToolBox:
                  "用于看筹码集中度、大额转仓（配售交收、换托管行、质押）和港股通进出；参与者一增一减、数量相近多为转仓，不一定是买卖。仅港股。ticker 不填表示本公司。",
                  _obj({"ticker": {"type": "string"}}, []),
                  self.ccass),
+            Tool("short_interest",
+                 "美股做空数据：双周做空持仓（Nasdaq 上市用 Nasdaq，NYSE / AMEX 用 FINRA）：做空股数、占股本比例、回补天数与变化；"
+                 "以及最近几个交易日的卖空成交量占比（FINRA，含做市商对冲，不等于净做空）。仅美股。ticker 不填表示本公司。",
+                 _obj({"ticker": {"type": "string"}}, []),
+                 self.short_interest),
             Tool("broker_research",
                  "卖方一致预期。A 股：东方财富研报库近几个月的研报列表，汇总评级分布与 EPS 预测中位数、目标价中位数；"
                  "港股：富途个股预测页的分析师数量与目标价均值/区间（经 Exa 读取）；美股：Nasdaq 的一致目标价、评级分布与年度 EPS 一致预期"
@@ -888,15 +951,15 @@ class ToolBox:
                  _obj({"ticker": {"type": "string"}, "periods": {"type": "integer"}}, []),
                  self.earnings_vs_consensus),
             Tool("fcf_yield",
-                 "EV 与自由现金流收益率（代码按东方财富现金流量表/资产负债表计算）：市值、现金、有息负债、少数股东权益、EV、"
+                 "EV 与自由现金流收益率（代码按东方财富现金流量表/资产负债表计算；只在美股上市的公司按 SEC XBRL 计算）：市值、现金、有息负债、少数股东权益、EV、"
                  "FCF（经营现金流 − 资本开支；TTM、近 3 个年度、3 年平均）、FCF Yield、净现金占市值、是否 Negative EV、FCF 累计覆盖 EV 的年数，"
                  "以及按总负债计算的保守口径。growth 为 FCF 年增速假设（小数，默认 0）；forward_fcf 为前瞻年度 FCF（亿元，报告币种）、"
-                 "forward_label 为其年份，用于计算前瞻 FCF Yield。ticker 不填表示本公司，也可查可比公司（A 股 6 位、港股 5 位）。",
+                 "forward_label 为其年份，用于计算前瞻 FCF Yield。ticker 不填表示本公司，也可查可比公司（A 股 6 位、港股 5 位、美股字母代码）。",
                  _obj({"ticker": {"type": "string"}, "growth": {"type": "number"}, "forward_fcf": {"type": "number"},
                        "forward_label": {"type": "string"}}, []),
                  self.fcf_yield),
             Tool("valuation_history",
-                 "历史估值分位：当前 PE(TTM)/PB 在过去 years 年中的分位与区间（A 股用东方财富估值历史；港股用日收盘价 ÷ 最近已披露的 "
+                 "历史估值分位：当前 PE(TTM)/PB 在过去 years 年中的分位与区间（A 股用东方财富估值历史；美股用日收盘价 ÷ SEC XBRL 已披露的 EPS(TTM)/每股净资产；港股用日收盘价 ÷ 最近已披露的 "
                  "EPS(TTM)/每股净资产计算，考虑披露滞后并按汇率换算）。亏损期 PE 无意义，看 PB。ticker 不填表示本公司。",
                  _obj({"ticker": {"type": "string"}, "years": {"type": "integer"}}, []),
                  self.valuation_history),
@@ -1068,7 +1131,15 @@ class ToolBox:
 
     def financials(self, ticker: str | None = None, periods: int = 8) -> str:
         out = []
-        for l in listings_for(self.app, self.company, ticker):
+        ls = listings_for(self.app, self.company, ticker, markets=("A", "HK", "US"))
+        for l in ls:
+            if l.market == "US":
+                if any(x.market in ("A", "HK") for x in ls):
+                    continue  # 同时在 A 股 / 港股上市的公司用 A / 港股的结构化指标，美股那条不重复列
+                facts, note = usdata.load_facts(self.app, l)
+                table = usdata.indicators_table(facts, l, max(2, min(int(periods), 12))) if facts else None
+                out.append((table + (f"\n⚠ {note}" if note else "")) if table else f"{l.display}：{note or '没有取到结构化财务数据'}")
+                continue
             rows = emdata.financials(self.app.session, l, max(2, min(int(periods), 16)))
             if not rows:
                 out.append(f"{l.display}：没有取到结构化财务数据")
@@ -1111,9 +1182,16 @@ class ToolBox:
 
     def shareholders(self, ticker: str | None = None) -> str:
         out = []
-        for l in listings_for(self.app, self.company, ticker):
-            out.append(_a_holders_text(self.app, l) if l.market == "A" else _hk_holders_text(self.app, l))
-        return "\n\n".join(out) or "股东数据只支持 A 股和港股"
+        for l in listings_for(self.app, self.company, ticker, markets=("A", "HK", "US")):
+            out.append(_a_holders_text(self.app, l) if l.market == "A" else usdata.holders_text(self.app, l) if l.market == "US"
+                       else _hk_holders_text(self.app, l))
+        return "\n\n".join(out) or "股东数据只支持 A 股、港股和美股"
+
+    def short_interest(self, ticker: str | None = None) -> str:
+        us = [l for l in listings_for(self.app, self.company, ticker, markets=("US",))]
+        if not us:
+            return "做空数据只适用于美股"
+        return "\n\n".join(usdata.short_text(self.app, l) for l in us)
 
     def ccass(self, ticker: str | None = None) -> str:
         hk = [l for l in listings_for(self.app, self.company, ticker) if l.market == "HK"]
@@ -1161,9 +1239,11 @@ class ToolBox:
     def valuation_history(self, ticker: str | None = None, years: int = 3) -> str:
         years = max(1, min(int(years), 8))
         out = []
-        for l in listings_for(self.app, self.company, ticker):
+        for l in listings_for(self.app, self.company, ticker, markets=("A", "HK", "US")):
             pe, pb, cur_pe, cur_pb = valuation_series(self.app, l, years)
             src = ("东方财富估值历史" if l.market == "A" else
+                   "日收盘价 ÷ SEC XBRL 最近已披露的 EPS(TTM)/每股净资产（季报晚 45 天、年报晚 75 天视为可得；ADS 已按换股比例折算）"
+                   if l.market == "US" else
                    "日收盘价 ÷ 最近已披露 EPS(TTM)/每股净资产（半年报滞后 60 天、年报滞后 90 天视为可得；已按汇率换算）")
             cur_pe = cur_pe if cur_pe is not None and cur_pe > 0 else None
             out.append(f"{l.display} 近 {years} 年估值（{src}）：\n  " + _stats_line("PE(TTM)", pe, cur_pe)

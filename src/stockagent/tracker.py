@@ -54,7 +54,7 @@ DISCLAIMER = "目标价（情景加权估值）由程序按估值假设计算，
 # 修正 agent 可用的工具（ToolBox 白名单）；web_search 由 tracker.web_search 控制，深度报告运行期间自动去掉
 TOOLS = ["calculate", "company_events", "web_search", "fetch_url", "list_filings", "search_filings", "read_filing",
          "market_data", "financials", "statements", "fcf_yield", "broker_research", "earnings_vs_consensus", "shareholders",
-         "ccass", "manual_data",
+         "ccass", "short_interest", "manual_data",
          "valuation_matrix", "ima_search", "ima_read", "twitter_search", "twitter_user"]
 WEB_TOOLS = ("web_search", "twitter_search", "twitter_user")  # tracker.web_search 关闭时一并去掉；深度报告运行期间只暂停 web_search
 # 修正时附给 agent 的报告章节（论证逻辑），按顺序截取

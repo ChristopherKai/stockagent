@@ -35,8 +35,9 @@ _EXHIBIT_JUNK = re.compile(r"EX-99(\.\d+)?|\d+|\S+\.html?|Exhibit 99(\.\d+)?", r
 EXHIBIT_FORMS = {"8-K", "6-K"}
 
 
-def exhibit_text(session: requests.Session, cik: int, accession: str, user_agent: str, max_chars: int = 2000) -> tuple[str, str] | None:
-    """8-K / 6-K 的 EX-99.1（新闻稿、业绩公告）正文开头：(首行标题, 正文前 max_chars 字)；没有附件返回 None。"""
+def exhibit_text(session: requests.Session, cik: int, accession: str, user_agent: str, max_chars: int = 2000, with_full: bool = False):
+    """8-K / 6-K 的 EX-99.1（新闻稿、业绩公告）正文开头：(首行标题, 正文前 max_chars 字)；没有附件返回 None。
+    with_full 时多返回全文与附件链接：(标题, 开头, 全文, 链接)。"""
     from ..htmltext import html_text
 
     base = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}"
@@ -55,7 +56,8 @@ def exhibit_text(session: requests.Session, cik: int, accession: str, user_agent
     if not lines:
         return None
     body = "\n".join(lines)
-    return next((ln for ln in lines if len(ln) >= 20 and not ln.isupper() and not ln[0].islower()), lines[0])[:120], body[:max_chars]  # 跳过「PRESS RELEASE」之类的栏目行
+    head = next((ln for ln in lines if len(ln) >= 20 and not ln.isupper() and not ln[0].islower()), lines[0])[:120]  # 跳过「PRESS RELEASE」之类的栏目行
+    return (head, body[:max_chars], body, f"{base}/{names[0]}") if with_full else (head, body[:max_chars])
 
 
 def filings(session: requests.Session, cik: int, user_agent: str, start: datetime, forms: set[str]) -> list[dict]:
@@ -94,7 +96,8 @@ def reports(session: requests.Session, cik: int, user_agent: str, start: datetim
     recent = (r.json() or {}).get("filings", {}).get("recent", {})
     out = []
     for i, form in enumerate(recent.get("form", [])):
-        doc_type = "annual_report" if form in ("10-K", "20-F", "40-F") else "quarterly_report" if form == "10-Q" else None
+        doc_type = ("annual_report" if form in ("10-K", "20-F", "40-F") else "quarterly_report" if form == "10-Q"
+                    else "other" if form == "DEF 14A" else None)  # 代理声明（股东大会材料）：高管薪酬、股权激励、持股 5% 以上股东
         if doc_type is None:
             continue
         published = datetime.fromisoformat(recent["acceptanceDateTime"][i].replace("Z", "+00:00")).astimezone(timezone.utc)
@@ -104,8 +107,8 @@ def reports(session: requests.Session, cik: int, user_agent: str, start: datetim
         period_end = (recent.get("reportDate") or [""] * (i + 1))[i] or published.date().isoformat()
         out.append({
             "doc_type": doc_type,
-            "title": f"{form} {period_end}",
-            "period": period_end[:4] if doc_type == "annual_report" else period_end,
+            "title": f"{form} {period_end}" if doc_type != "other" else f"{form}（{published.date()} 申报）",
+            "period": period_end[:4] if doc_type == "annual_report" else f"DEF14A-{published.year}" if doc_type == "other" else period_end,
             "period_end": period_end,
             "url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc.replace('-', '')}/{doc}",
             "published_at": published,
@@ -395,10 +398,11 @@ def statement_from_facts(facts: dict, kind: str, periods: int = 6, annual_only: 
     for e in ends:  # 推导出 Q4 后，同一截止日的全年数字另列一列
         keys.append(chosen[e])
         keys += [k for k in full_years if k[1] == e and k != chosen[e] and not annual_only]
-    cols = [{"date": end, "label": _period_label(start, end, (start, end) in derived_keys)} for start, end in keys]
+    cols = [{"date": end, "label": _period_label(start, end, (start, end) in derived_keys),
+             "days": _days(start, end) if start else None} for start, end in keys]
     out_rows = [(label, [vals.get(k) for k in keys]) for label, vals in rows]
     if ttm_by_label and not annual_only and ttm_end and ends and ttm_end >= ends[0]:
-        cols.insert(0, {"date": ttm_end, "label": f"{ttm_end}（近12个月·推导）"})
+        cols.insert(0, {"date": ttm_end, "label": f"{ttm_end}（近12个月·推导）", "days": 365, "ttm": True})
         out_rows = [(label, [ttm_by_label.get(label), *values]) for label, values in out_rows]
     have = {label for label, values in out_rows if any(v is not None for v in values)}
     return {
@@ -408,6 +412,40 @@ def statement_from_facts(facts: dict, kind: str, periods: int = 6, annual_only: 
         "missing": [c for c in CORE_ITEMS[kind] if c not in have],
         "notes": notes,
     }
+
+
+def merged_values(gaap: dict, concepts: list[str], unit: str, instant: bool = False) -> dict[tuple, float]:
+    """多个候选概念按「靠前优先」逐期合并：{(start 或 None, end): 值}（statement_from_facts 与 usdata 共用）。"""
+    merged: dict[tuple, float] = {}
+    for c in reversed(concepts):
+        merged.update({k: v for k, v in _concept_values(gaap, c, unit).items() if (k[0] is None) == instant})
+    return merged
+
+
+def ttm_at(vals: dict[tuple, float], end: str) -> float | None:
+    """截至 end 的近 12 个月值：end 是全年截止日时即全年值；否则 = 上一财年全年 + 本年累计 − 去年同期累计。"""
+    full = {k: v for k, v in vals.items() if 350 <= _days(*k) <= 380}
+    for k, v in full.items():
+        if k[1] == end:
+            return v
+    ytd = [(k, v) for k, v in vals.items() if k[1] == end and 80 <= _days(*k) < 350]
+    if not ytd:
+        return None
+    (s, e), cur = max(ytd, key=lambda kv: _days(*kv[0]))
+    prev_full = next((k for k in full if _near(k[1], _shift(s, -1), 3)), None)
+    prior = next((v for k, v in vals.items() if prev_full and k[0] == prev_full[0] and _near(k[1], _shift(e, -365), 7)
+                  and abs(_days(*k) - _days(s, e)) <= 5), None)
+    return None if prev_full is None or prior is None else full[prev_full] + cur - prior
+
+
+def latest_period_end(facts: dict) -> str | None:
+    """XBRL 里最新一份 10-K / 10-Q / 20-F 的报告期截止日（取总资产的时点）。"""
+    tax = _taxonomy(facts)
+    if not tax:
+        return None
+    gaap = tax[1]
+    ends = [f["end"] for f in ((gaap.get("Assets") or {}).get("units") or {}).get(_currency(gaap) or "USD") or [] if f.get("form") in REPORT_FORMS]
+    return max(ends, default=None)
 
 
 def _annual_instants(gaap: dict, unit: str) -> set[str]:

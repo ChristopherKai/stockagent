@@ -424,7 +424,7 @@ def test_financials_tool_formats_money_in_yi(app, monkeypatch):
     monkeypatch.setattr(emdata, "financials", lambda session, listing, periods: rows)
     out = tools.ToolBox(app, app.watchlist.get("acme")).call("financials", {"ticker": "300001"})
     assert "| 2026中报 | 4.87 | 54.65 |" in out and "亿 CNY" in out
-    assert "只支持 A 股" in tools.ToolBox(app, app.watchlist.get("acme")).call("financials", {"ticker": "NVDA"})
+    assert "sec_user_agent" in tools.ToolBox(app, app.watchlist.get("acme")).call("financials", {"ticker": "NVDA"})  # 美股也支持了，测试环境没配 SEC 的 User-Agent
 
 
 def test_insert_into_section():

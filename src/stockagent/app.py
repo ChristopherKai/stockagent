@@ -15,7 +15,7 @@ from . import config, technical
 from .config import Company, Listing, Settings, Watchlist
 from .db import DB
 from .llm import LLM
-from .sources import ccass, cninfo, eastmoney, emdata, frankfurter, google_news, hkex, ids, pubdate, sec, tencent
+from .sources import ccass, cninfo, eastmoney, emdata, frankfurter, google_news, hkex, ids, pubdate, sec, sina, tencent
 from .utils import (days_ago, file_lock, fmt_local, iso, log, make_session, normalize_title, parse_iso, pct, num, sha1,
                     to_simplified, today_local, utcnow)
 
@@ -230,7 +230,7 @@ def fetch(app: App, companies: list[Company], *, prices: bool = True, filings: b
     return msgs
 
 
-PRICE_SOURCES = {"eastmoney": eastmoney, "tencent": tencent}
+PRICE_SOURCES = {"eastmoney": eastmoney, "tencent": tencent, "sina": sina}
 
 
 DOWN_MINUTES = 60  # 数据源被封或连接失败后，多久内不再尝试
@@ -314,15 +314,42 @@ def _add_exhibits(app: App, company: Company, listing: Listing, cik: int, rows: 
             continue
         left -= 1
         try:
-            got = sec.exhibit_text(app.session, cik, x["source_id"], ua)
+            got = sec.exhibit_text(app.session, cik, x["source_id"], ua, with_full=True)
         except Exception as e:  # 取不到正文不影响公告本身入库
             log.warning("%s %s 附件抽取失败：%s", listing.display, x["source_id"], e)
             continue
         if got:
-            head, body = got
+            head, body, full, url = got
             x["snippet"] = f"[新闻稿正文] {body}"
             if x["category"] == "6-K":
                 x["title"] = f"6-K {head}"
+            if _is_results_release(x, head):
+                _store_release(app, company, x, head, full, url)
+
+
+_RESULTS = re.compile(r"results|earnings|financial|quarter|fiscal|guidance|业绩|财报|季度", re.I)
+
+
+def _is_results_release(x: dict, head: str) -> bool:
+    """业绩公告：8-K 的 Item 2.02，或标题像业绩的 6-K。其余新闻稿只留摘要。"""
+    return (x["category"] == "8-K" and "2.02" in x["title"]) or (x["category"] == "6-K" and bool(_RESULTS.search(head)))
+
+
+def _store_release(app: App, company: Company, x: dict, head: str, full: str, url: str) -> None:
+    """业绩新闻稿全文入资料库（类型 other：指引、分部、积压订单等都在里面），可被 search_filings 检索并带页码。"""
+    from .docs import store_document
+
+    tmp_dir = app.data_dir / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp = tmp_dir / f"release_{x['source_id']}.txt"
+    try:
+        tmp.write_text(full, encoding="utf-8")
+        store_document(app.db, app.data_dir, company.id, tmp, doc_type="other", period=None, title=f"{x['category']} 新闻稿：{head}"[:150],
+                       source="sec", source_url=url, published_at=iso(x["published_at"]))
+    except Exception as e:
+        log.warning("%s 新闻稿入库失败：%s", company.name, e)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def fetch_filings(app: App, company: Company, listing: Listing) -> list[str]:
