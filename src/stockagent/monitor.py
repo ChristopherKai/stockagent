@@ -74,7 +74,7 @@ def price_value(app: App, company: Company, trig: dict) -> float | None:
     if metric == "close":
         return s["close"]
     if metric == "drawdown_from_high":
-        return 1 - s["close"] / s["high_250"]
+        return 1 - s["close"] / s["high_250"] if s["high_250"] else None
     if metric == "ret_20d":
         return s["ret_20d"]
     return None

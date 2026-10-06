@@ -62,7 +62,10 @@ def snapshot(bars: pd.DataFrame, bench: pd.DataFrame | None = None) -> dict | No
     vol20 = float(c.pct_change().tail(20).std() * math.sqrt(252)) if n > 21 else None
     avg_vol = float(v.iloc[-21:-1].mean()) if n > 21 else None
     window = bars.tail(250)
-    hi, lo = float(window["high"].max()), float(window["low"].min())
+    # 数据源偶有 0 价的坏 K 线（新上市/停牌占位），高低点只取正值
+    hi_s, lo_s = window["high"][window["high"] > 0], window["low"][window["low"] > 0]
+    hi = float(hi_s.max()) if len(hi_s) else None
+    lo = float(lo_s.min()) if len(lo_s) else None
     ma5, ma20, ma60 = ma(5), ma(20), ma(60)
 
     out = {
@@ -72,7 +75,8 @@ def snapshot(bars: pd.DataFrame, bench: pd.DataFrame | None = None) -> dict | No
         "ma5": ma5, "ma20": ma20, "ma60": ma60, "ma20_slope": slope,
         "rsi14": rsi, "atr_pct": atr_pct, "vol20": vol20,
         "vol_ratio": float(v.iloc[-1] / avg_vol) if avg_vol else None,
-        "high_250": hi, "low_250": lo, "from_high": last / hi - 1, "from_low": last / lo - 1,
+        "high_250": hi, "low_250": lo, "from_high": last / hi - 1 if hi else None,
+        "from_low": last / lo - 1 if lo else None,
         "bars": n,
         "trend": trend_label(last, ma20, ma60, slope),
     }
