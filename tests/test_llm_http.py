@@ -147,6 +147,34 @@ def test_openai_compatible_request_shape(server, monkeypatch):
     assert "JSON" in body["messages"][1]["content"]
 
 
+def _agent_max_tokens(server, monkeypatch, config_extra: dict | None = None, profile_max: int = 20000, **kw) -> int:
+    monkeypatch.setenv("DS_KEY", "k")
+    prof = {"protocol": "openai", "base_url": server.url + "/v1", "model": "m", "api_key_env": "DS_KEY",
+            "max_tokens": profile_max, "max_retries": 0}
+    llm = LLM(LLMConfig.model_validate({"profiles": {"p": prof}, **(config_extra or {})}))
+    tool = {"name": "calculate", "description": "", "parameters": {"type": "object", "properties": {}}}
+    res = llm.run_agent("research", ["s"], "问题", [tool], lambda n, a: "", **kw)
+    assert res.text == '{"ok": true}'
+    return server.requests[-1]["body"]["max_tokens"]
+
+
+def test_run_agent_without_max_tokens_uses_profile_limit(server, monkeypatch):
+    """调用方没有偏好（不传 max_tokens）：请求体里的上限就是 profile 的 max_tokens，不是写死的默认值。"""
+    assert _agent_max_tokens(server, monkeypatch, profile_max=20000) == 20000
+    assert _agent_max_tokens(server, monkeypatch, profile_max=128000) == 128000
+
+
+def test_run_agent_explicit_max_tokens_is_capped_by_profile(server, monkeypatch):
+    assert _agent_max_tokens(server, monkeypatch, profile_max=20000, max_tokens=50000) == 20000  # 调用方要 50000，被截断
+    assert _agent_max_tokens(server, monkeypatch, profile_max=20000, max_tokens=5000) == 5000
+
+
+def test_run_agent_route_max_tokens_overrides_caller(server, monkeypatch):
+    extra = {"tasks": {"research": {"profile": "p", "max_tokens": 3000}}}
+    assert _agent_max_tokens(server, monkeypatch, extra, profile_max=20000) == 3000
+    assert _agent_max_tokens(server, monkeypatch, extra, profile_max=20000, max_tokens=9000) == 3000
+
+
 def test_invalid_json_is_retried_once(server, monkeypatch):
     monkeypatch.setenv("DS_KEY", "k")
     server.reply_text = "抱歉，我无法输出 JSON"

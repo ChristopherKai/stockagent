@@ -324,13 +324,14 @@ class LLM:
         call_tool: Callable[[str, dict], str],
         *,
         max_steps: int = 12,
-        max_tokens: int = 8000,
+        max_tokens: int | None = None,
         profile: str | None = None,
         history: list[dict] | None = None,
         on_event: Callable[[dict], None] | None = None,
     ) -> LLMResult:
         """让模型在 max_steps 轮内调用工具，然后给出最终答案。
         tools: [{"name", "description", "parameters"(JSON Schema)}]；call_tool(name, args) 返回给模型看的文本。
+        max_tokens：单次输出的需求；不给（None）表示调用方没有偏好，用该 profile 的 max_tokens；给了仍会被 profile 上限截断。
         history：多轮对话中之前的轮次 [{"role": "user"|"assistant", "content": 文本}]，放在本轮 user 之前（只含文本，不回放工具调用）。
         on_event：给出时改用流式请求，边生成边回调 {"type": "thinking"|"text", "text": 片段}（只用于展示；
         换用 fallback 模型前回调 {"type": "restart"}）。返回值与非流式相同。"""
@@ -343,7 +344,7 @@ class LLM:
             tries += 1
             if on_event and tries > 1:
                 on_event({"type": "restart", "profile": pname})
-            mt = min(route.max_tokens or max_tokens, prof.max_tokens)
+            mt = min(route.max_tokens or max_tokens or prof.max_tokens, prof.max_tokens)
             if prof.protocol == "anthropic":
                 return self._agent_anthropic(task, pname, prof, route, system, user, tools, call_tool, max_steps, mt, prior, on_event)
             if prof.protocol == "openai":
