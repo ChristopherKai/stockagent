@@ -64,23 +64,37 @@ SECTIONS: list[tuple[str, str, str]] = [
 2. 利润率驱动：哪些因素推动了毛利率、净利率的变化（价格、成本、产品结构、规模效应），方向与幅度。
 3. 资产负债：现金、有息负债、净现金（或净负债）；近期融资（配售、可转债、增发）、回购历史与分红，对股本的稀释。
 4. 股权结构：用 shareholders 看控股股东与主要股东持股比例（A 股另看十大股东进出与股东户数变化），港股用 ccass 看托管行/券商/港股通的持股分布与集中度，美股看机构持仓变化（13F）、内部人买卖（区分主动买卖与 10b5-1 预设卖出）和做空持仓（short_interest）；对重要附属公司（尤其是上市子公司）的持股比例、是否同股不同权、限售股与解禁时间。"""),
-    ("valuation", "市场与估值", """研究问题：
+    ("market", "市场、可比与卖方", """研究问题：
 1. 用 market_data 查询本公司各上市地的价格、市值、PE/PB、250 日高低点；A+H 公司看 AH 溢价。
 2. 选 3–5 家可比公司（同业或产业链相近），用 market_data 查询它们的估值，整理成可比表（名称、代码、市值、PE、PB、近 20 日涨跌）。
 3. 反向 DCF：用 reverse_dcf 计算当前市值隐含的增长率（利润或现金流须为正，注意币种和单位一致）；亏损公司说明不适用，改用收入口径。
-4. 敏感性矩阵：选最关键的驱动指标（如下一年净利润或收入），给 4–6 个取值和 4–6 个倍数，用 valuation_matrix 计算隐含股价（股本、净现金、汇率要准确；股价、汇率与 current_price 一律用定价上市地，倍数要与定价上市地的市场一致——A+H 公司以 H 股定价时参照 H 股自身历史估值与港股可比，或按当前 AH 溢价折算），原样保留工具输出的表格。口径：PE、PB 等股权倍数用 basis=equity（倍数 × 净利润已是股权价值，不再加减净现金）；EV/EBITDA、EV/Sales 等企业价值倍数用 basis=ev 并填净现金（净负债为负数）。驱动指标的取值要覆盖一致预期，倍数要覆盖定价上市地自身的历史分位（见「程序参考价」；工具也会自动补上缺的行列）。
-5. 历史估值分位：用 valuation_history 看当前 PE/PB 处于过去 3–5 年的什么位置（同业也可以查）。
-6. 适用时补充：有上市子公司或多元业务的用 sotp 做分部加总（分部利润一律换算成归母口径：持股比例填公司实际持有的比例，或先扣掉少数股东损益再填 100%，不能把非全资子公司的全部利润算给母公司；按「驱动指标 × 倍数」估值的分部请填 driver 与 multiple，不要只写 value；牛 / 基准 / 熊各调用一次，分部名称、持股、股本、净现金、汇率保持一致，折价与控股公司折价可以随情景变，程序据此为情景定价）；稳定分红的用 ddm 做股息贴现。
-7. 卖方观点：用 broker_research 取一致预期（A 股为评级分布与盈利预测中位数，港股为目标价均值与区间），再用 web_search 查主要机构最新的目标价和盈利预测（注明机构与日期）；查不到就写「未查到」。用 earnings_vs_consensus 看一致预期近 30/90 天的修正方向，以及公司历史上业绩是否常超/不及预期。
-8. EV 与自由现金流：用 fcf_yield 取 EV、FCF Yield（TTM、近 3 个年度、3 年平均）、净现金占市值、是否 Negative EV、FCF 累计覆盖 EV 的年数；周期股以多年平均为准；FCF 为负或处于扩产期时，用卖方盈利预测或情景估算前瞻 FCF，传入 forward_fcf 计算前瞻 FCF Yield。可比公司也可以查。
-9. 股东回报与「免费期权」：分红、回购的历史、意愿与触发条件（如母公司偿债需求、港股通纳入、董事会政策）；主业估值能否覆盖市值，新业务是否被市场零估值。
-10. 指定主锚：在笔记末尾明确写出 12 个月情景以哪一种估值为主锚（敏感性矩阵，或 SOTP 分部加总）及理由；同时做了矩阵和 SOTP 的，说明两者基准价的差距与原因。程序会按你指定的主锚为情景定价，并用另一种方法交叉检查。"""),
+4. 历史估值分位：用 valuation_history 看当前 PE/PB 处于过去 3–5 年的什么位置（同业也可以查）。
+5. 卖方观点：用 broker_research 取一致预期（A 股为评级分布与盈利预测中位数，港股为目标价均值与区间），再用 web_search 查主要机构最新的目标价和盈利预测（注明机构与日期）；查不到就写「未查到」。用 earnings_vs_consensus 看一致预期近 30/90 天的修正方向，以及公司历史上业绩是否常超/不及预期。
+6. EV 与自由现金流：用 fcf_yield 取 EV、FCF Yield（TTM、近 3 个年度、3 年平均）、净现金占市值、是否 Negative EV、FCF 累计覆盖 EV 的年数；周期股以多年平均为准；FCF 为负或处于扩产期时，用卖方盈利预测或情景估算前瞻 FCF，传入 forward_fcf 计算前瞻 FCF Yield。可比公司也可以查。"""),
     ("recent", "近期动态、催化剂与风险", """研究问题：
 1. 用 company_events 查看近 90 天（days=90）的重要事件，概括最重要的 5–8 件及其影响；关键公告可用 fetch_url 读原文。最近一次业绩相对一致预期如何，用 earnings_vs_consensus（程序计算）。港股用 southbound 看南向资金的增减持，用 ccass 看近 20 日有无大额转仓或集中度变化。
 2. 未来 12 个月可能的催化剂：业绩披露、新产品或产能投产、解禁、指数或港股通调整、政策节点等，尽量给出时间和可检验的指标。
 3. 主要风险：政策监管、竞争、客户、供应链、诉讼、地缘政治，按重要性排序。
 4. 最值得持续跟踪的外部变量（行业价格、需求数据、竞争对手动态、宏观），以及可以获取的数据来源。"""),
+    ("valuation", "估值情景与主锚", """研究问题：
+1. 先通读「前序研究笔记」：股本、净现金（或净负债）、汇率、最近年度利润、分部利润与持股、一致预期、可比倍数与历史分位都已经由同事查好。建模时直接引用这些事实，不要重新推算；确实缺的才用工具补，笔记之间互相矛盾的要在笔记里点明并说明取哪个。
+2. 敏感性矩阵：选最关键的驱动指标（如下一年净利润或收入），给 4–6 个取值和 4–6 个倍数，用 valuation_matrix 计算隐含股价（股本、净现金、汇率要准确；股价、汇率与 current_price 一律用定价上市地，倍数要与定价上市地的市场一致——A+H 公司以 H 股定价时参照 H 股自身历史估值与港股可比，或按当前 AH 溢价折算），原样保留工具输出的表格。口径：PE、PB 等股权倍数用 basis=equity（倍数 × 净利润已是股权价值，不再加减净现金）；EV/EBITDA、EV/Sales 等企业价值倍数用 basis=ev 并填净现金（净负债为负数）。驱动指标的取值要覆盖一致预期，倍数要覆盖定价上市地自身的历史分位（见「程序参考价」；工具也会自动补上缺的行列）。
+3. 适用时补充：有上市子公司或多元业务的用 sotp 做分部加总（分部利润一律换算成归母口径：持股比例填公司实际持有的比例，或先扣掉少数股东损益再填 100%，不能把非全资子公司的全部利润算给母公司；按「驱动指标 × 倍数」估值的分部请填 driver 与 multiple，不要只写 value；牛 / 基准 / 熊各调用一次，分部名称、持股、股本、净现金、汇率保持一致，折价与控股公司折价可以随情景变，程序据此为情景定价）；稳定分红的用 ddm 做股息贴现。
+4. 股东回报与「免费期权」：分红、回购的历史、意愿与触发条件（如母公司偿债需求、港股通纳入、董事会政策）；主业估值能否覆盖市值，新业务是否被市场零估值。
+5. 指定主锚：在笔记末尾明确写出 12 个月情景以哪一种估值为主锚（敏感性矩阵，或 SOTP 分部加总）及理由；同时做了矩阵和 SOTP 的，说明两者基准价的差距与原因。程序会按你指定的主锚为情景定价，并用另一种方法交叉检查。"""),
 ]
+
+# 研究分两个阶段：阶段 1 的四个子任务并行；阶段 2 的估值情景要用阶段 1 的结论（股本、净现金、分部利润、可比倍数、一致预期），
+# 所以读完它们的笔记之后再建模，不再自己重查一遍。
+STAGE2_KEYS = ("valuation",)
+STAGE1 = [sec for sec in SECTIONS if sec[0] not in STAGE2_KEYS]
+STAGE2 = [sec for sec in SECTIONS if sec[0] in STAGE2_KEYS]
+# 阶段 2 只做建模：不需要股东、筹码、事件、推特、ima 这些工具（也少一个争抢搜索源的 agent）
+STAGE2_TOOLS = ["valuation_matrix", "sotp", "ddm", "dcf_valuation", "calculate", "market_data", "fcf_yield", "valuation_history",
+                "financials", "statements", "broker_research", "list_filings", "search_filings", "read_filing", "manual_data",
+                "web_search", "fetch_url"]
+PRIOR_RULES = ("以下是同事已经完成的研究笔记。其中的股本、净现金、汇率、利润、分部利润与持股、一致预期、可比与历史估值分位等事实以笔记为准，"
+               "直接引用并保留出处；不要为了确认它们重复调用工具，把工具轮数留给估值建模。")
 
 WRITER_RULES = """你是资深买方分析师，要把同事们的研究笔记写成一份中文深度报告（Deep Dossier）。风格：观点鲜明、数字支撑、多空平衡；每一节先给结论再给证据；数字尽量放进表格；每段分析要回答「所以呢」。
 
@@ -451,12 +465,15 @@ def previous_revisions(app: App, company: Company, limit: int = 8) -> str:
     return "\n".join(lines)
 
 
-def research(app: App, company: Company, key: str, title: str, questions: str, market: str) -> tuple[str, str, str, list]:
-    box = ToolBox(app, company)
+def research(app: App, company: Company, key: str, title: str, questions: str, market: str,
+             prior: dict | None = None) -> tuple[str, str, str, list]:
+    """一个研究子任务。prior 非空 = 阶段 2：带着前序笔记建模，多给 valuation_extra_steps 轮，只开放建模相关工具。"""
+    box = ToolBox(app, company, allow=STAGE2_TOOLS if prior is not None else None)
+    steps = app.settings.agent.max_steps + (app.settings.agent.valuation_extra_steps if prior is not None else 0)
     system = [RESEARCH_SYSTEM.format(company=company.title, section=title,
-                                     rules=AGENT_RULES.format(today=today_local(), max_steps=app.settings.agent.max_steps)),
+                                     rules=AGENT_RULES.format(today=today_local(), max_steps=steps)),
               app.company_context(company)]
-    if imafeed.enabled(app):
+    if "ima_search" in box.tools and imafeed.enabled(app):
         system.append(imafeed.AGENT_HINT)
     if "twitter_search" in box.tools:
         system += [twitter.HINT, line] if (line := twitterfeed.accounts_line(app, company)) else [twitter.HINT]
@@ -467,9 +484,10 @@ def research(app: App, company: Company, key: str, title: str, questions: str, m
     user = (f"{questions}\n\n当前行情：\n{market}\n{app.fx_line()}（涉及币种换算时只用这里的汇率）\n"
             + (f"{note}\n" if note else "") + "\n" + (f"{anc}\n\n" if anc else "")
             + (f"{alerts}\n\n" if alerts else "") + (f"{revs}\n\n" if revs else "")
+            + (f"{PRIOR_RULES}\n\n{_notes_text(prior)}\n\n" if prior else "")
             + "先规划要查什么，再调用工具逐项查证，最后输出本部分的研究笔记。")
     try:
-        res = app.llm.run_agent("research", system, user, box.specs(), box.call, max_steps=app.settings.agent.max_steps, max_tokens=12000)
+        res = app.llm.run_agent("research", system, user, box.specs(), box.call, max_steps=steps, max_tokens=12000)
         text = res.text
     except LLMError as e:
         text = f"{FAILED_MARK}{e}）"
@@ -705,25 +723,57 @@ def ensure_coverage(app: App, report: str, facts: list[dict]) -> tuple[str, list
     return report, added
 
 
-def failed_sections(notes: dict) -> list[tuple[str, str, str]]:
+def failed_sections(notes: dict, sections: list | None = None) -> list[tuple[str, str, str]]:
     """研究笔记中失败的子任务 [(key, 标题, 笔记正文)]。"""
-    return [(key, title, notes.get(key, {}).get("text", "")) for key, title, _ in SECTIONS
+    return [(key, title, notes.get(key, {}).get("text", "")) for key, title, _ in (sections or SECTIONS)
             if notes.get(key, {}).get("text", "").startswith(FAILED_MARK)]
 
 
-def _redo_failed(app: App, company: Company, notes: dict, tool_log: list, market: str, progress) -> tuple[dict, list]:
-    """把失败的研究子任务重做一次（并行）。成功的笔记与工具日志替换旧的，失败的保持原样由调用方处理。"""
-    failed = [sec for sec in SECTIONS if sec[0] in {k for k, _, _ in failed_sections(notes)}]
-    if not failed:
-        return notes, tool_log
-    progress(f"  {company.name}：重新研究失败的部分：{'、'.join(sec[1] for sec in failed)}…")
-    workers = len(failed) if app.settings.agent.parallel_sections else 1
+def _prior_notes(notes: dict) -> dict:
+    """阶段 2 的前序笔记：阶段 1 各子任务的笔记。"""
+    return {key: notes[key] for key, _, _ in STAGE1 if key in notes}
+
+
+def _run_sections(app: App, company: Company, sections: list, market: str, prior: dict | None = None) -> list:
+    if not sections:
+        return []
+    workers = len(sections) if app.settings.agent.parallel_sections else 1
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        redo = list(pool.map(lambda sec: research(app, company, *sec, market), failed))
-    for key, title, text, log_ in redo:
+        extra = {} if prior is None else {"prior": prior}
+        return list(pool.map(lambda sec: research(app, company, *sec, market, **extra), sections))
+
+
+def _merge(notes: dict, tool_log: list, results: list) -> tuple[dict, list]:
+    """把子任务结果并入笔记与工具日志（同标题的旧日志被替换）。"""
+    for key, title, text, log_ in results:
         notes[key] = {"title": title, "text": text}
         tool_log = [x for x in tool_log if x.get("section") != title] + log_
     return notes, tool_log
+
+
+def _redo_failed(app: App, company: Company, notes: dict, tool_log: list, market: str, progress,
+                 sections: list | None = None) -> tuple[dict, list]:
+    """把失败的研究子任务重做一次（并行）。成功的笔记与工具日志替换旧的，失败的保持原样由调用方处理。
+    sections 限定在哪个阶段里找（默认全部）；阶段 2 的子任务带着当前的阶段 1 笔记重做。"""
+    keys = {k for k, _, _ in failed_sections(notes, sections)}
+    failed = [sec for sec in (sections or SECTIONS) if sec[0] in keys]
+    if not failed:
+        return notes, tool_log
+    progress(f"  {company.name}：重新研究失败的部分：{'、'.join(sec[1] for sec in failed)}…")
+    stage2 = [sec for sec in failed if sec[0] in STAGE2_KEYS]
+    results = _run_sections(app, company, [sec for sec in failed if sec[0] not in STAGE2_KEYS], market)
+    if stage2:
+        notes, tool_log = _merge(notes, tool_log, results)  # 阶段 1 重做的结果先并入，阶段 2 再读
+        results = _run_sections(app, company, stage2, market, _prior_notes(notes))
+    return _merge(notes, tool_log, results)
+
+
+def _abort_if_failed(company: Company, notes: dict, notes_path: Path, sections: list) -> None:
+    """重试后仍失败：中止，不拿残缺的笔记继续（笔记已保存，--reuse-notes 只重做失败的部分）。"""
+    if still := failed_sections(notes, sections):
+        raise LLMError(f"研究子任务重试后仍失败：{'、'.join(t for _, t, _ in still)}；"
+                       + "；".join(f"{t}：{x[len(FAILED_MARK):].rstrip('）')[:200]}" for _, t, x in still)
+                       + f"\n    研究笔记已保存：{notes_path}；问题解决后运行 `stock dossier {company.id} --reuse-notes` 只重做失败的部分")
 
 
 def generate(app: App, company: Company, progress=print, reuse_notes: bool = False, refill: bool = False) -> dict:
@@ -741,14 +791,10 @@ def generate(app: App, company: Company, progress=print, reuse_notes: bool = Fal
         data = {"created_at": datetime.now(CST).isoformat()}
         progress(f"  {company.name}：计算程序参考价（一致预期 × 历史 PE）…")
         anchor.get(app, company)  # 研究子任务共用当天的结果
-        workers = len(SECTIONS) if app.settings.agent.parallel_sections else 1
-        progress(f"  {company.name}：{len(SECTIONS)} 个研究子任务（{app.llm.describe('research')}）…")
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(lambda s: research(app, company, s[0], s[1], s[2], market), SECTIONS))
-        notes = {key: {"title": title, "text": text} for key, title, text, _ in results}
-        tool_log = [entry for *_, log_ in results for entry in log_]
+        progress(f"  {company.name}：阶段 1：{len(STAGE1)} 个研究子任务并行（{app.llm.describe('research')}）…")
+        notes, tool_log = _merge({}, [], _run_sections(app, company, STAGE1, market))
         notes_path = _notes_dir(app) / f"{company.id}_{datetime.now(CST):%Y%m%d_%H%M%S}.json"
-        progress(f"  {company.name}：研究完成（工具调用 {len(tool_log)} 次）")
+        progress(f"  {company.name}：阶段 1 完成（工具调用 {len(tool_log)} 次）")
 
     requests = data.get("requests") or []
 
@@ -757,13 +803,19 @@ def generate(app: App, company: Company, progress=print, reuse_notes: bool = Fal
                                          ensure_ascii=False), encoding="utf-8")
 
     save()
-    # 失败的研究子任务（新跑失败的、或复用笔记里上次失败的）自动重做一次；仍失败就中止，不拿残缺的笔记写报告
-    notes, tool_log = _redo_failed(app, company, notes, tool_log, market, progress)
+    # 失败的研究子任务（新跑失败的、或复用笔记里上次失败的）自动重做一次；仍失败就中止，不拿残缺的笔记写报告。
+    # 阶段 1 先过关，才跑阶段 2（估值情景要读阶段 1 的笔记）；旧格式笔记的 valuation 已含完整内容，不补跑
+    notes, tool_log = _redo_failed(app, company, notes, tool_log, market, progress, STAGE1)
     save()
-    if still := failed_sections(notes):
-        raise LLMError(f"研究子任务重试后仍失败：{'、'.join(t for _, t, _ in still)}；"
-                       + "；".join(f"{t}：{x[len(FAILED_MARK):].rstrip('）')[:200]}" for _, t, x in still)
-                       + f"\n    研究笔记已保存：{notes_path}；问题解决后运行 `stock dossier {company.id} --reuse-notes` 只重做失败的部分")
+    _abort_if_failed(company, notes, notes_path, STAGE1)
+    if "valuation" not in notes:
+        progress(f"  {company.name}：阶段 2：估值情景与主锚（读阶段 1 笔记，"
+                 f"最多 {app.settings.agent.max_steps + app.settings.agent.valuation_extra_steps} 轮工具）…")
+        notes, tool_log = _merge(notes, tool_log, _run_sections(app, company, STAGE2, market, _prior_notes(notes)))
+        save()
+    notes, tool_log = _redo_failed(app, company, notes, tool_log, market, progress, STAGE2)
+    save()
+    _abort_if_failed(company, notes, notes_path, STAGE2)
     gap = notes.get("gapfill", {}).get("text", "")
     if gap and not gap.startswith(FAILED_MARK):
         # 上次补缺之后使用者补充了数据，或上次补缺时网页搜索大多不可用：带着上一轮的结果重新补缺

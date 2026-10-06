@@ -492,11 +492,11 @@ _REAL_RESEARCH = dossier.research
 def _fake_research(calls, fail_keys):
     real = _REAL_RESEARCH
 
-    def fake(app, company, key, title, questions, market):
+    def fake(app, company, key, title, questions, market, prior=None):
         calls.append(key)
         if key in fail_keys and calls.count(key) <= fail_keys[key]:
             return key, title, f"{dossier.FAILED_MARK}连接失败）", []
-        return real(app, company, key, title, questions, market)
+        return real(app, company, key, title, questions, market, prior)
     return fake
 
 
@@ -519,13 +519,57 @@ def test_failed_research_aborts_before_writing_and_resumes(app, monkeypatch):
     monkeypatch.setattr(dossier, "research", _fake_research(calls, {"valuation": 99}))
     with pytest.raises(LLMError, match="--reuse-notes") as ei:
         dossier.generate(app, company, progress=lambda *_: None)
-    assert "市场与估值" in str(ei.value) and calls.count("valuation") == 2
+    assert "估值情景与主锚" in str(ei.value) and calls.count("valuation") == 2
     assert app.db.latest_dossier("acme") is None
     assert "gapfill" not in dossier.latest_notes(app, company)[1]["notes"]  # 补缺 agent 没有白跑
     calls.clear()
     monkeypatch.setattr(dossier, "research", _fake_research(calls, {}))
     dossier.generate(app, company, progress=lambda *_: None, reuse_notes=True)
     assert calls == ["valuation"] and app.db.latest_dossier("acme") is not None
+
+
+def test_valuation_runs_in_stage2_with_stage1_notes_more_steps_and_fewer_tools(app, monkeypatch):
+    monkeypatch.setattr(dossier, "_find_chrome", lambda: None)
+    seen = []
+    orig = app.llm.run_agent
+
+    def spy(task, system, user, tools, call, *a, **k):
+        seen.append({"user": user, "tools": {t["name"] for t in tools}, "steps": k.get("max_steps")})
+        return orig(task, system, user, tools, call, *a, **k)
+    monkeypatch.setattr(app.llm, "run_agent", spy)
+    dossier.generate(app, app.watchlist.get("acme"), progress=lambda *_: None)
+    stage1, val = seen[:len(dossier.STAGE1)], seen[len(dossier.STAGE1)]
+    assert [k for k, *_ in dossier.STAGE1] == ["business", "financials", "market", "recent"]
+    assert all(dossier.PRIOR_RULES not in x["user"] and x["steps"] == app.settings.agent.max_steps for x in stage1)
+    assert dossier.PRIOR_RULES in val["user"] and "=== 研究笔记：市场、可比与卖方 ===" in val["user"]  # 阶段 2 读得到阶段 1 的笔记
+    assert val["steps"] == app.settings.agent.max_steps + app.settings.agent.valuation_extra_steps
+    assert val["tools"] <= set(dossier.STAGE2_TOOLS) and {"valuation_matrix", "sotp"} <= val["tools"]
+    assert not val["tools"] & {"shareholders", "ccass", "short_interest", "company_events", "reverse_dcf"}
+    assert all("reverse_dcf" in x["tools"] for x in stage1)  # 阶段 1 仍是完整工具集
+
+
+def test_stage1_failure_skips_stage2(app, monkeypatch):
+    monkeypatch.setattr(dossier, "_find_chrome", lambda: None)
+    calls: list[str] = []
+    monkeypatch.setattr(dossier, "research", _fake_research(calls, {"business": 99}))
+    with pytest.raises(LLMError, match="业务与产业链"):
+        dossier.generate(app, app.watchlist.get("acme"), progress=lambda *_: None)
+    assert "valuation" not in calls  # 阶段 1 没过关，不浪费最长的那次估值研究
+    assert "valuation" not in dossier.latest_notes(app, app.watchlist.get("acme"))[1]["notes"]
+
+
+def test_reuse_old_format_notes_does_not_rerun_valuation(app, monkeypatch):
+    """旧笔记只有 4 个子任务（没有 market，valuation 里是合并的老内容）：原样复用，不补跑任何研究。"""
+    monkeypatch.setattr(dossier, "_find_chrome", lambda: None)
+    company = app.watchlist.get("acme")
+    dossier.generate(app, company, progress=lambda *_: None)
+    path, data = dossier.latest_notes(app, company)
+    data["notes"].pop("market")
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(dossier, "research", _fake_research(calls, {}))
+    dossier.generate(app, company, progress=lambda *_: None, reuse_notes=True)
+    assert calls == []
 
 
 def test_number_contexts():

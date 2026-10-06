@@ -107,8 +107,8 @@ def test_generate_prices_scenarios_in_code(app, monkeypatch):
     monkeypatch.setattr(dossier, "_find_chrome", lambda: None)
     real_research, real_complete = dossier.research, app.llm.complete
 
-    def research(app_, company, key, title, questions, market):
-        k, t, text, log = real_research(app_, company, key, title, questions, market)
+    def research(app_, company, key, title, questions, market, prior=None):
+        k, t, text, log = real_research(app_, company, key, title, questions, market, prior)
         return k, t, text, log + ([_matrix_log()] if key == "valuation" else [])
 
     def complete(task, system, user, *a, schema=None, validate=None, **k):
@@ -342,8 +342,8 @@ def test_generate_prices_sotp_scenarios(app, monkeypatch):
     real_research, real_complete = dossier.research, app.llm.complete
     seen = {}
 
-    def research(app_, company, key, title, questions, market):
-        k, t, text, log = real_research(app_, company, key, title, questions, market)
+    def research(app_, company, key, title, questions, market, prior=None):
+        k, t, text, log = real_research(app_, company, key, title, questions, market, prior)
         return k, t, text, log + ([_sotp_call((8, 6), (50, 1.0), 0.3, holdco_discount=0.15), _sotp_call((10, 8), (60, 1.2), 0.2, holdco_discount=0.1),
                                    _sotp_call((12, 10), (70, 1.4), 0.1, holdco_discount=0.05)] if key == "valuation" else [])
 
