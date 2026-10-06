@@ -28,7 +28,7 @@ from .views import back, holder
 router = APIRouter(prefix="/settings", dependencies=[Depends(verify_csrf)])
 
 TASK_LABEL = {"triage": "事件分级", "stock_brief": "个股研判", "market_brief": "今日要点", "profile": "公司画像",
-              "research": "深度报告·研究 agent", "dossier": "深度报告·撰写与跟踪卡", "monitor": "证伪条件检查",
+              "research": "深度报告·研究 agent", "dossier": "深度报告·撰写与跟踪卡", "review": "深度报告·反方审稿", "monitor": "证伪条件检查",
               "tracker": "标的追踪·估值修正", "chat": "报告研读对话", "screen": "选股·快筛",
               "screen_theme": "选股·主题建议"}
 PROFILE_LABELS = {

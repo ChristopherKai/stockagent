@@ -210,6 +210,7 @@ class ReportConfig(BaseModel):
     profile_max_doc_chars: int = 180_000
     auto_profile: bool = True
     dossier_stale_days: int = 30  # 深度报告超过多少天提示更新
+    review: bool = True           # 深度报告撰写后做一轮反方审稿（task review，可路由到另一个模型）
     color_scheme: Literal["red_up", "green_up"] = "red_up"
 
 
