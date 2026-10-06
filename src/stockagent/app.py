@@ -15,7 +15,7 @@ from . import config, technical
 from .config import Company, Listing, Settings, Watchlist
 from .db import DB
 from .llm import LLM
-from .sources import ccass, cninfo, eastmoney, emdata, frankfurter, google_news, hkex, ids, pubdate, sec, sina, tencent
+from .sources import ccass, cninfo, eastmoney, emdata, frankfurter, google_news, hkex, ids, pubdate, sec, sina, tencent, yahoo
 from .utils import (days_ago, file_lock, fmt_local, iso, log, make_session, normalize_title, parse_iso, pct, num, sha1,
                     to_simplified, today_local, utcnow)
 
@@ -64,7 +64,9 @@ class App:
         return file_lock(self.lock_path(name))
 
     def secid(self, listing: Listing) -> str:
-        return ids.em_secid(self.db, self.session, listing)
+        if listing.market == "US" and not listing.exchange:
+            return us_secid(self, listing.code)
+        return eastmoney.secid_for(listing)
 
     def bench_secid(self, listing: Listing) -> str | None:
         if listing.benchmark:
@@ -230,7 +232,7 @@ def fetch(app: App, companies: list[Company], *, prices: bool = True, filings: b
     return msgs
 
 
-PRICE_SOURCES = {"eastmoney": eastmoney, "tencent": tencent, "sina": sina}
+PRICE_SOURCES = {"eastmoney": eastmoney, "tencent": tencent, "sina": sina, "yahoo": yahoo}
 
 
 DOWN_MINUTES = 60  # 数据源被封或连接失败后，多久内不再尝试
@@ -264,6 +266,31 @@ def _try(app: App, source: str, fn, *args, **kwargs):
     except requests.RequestException as e:
         log.info("%s 请求失败：%s", source, str(e)[:120])
     return None
+
+
+def us_secid(app: App, code: str) -> str:
+    """没有填 exchange 的美股代码 → 东方财富 secid（105 纳斯达克 / 106 纽交所 / 107 美交所），识别结果缓存在 kv `us_secid:<代码>`。
+    依次用 Yahoo（meta 直接给交易所）、腾讯与东方财富的 K 线探测（最近 3 根连续才算命中）；
+    全部失败（多半是源故障）时按纳斯达克临时处理且**不写缓存**，否则一次断网会把纽交所股票永久记成 105。"""
+    key = f"us_secid:{code}"
+    if v := app.db.kv_get(key):
+        return v
+    secid = None
+    if prefix := _try(app, "yahoo", yahoo.exchange_prefix, app.session, code):
+        secid = f"{prefix}.{code}"
+    else:
+        for name, mod in (("tencent", tencent), ("eastmoney", eastmoney)):
+            for prefix in eastmoney.US_MARKETS.values():
+                if tencent.recent_series(_try(app, name, mod.fetch_klines, app.session, f"{prefix}.{code}", limit=5)):
+                    secid = f"{prefix}.{code}"
+                    break
+            if secid:
+                break
+    if secid:
+        app.db.kv_set(key, secid)
+        return secid
+    log.warning("无法确定美股 %s 的交易所，暂按纳斯达克处理（不缓存）；请在 watchlist.yaml 中为它填写 exchange", code)
+    return f"105.{code}"
 
 
 def klines(app: App, secid: str, limit: int) -> tuple[list[dict], str | None]:

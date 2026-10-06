@@ -270,15 +270,6 @@ def split_pages(text: str) -> list[tuple[int, str]]:
     return [(int(parts[i]), parts[i + 1]) for i in range(1, len(parts) - 1, 2)]
 
 
-def _recent_series(bars: list[dict] | None) -> bool:
-    """交易所后缀不对时，腾讯只返回 1 根当前价，或返回已换所旧代码的陈旧历史再拼上当前价；
-    最近 3 根是连续的近期交易日才算识别成功。"""
-    if not bars or len(bars) < 3:
-        return False
-    ds = [date.fromisoformat(b["date"]) for b in bars[-3:]]
-    return (ds[-1] - ds[0]).days <= 10 and (date.today() - ds[-1]).days <= 10
-
-
 def resolve_ticker(app: App, ticker: str) -> list[tuple[str, str, str]]:
     """把名称或代码解析成 [(东方财富 secid, 显示名, 币种)]；自选股返回全部上市地。"""
     c = app.watchlist.get(ticker)
@@ -301,14 +292,9 @@ def resolve_ticker(app: App, ticker: str) -> list[tuple[str, str, str]]:
         l = Listing(market="HK", code=t)
         return [(eastmoney.secid_for(l), l.display, "HKD")]
     if re.fullmatch(r"[A-Z][A-Z.\-]{0,7}", t):
-        cached = app.db.kv_get(f"us_secid:{t}")
-        if cached:
-            return [(cached, t, "USD")]
-        for prefix in ("105", "106", "107"):
-            probe = _try(app, "tencent", tencent.fetch_klines, app.session, f"{prefix}.{t}", limit=5)
-            if _recent_series(probe):
-                app.db.kv_set(f"us_secid:{t}", f"{prefix}.{t}")
-                return [(f"{prefix}.{t}", t, "USD")]
+        secid = app.secid(Listing(market="US", code=t))
+        if app.db.kv_get(f"us_secid:{t}"):  # 只有真正识别出交易所才会写缓存；否则这个代码当作不存在
+            return [(secid, t, "USD")]
     raise ValueError(f"无法识别代码 {ticker}（港股 5 位数字、A 股 6 位数字、美股字母代码）")
 
 

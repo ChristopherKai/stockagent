@@ -1,9 +1,9 @@
-"""各数据源的内部编号（港交所 stockId、巨潮 orgId、SEC CIK、东方财富 secid），查一次后缓存在库里。"""
+"""各数据源的内部编号（港交所 stockId、巨潮 orgId、SEC CIK），查一次后缓存在库里。"""
 
 from __future__ import annotations
 
 from ..config import Listing
-from . import cninfo, eastmoney, hkex, sec
+from . import cninfo, hkex, sec
 
 
 def hkex_stock_id(db, session, listing: Listing) -> int | None:
@@ -34,14 +34,3 @@ def sec_cik(db, session, listing: Listing, user_agent: str) -> int | None:
     if cik:
         db.kv_set(key, str(cik))
     return cik
-
-
-def em_secid(db, session, listing: Listing) -> str:
-    if listing.market != "US" or listing.exchange:
-        return eastmoney.secid_for(listing)
-    key = f"em_secid:{listing.code}"
-    if v := db.kv_get(key):
-        return v
-    secid = eastmoney.secid_for(listing, session)
-    db.kv_set(key, secid)
-    return secid
