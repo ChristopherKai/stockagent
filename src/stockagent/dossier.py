@@ -50,7 +50,7 @@ RESEARCH_SYSTEM = """你是一名资深买方研究员，正在为「{company}�
 {rules}
 
 最终输出本部分的研究笔记（Markdown）：逐条回答研究问题，写出事实、数字、计算结果和出处；最后列出「仍不确定或缺失的数据」。
-笔记要精炼，控制在 3000 字以内，表格优先，不要写客套话，不要复述工具原文。"""
+写手只看得到这份笔记、看不到工具返回的原文，所以笔记以完整为准：凡是可能进入报告的数字都要写进来，并带口径、期间、币种与单位、出处；表格优先，表格和数字原样保留；不要大段抄工具返回的叙述性原文，不要写客套话。"""
 
 SECTIONS: list[tuple[str, str, str]] = [
     ("business", "业务与产业链", """研究问题：
@@ -451,7 +451,7 @@ def research(app: App, company: Company, key: str, title: str, questions: str, m
             + (f"{alerts}\n\n" if alerts else "") + (f"{revs}\n\n" if revs else "")
             + "先规划要查什么，再调用工具逐项查证，最后输出本部分的研究笔记。")
     try:
-        res = app.llm.run_agent("research", system, user, box.specs(), box.call, max_steps=app.settings.agent.max_steps, max_tokens=12000)
+        res = app.llm.run_agent("research", system, user, box.specs(), box.call, max_steps=app.settings.agent.max_steps)
         text = res.text
     except LLMError as e:
         text = f"{FAILED_MARK}{e}）"
@@ -513,7 +513,7 @@ def fill_gaps(app: App, company: Company, notes: dict, market: str, progress) ->
                         for i, g in enumerate(gaps, 1))
             + f"\n\n当前行情：\n{market}\n{app.fx_line()}")
     try:
-        text = app.llm.run_agent("research", system, user, box.specs(), box.call, max_steps=steps, max_tokens=12000).text
+        text = app.llm.run_agent("research", system, user, box.specs(), box.call, max_steps=steps).text
     except LLMError as e:
         text = f"{FAILED_MARK}{e}）"
     for entry in box.log:
