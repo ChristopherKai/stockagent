@@ -23,7 +23,7 @@ import markdown as md
 from pydantic import BaseModel, field_validator, model_validator
 from requests import RequestException
 
-from . import anchor, imafeed, scenarios, valuation, verify
+from . import anchor, imafeed, review, scenarios, valuation, verify
 from .app import MARKET_LABEL, App
 from .config import Company
 from .llm import LLMError
@@ -607,7 +607,9 @@ def apply_audit(report: str, claims: list[str], fixes: dict[int, dict]) -> tuple
 
 def _provenance_sources(header: str, notes: dict, tool_log: list, extra: str = "") -> list[str]:
     """数字溯源的语料：行情行、工具返回结果、研究笔记正文（以及使用者补充的数据）。"""
-    return [header] + [x["result"] for x in tool_log] + [x.get("text", "") for x in notes.values()] + ([extra] if extra else [])
+    # 审稿意见是模型对报告的评论，不是事实来源，不进溯源语料
+    return ([header] + [x["result"] for x in tool_log] + [x.get("text", "") for k, x in notes.items() if k != "review"]
+            + ([extra] if extra else []))
 
 
 def number_contexts(report: str, unverified: list[str], limit: int = REVISE_LIMIT) -> list[tuple[str, list[str]]]:
@@ -875,6 +877,17 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
         except LLMError as e:
             progress(f"  {company.name}：数字修订失败（报告保持原样）：{e}")
 
+    critique: dict = {}
+    if app.settings.report.review:
+        progress(f"  {company.name}：反方审稿（{app.llm.describe('review')}）…")
+        report, critique = review.review(app, report, notes_text, src)
+        if critique["objections"]:
+            high = sum(o["severity"] == "high" and not o.get("applied") for o in critique["objections"])
+            progress(f"  {company.name}：审稿提出 {len(critique['objections'])} 条意见，改写 {len(critique['applied'])} 处"
+                     + (f"，{high} 条高严重度意见未解决（见附录「审稿意见」）" if high else ""))
+        if text := review.markdown(critique):
+            notes["review"] = {"title": "审稿意见（反方）", "text": text}
+
     progress(f"  {company.name}：抽取跟踪卡…")
     listings = " / ".join(l.key for l in company.listings)
     band = app.settings.tracker.stance_band
@@ -926,7 +939,7 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
     app.db.resolve_requests(company.id, [r["item"] for r in requests])
     ids = app.db.add_requests(company.id, did, requests) if requests else []
     requests = [{**r, "id": i} for r, i in zip(requests, ids)]
-    html_path, pdf_path = render(app, company, did, report, card, header, tool_log, notes, applied, requests, added, revised)
+    html_path, pdf_path = render(app, company, did, report, card, header, tool_log, notes, applied, requests, added, revised, critique)
     app.db.set_dossier_paths(did, str(html_path), str(pdf_path) if pdf_path else None)
     return {"dossier_id": did, "html_path": html_path, "pdf_path": pdf_path, "card": card,
             "requests": requests, "fixes": applied, "added": added, "revised": revised}
@@ -1059,7 +1072,7 @@ def _find_chrome() -> str | None:
 def render(app: App, company: Company, dossier_id: int, report: str, card: dict, header: str, tool_log: list,
            notes: dict | None = None, applied: list[dict] | None = None,
            requests: list[dict] | None = None, added: list[dict] | None = None,
-           revised: list[dict] | None = None) -> tuple[Path, Path | None]:
+           revised: list[dict] | None = None, critique: dict | None = None) -> tuple[Path, Path | None]:
     now = datetime.now(CST)
     body_md = report.strip()
     # 把行情信息插到标题和导语之后
@@ -1087,6 +1100,8 @@ def render(app: App, company: Company, dossier_id: int, report: str, card: dict,
                               + (f"\n  依据：{r['evidence'][:160]}" if r["evidence"] else "") for r in fixed)
                   + ("\n" if fixed and kept else "")
                   + "\n".join(f"- 保留推算（{'、'.join(r['numbers'])}）：{r['evidence'][:160]}" for r in kept))
+    if critique and (text := review.markdown(critique)):
+        extra += "\n\n" + text
     if added:
         extra += (f"\n\n## § 关键事实补写\n\n撰写后检查了关键事实的覆盖情况，以下 {len(added)} 条原稿遗漏、已补写到对应章节：\n\n"
                   + "\n".join(f"- 〔{a['section']}〕{a['fact'][:140]}" for a in added))
