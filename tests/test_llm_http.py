@@ -30,11 +30,26 @@ def _sse(text: str, stop_reason: str = "end_turn") -> bytes:
     return "".join(f"event: {e}\ndata: {json.dumps(d)}\n\n" for e, d in events).encode()
 
 
+def _chat_sse(model: str, text: str, finish: str = "stop") -> bytes:
+    def chunk(delta, finish_reason=None, usage=None, choices=True):
+        d = {"id": "c1", "object": "chat.completion.chunk", "created": 0, "model": model,
+             "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}] if choices else []}
+        if usage:
+            d["usage"] = usage
+        return f"data: {json.dumps(d)}\n\n"
+
+    parts = [chunk({"role": "assistant", "content": text[:2]}), chunk({"content": text[2:]}), chunk({}, finish),
+             chunk({}, usage={"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}, choices=False), "data: [DONE]\n\n"]
+    return "".join(parts).encode()
+
+
 class Recorder:
     def __init__(self):
         self.requests: list[dict] = []
+        self.statuses: list[tuple[int, dict]] = []  # 依次返回的错误状态（耗尽后正常响应）：(状态码, 额外响应头)
         self.reply_text = '{"ok": true}'
         self.stop_reason = "end_turn"
+        self.finish_reason = "stop"
 
 
 @pytest.fixture
@@ -50,6 +65,17 @@ def server():
             rec.requests.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body})
             if self.path.startswith("/v1/messages"):
                 payload = _sse(rec.reply_text, rec.stop_reason)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+            elif rec.statuses:
+                code, headers = rec.statuses.pop(0)
+                payload = json.dumps({"error": {"message": f"boom {code}", "type": "x"}}).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                for k, v in headers.items():
+                    self.send_header(k, v)
+            elif body.get("stream"):
+                payload = _chat_sse(body["model"], rec.reply_text, rec.finish_reason)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
             else:
@@ -145,6 +171,48 @@ def test_openai_compatible_request_shape(server, monkeypatch):
     assert body["temperature"] == 0.2
     assert body["messages"][0] == {"role": "system", "content": "指令A\n\n背景B"}
     assert "JSON" in body["messages"][1]["content"]
+    assert body["stream"] is True and body["stream_options"] == {"include_usage": True}  # 默认流式：网关对非流式请求有总时限
+    assert res.usage["output_tokens"] == 3
+
+
+def test_openai_stream_false_sends_plain_request(server, monkeypatch):
+    monkeypatch.setenv("DS_KEY", "k")
+    llm = _llm({"protocol": "openai", "base_url": server.url + "/v1", "model": "m", "api_key_env": "DS_KEY",
+                "stream": False, "max_retries": 0})
+    assert llm.complete("t", ["s"], "u", schema=SCHEMA).data == {"ok": True}
+    assert "stream" not in server.requests[-1]["body"]
+
+
+def test_openai_stream_length_finish_is_truncation(server, monkeypatch):
+    monkeypatch.setenv("DS_KEY", "k")
+    server.finish_reason = "length"
+    llm = _llm({"protocol": "openai", "base_url": server.url + "/v1", "model": "m", "api_key_env": "DS_KEY", "max_retries": 0})
+    res = llm.complete("t", ["s"], "u")
+    assert len(server.requests) == 1 + llm.cfg.max_continuations and "截断" in res.text
+
+
+def test_openai_gateway_timeout_is_not_retried(server, monkeypatch):
+    """504（网关超时）重试只会再等满一轮：不在 SDK 里重试，立即作为可回退的错误抛出（2026-10-06 审稿白等 483 秒）。"""
+    monkeypatch.setenv("DS_KEY", "k")
+    server.statuses = [(504, {}), (504, {}), (504, {})]
+    llm = _llm({"protocol": "openai", "base_url": server.url + "/v1", "model": "m", "api_key_env": "DS_KEY", "max_retries": 3})
+    with pytest.raises(LLMError, match="504") as ei:
+        llm.complete("t", ["s"], "u")
+    assert ei.value.retryable and len(server.requests) == 1
+
+
+def test_openai_transient_errors_are_retried_quickly(server, monkeypatch):
+    monkeypatch.setenv("DS_KEY", "k")
+    monkeypatch.setattr("stockagent.llm.time.sleep", lambda s: None)
+    server.statuses = [(503, {}), (429, {"retry-after": "1"})]
+    llm = _llm({"protocol": "openai", "base_url": server.url + "/v1", "model": "m", "api_key_env": "DS_KEY", "max_retries": 3})
+    assert llm.complete("t", ["s"], "u", schema=SCHEMA).data == {"ok": True}
+    assert len(server.requests) == 3
+    server.statuses = [(503, {})] * 5
+    llm2 = _llm({"protocol": "openai", "base_url": server.url + "/v1", "model": "m", "api_key_env": "DS_KEY", "max_retries": 1})
+    with pytest.raises(LLMError, match="503"):
+        llm2.complete("t", ["s"], "u")
+    assert len(server.requests) == 5  # 3 + 首发 1 次 + 重试 1 次
 
 
 def _agent_max_tokens(server, monkeypatch, config_extra: dict | None = None, profile_max: int = 20000, **kw) -> int:

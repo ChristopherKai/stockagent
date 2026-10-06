@@ -353,22 +353,58 @@ class LLM:
 
         return self._with_fallback(name, attempt, use_fallback=profile is None)
 
+    # 失败得这么快才值得重试（限流、瞬时 5xx）；耗了很久才失败（网关超时、读超时）重试只会再等一轮，直接换备用模型
+    RETRY_FAST_S = 30.0
+
+    def _openai_send(self, client, prof: LLMProfile, kwargs: dict, on_event):
+        """发一次请求（带重试）。SDK 自带的重试固定对 5xx/超时再等满一轮（网关 2 分钟超时 ×4 = 8 分钟），
+        所以客户端关掉它，由这里只对「很快就失败」的瞬时故障重试；504 与读超时不重试。"""
+        import openai
+
+        for attempt in range(prof.max_retries + 1):
+            t0 = time.monotonic()
+            try:
+                if prof.stream or on_event is not None:
+                    return self._openai_stream(client, prof, kwargs, on_event or (lambda ev: None))
+                resp = client.chat.completions.create(**kwargs)
+                u = resp.usage
+                usage = {"input_tokens": getattr(u, "prompt_tokens", None), "output_tokens": getattr(u, "completion_tokens", None),
+                         "cache_read": 0, "cache_write": 0}
+                return resp, usage, resp.model or prof.model
+            except (openai.RateLimitError, openai.APIStatusError, openai.APIConnectionError) as e:
+                status = getattr(e, "status_code", None)
+                transient = (isinstance(e, openai.RateLimitError) or status in (408, 409, 500, 502, 503)
+                             or (isinstance(e, openai.APIConnectionError) and not isinstance(e, openai.APITimeoutError)))
+                if not transient or attempt >= prof.max_retries or time.monotonic() - t0 > self.RETRY_FAST_S:
+                    raise
+                wait = min(0.5 * 2 ** attempt, 8.0)
+                try:
+                    wait = min(max(float(e.response.headers.get("retry-after", wait)), 0.0), 30.0)  # type: ignore[union-attr]
+                except (AttributeError, ValueError):
+                    pass
+                log.info("[%s] 请求失败（%s），%.1f 秒后重试 %d/%d", prof.model, type(e).__name__, wait, attempt + 1, prof.max_retries)
+                time.sleep(wait)
+        raise AssertionError("unreachable")
+
     def _openai_create(self, name: str, prof: LLMProfile, kwargs: dict, on_event=None):
-        """on_event 给出时用流式请求，并把分片拼成与非流式相同形状的结果（choices[0].message / finish_reason）。"""
+        """默认流式请求（prof.stream），分片拼成与非流式相同形状的结果（choices[0].message / finish_reason）：
+        网关常对非流式请求设总时限（实测 2 分钟，长输出必超时），流式则只要持续有输出就不会断。on_event 给出时回调增量。"""
         import httpx
         import openai
 
         client = self._client(name, prof)
         try:
-            if on_event is not None:
-                return self._openai_stream(client, prof, kwargs, on_event)
-            resp = client.chat.completions.create(**kwargs)
+            resp, usage, model = self._openai_send(client, prof, kwargs, on_event)
+            if not resp.choices:
+                raise LLMError(f"[{name}] 返回为空")
+            return resp, usage, model
         except openai.AuthenticationError as e:
             raise LLMError(f"[{name}] 认证失败，请检查 API key：{e.message}") from e
         except openai.NotFoundError as e:
             raise LLMError(f"[{name}] 模型或地址不存在（model={prof.model}, base_url={prof.base_url}）：{e.message}") from e
         except openai.BadRequestError as e:
-            raise LLMError(f"[{name}] 请求被拒绝：{e.message}（若服务不支持工具调用，把 tool_mode 设为 text；不支持 JSON 模式则把 json_mode 设为 false）") from e
+            raise LLMError(f"[{name}] 请求被拒绝：{e.message}（若服务不支持工具调用，把 tool_mode 设为 text；不支持 JSON 模式则把 json_mode 设为 false；"
+                           f"不支持流式则把 stream 设为 false）") from e
         except openai.RateLimitError as e:
             raise LLMError(f"[{name}] 触发限流：{e.message}", retryable=True) from e
         except openai.APIStatusError as e:
@@ -377,12 +413,6 @@ class LLM:
             raise LLMError(f"[{name}] 网络连接失败：{e}", retryable=True) from e
         except (openai.APIError, httpx.HTTPError) as e:  # 流式输出中途断开
             raise LLMError(f"[{name}] 接口中断：{e}", retryable=True) from e
-        if not resp.choices:
-            raise LLMError(f"[{name}] 返回为空")
-        u = resp.usage
-        usage = {"input_tokens": getattr(u, "prompt_tokens", None), "output_tokens": getattr(u, "completion_tokens", None),
-                 "cache_read": 0, "cache_write": 0}
-        return resp, usage, resp.model or prof.model
 
     @staticmethod
     def _openai_stream(client, prof: LLMProfile, kwargs: dict, on_event):
@@ -628,7 +658,7 @@ class LLM:
                 client = openai.OpenAI(
                     api_key=key or "not-needed",  # 本地模型服务通常不校验 key
                     base_url=prof.base_url,
-                    max_retries=prof.max_retries,
+                    max_retries=0,  # 重试由 _openai_send 控制（SDK 的重试会对网关超时再等满一轮）
                     timeout=prof.timeout,
                 )
             else:
@@ -700,9 +730,6 @@ class LLM:
         return (text, msg.stop_reason == "max_tokens"), usage, msg.model
 
     def _openai(self, name, prof: LLMProfile, system, user, schema, max_tokens, history=None):
-        import openai
-
-        client = self._client(name, prof)
         content = user + (json_instruction(schema) if schema is not None else "")
         kwargs: dict = {
             "model": prof.model,
@@ -719,31 +746,9 @@ class LLM:
             kwargs["response_format"] = {"type": "json_object"}
         if prof.extra_body:
             kwargs["extra_body"] = prof.extra_body
-        try:
-            resp = client.chat.completions.create(**kwargs)
-        except openai.AuthenticationError as e:
-            raise LLMError(f"[{name}] 认证失败，请检查 API key：{e.message}") from e
-        except openai.NotFoundError as e:
-            raise LLMError(f"[{name}] 模型或地址不存在（model={prof.model}, base_url={prof.base_url}）：{e.message}") from e
-        except openai.BadRequestError as e:
-            raise LLMError(f"[{name}] 请求被拒绝：{e.message}（若服务商不支持 JSON 模式，把 json_mode 设为 false）") from e
-        except openai.RateLimitError as e:
-            raise LLMError(f"[{name}] 触发限流：{e.message}", retryable=True) from e
-        except openai.APIStatusError as e:
-            raise LLMError(f"[{name}] API 错误 {e.status_code}：{e.message}", retryable=_retryable_status(e.status_code)) from e
-        except openai.APIConnectionError as e:
-            raise LLMError(f"[{name}] 网络连接失败：{e}", retryable=True) from e
-        if not resp.choices:
-            raise LLMError(f"[{name}] 返回为空")
+        resp, usage, model = self._openai_create(name, prof, kwargs)
         choice = resp.choices[0]
-        u = resp.usage
-        usage = {
-            "input_tokens": getattr(u, "prompt_tokens", None),
-            "output_tokens": getattr(u, "completion_tokens", None),
-            "cache_read": 0,
-            "cache_write": 0,
-        }
-        return (strip_think(choice.message.content or ""), choice.finish_reason == "length"), usage, resp.model or prof.model
+        return (strip_think(choice.message.content or ""), choice.finish_reason == "length"), usage, model
 
     # ------------------------------------------------------------ 模拟
 

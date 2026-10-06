@@ -62,6 +62,7 @@ LABELS: dict[str, tuple[str, str]] = {
     # 研究 agent
     "agent.max_steps": ("研究子任务最多工具轮数", ""),
     "agent.valuation_extra_steps": ("估值情景子任务额外工具轮数", "在上一项之上追加，用于矩阵 / SOTP 建模"),
+    "agent.gap_agents": ("补缺检索并行 agent 数", "缺口分组并行检索；1 = 不并行"),
     "agent.tool_result_chars": ("单次工具结果最多字数", ""),
     "agent.web_search": ("网页搜索源（按顺序）", "API 类填了 key 才启用；免费源前三个轮流使用"),
     "agent.parallel_sections": ("研究子任务并行", "模型服务支持并发时开启"),
