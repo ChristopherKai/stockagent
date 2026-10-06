@@ -538,13 +538,18 @@ def fill_gaps(app: App, company: Company, notes: dict, market: str, progress) ->
         entry["section"] = "补充研究"
     requests: list[dict] = []
     try:
-        items = app.llm.complete(
+        data = app.llm.complete(
             "dossier", [RESOLVE_SYSTEM.format(company_id=company.id)],
             "缺口清单：\n" + "\n".join(f"- {g['name']}：{g['why']}" for g in gaps) + f"\n\n补充研究笔记：\n{text}",
             schema=RESOLVE_SCHEMA, max_tokens=16000,
-        ).data["items"]
+        ).data
+        # complete() 这里没有 validate 钩子，模型可能漏字段：缺 name/ask 补默认值，缺 status 视为没找到
+        items = [{"name": str(it.get("name") or "未命名缺口"), "status": it.get("status") if it.get("status") in ("found", "partial", "missing") else "missing",
+                  "ask": str(it.get("ask") or "")}
+                 for it in (data or {}).get("items") or [] if isinstance(it, dict)]
         why = {g["name"]: g["why"] for g in gaps}
-        requests = [{"item": it["name"], "why": why.get(it["name"], ""), "ask": it["ask"]} for it in items if it["status"] != "found"]
+        requests = [{"item": it["name"], "why": why.get(it["name"], ""), "ask": it["ask"] or f"请补充：{it['name']}"}
+                    for it in items if it["status"] != "found"]
         count = {k: sum(1 for it in items if it["status"] == k) for k in ("found", "partial", "missing")}
         progress(f"  {company.name}：补缺完成，找到 {count['found']} 项、部分找到 {count['partial']} 项、没找到 {count['missing']} 项；"
                  f"需要你补充 {len(requests)} 项")
