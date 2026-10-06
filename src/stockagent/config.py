@@ -194,6 +194,7 @@ class AgentConfig(BaseModel):
     """研究 agent 的通用参数（与具体模型无关；模型相关的限制写在各自的 profile 里）。"""
 
     max_steps: int = 12              # 每个研究子任务最多调用工具的轮数
+    valuation_extra_steps: int = 8   # 估值情景子任务（阶段 2，读完前序笔记后用矩阵 / SOTP 建模）在 max_steps 之上多给的轮数
     tool_result_chars: int = 4000    # 单次工具结果最多返回给模型的字数
     # 网页搜索源：搜索 API 优先——exa（经 agent-reach 的 mcporter 调用，装了就启用）、bocha / tavily / serper（.env 填了 key 才启用）；
     # 免费源中前三个轮流使用（分摊请求量、减少被反爬拦截），其余在它们都失败时依次备用
