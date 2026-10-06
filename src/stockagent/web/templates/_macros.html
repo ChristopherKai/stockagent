@@ -26,7 +26,7 @@
 <table class="tbl model">
   <thead><tr>
     <th>情景</th>
-    {% if model.method == 'matrix' %}<th>{{ model.driver_label }}</th><th>{{ model.multiple_label }}</th>{% endif %}
+    {% if model.method == 'matrix' %}<th>{{ model.driver_label }}</th><th>{{ model.multiple_label }}</th>{% elif model.method == 'sotp' %}<th>分部（驱动 × 倍数）</th>{% endif %}
     <th class="r">股价（{{ currency }}）</th><th class="r">概率</th><th>报告原区间</th>{% if not drivers_row %}<th>关键驱动</th>{% endif %}
   </tr></thead>
   <tbody>
@@ -36,13 +36,17 @@
       {% if model.method == 'matrix' %}
       <td class="r">{{ x.s.driver | num }}{% if x.b and x.b.driver != x.s.driver %}<div class="was">{{ was }} {{ x.b.driver | num }}</div>{% endif %}</td>
       <td class="r">{{ x.s.multiple | num }}{% if x.b and (x.b.multiple - x.s.multiple) | abs > 0.005 %}<div class="was">{{ was }} {{ x.b.multiple | num }}</div>{% endif %}</td>
+      {% elif model.method == 'sotp' %}
+      <td class="small">{% for g in x.s.segments %}{% set bg = x.b.segments[loop.index0] if x.b and x.b.segments|length > loop.index0 else none %}
+        <div>{{ g.name }} {{ g.driver | num }} × {{ g.multiple | num }}{% if bg and (bg.driver != g.driver or (bg.multiple - g.multiple) | abs > 0.005) %}<span class="was">（{{ was }} {{ bg.driver | num }} × {{ bg.multiple | num }}）</span>{% endif %}</div>{% endfor %}
+        <div class="muted">控股公司折价 {{ ((model.holdco_discount if x.s.holdco_discount is none else x.s.holdco_discount) * 100) | num(0) }}%</div></td>
       {% endif %}
       <td class="r"><b>{{ x.price | num }}</b>{% if x.bprice and (x.bprice - x.price) | abs > 0.005 %}<div class="was">{{ was }} {{ x.bprice | num }} {{ delta(x.price, x.bprice) }}</div>{% endif %}</td>
       <td class="r">{{ x.prob | pct(0, false) }}{% if x.bprob is not none and (x.bprob - x.prob) | abs > 0.0005 %}<div class="was">{{ was }} {{ x.bprob | pct(0, false) }}</div>{% endif %}</td>
       <td class="muted">{{ x.s.low | num }}–{{ x.s.high | num }}</td>
       {% if not drivers_row %}<td class="drivers">{{ x.s.drivers_text }}</td>{% endif %}
     </tr>
-    {% if drivers_row and x.s.drivers_text %}<tr class="drivers-row"><td colspan="{{ 6 if model.method == 'matrix' else 4 }}">
+    {% if drivers_row and x.s.drivers_text %}<tr class="drivers-row"><td colspan="{{ 6 if model.method == 'matrix' else 5 if model.method == 'sotp' else 4 }}">
       <span class="muted">关键驱动：</span>{{ x.s.drivers_text }}</td></tr>{% endif %}
   {% endfor %}
   </tbody>
@@ -55,6 +59,8 @@
   {%- else %}
   股价 = {{ model.multiple_label }} × {{ model.driver_label }} ÷ 总股本 {{ model.shares | num(4) }} 亿股 × 汇率 {{ model.fx | num(4) }}（股权口径，不加减净现金）
   {%- endif %}
+  {% elif model.method == 'sotp' %}
+  股价 =（Σ 分部[驱动指标 × 倍数 × 持股 ×（1 − 折价）] + 净现金 {{ model.net_cash | num }}）×（1 − 控股公司折价）÷ 总股本 {{ model.shares | num(4) }} 亿股 × 汇率 {{ model.fx | num(4) }}
   {% else %}
   区间模型：报告没有可用的估值矩阵，情景价格取报告区间中值，只能按比例修正。
   {% endif %}

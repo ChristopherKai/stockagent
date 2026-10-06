@@ -441,3 +441,26 @@ def test_jobs_only_starts_job_runner_without_scheduler(project):
     app = create_app(project / "config.yaml", allowed_hosts=["testserver"], start_background=False)  # --no-scheduler：都不启动（任务会一直排队）
     with TestClient(app):
         assert app.state.runner._thread is None and app.state.scheduler._thread is None
+
+
+def test_sotp_baseline_pages_render(web):
+    """SOTP 模型：公司页与修正页显示分部明细与公式（不是矩阵的驱动 / 倍数两列），改倍数后修正页带「基线」对比。"""
+    from stockagent import scenarios
+
+    app = web.holder.app
+    spec = {"kind": "sotp", "call": 0, "calls": [0], "shares": 17.33, "net_cash": 30.0, "fx": 1 / 0.85541, "holdco_discount": 0.1,
+            "driver_label": "分部价值", "multiple_label": "分部倍数",
+            "segments": [{"name": "氟制冷剂", "stake": 1.0, "discount": 0.0, "method": "PE"},
+                         {"name": "硅材子公司", "stake": 0.6, "discount": 0.2, "method": "可比 PB"}],
+            "points": [{"name": n, "probability": p, "drivers": f"{n}驱动", "parts": [
+                {"name": "氟制冷剂", "driver": d, "multiple_low": lo, "multiple_high": hi},
+                {"name": "硅材子公司", "driver": s, "multiple_low": 1.0, "multiple_high": 1.2}]}
+                for n, p, d, lo, hi, s in (("bull", 0.25, 22, 9, 10, 60), ("base", 0.5, 18, 7, 8, 50), ("bear", 0.25, 14, 5, 6, 40))]}
+    card = {**CARD, "price_listing": "HK:00189", "scenarios": scenarios.compute(spec), "valuation_spec": spec}
+    app.db.save_dossier("dongyue", "mock", REPORT, card, {}, [], [], [], {})
+    tracker.rebase(app, app.watchlist.get("dongyue"))
+    assert tracker.status(app, app.watchlist.get("dongyue"))["live_model"].method == "sotp"
+    page = web.get("/c/dongyue").text
+    assert "分部（驱动 × 倍数）" in page and "氟制冷剂" in page and "硅材子公司" in page and "控股公司折价 10%" in page
+    rid = app.db.latest_revision("dongyue")["id"]
+    assert web.get(f"/c/dongyue/revisions/{rid}").status_code == 200
