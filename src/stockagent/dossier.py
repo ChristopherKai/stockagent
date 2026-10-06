@@ -23,7 +23,7 @@ import markdown as md
 from pydantic import BaseModel, field_validator, model_validator
 from requests import RequestException
 
-from . import anchor, imafeed, scenarios, valuation, verify
+from . import anchor, imafeed, review, scenarios, valuation, verify
 from .app import MARKET_LABEL, App
 from .config import Company
 from .llm import LLMError
@@ -50,7 +50,7 @@ RESEARCH_SYSTEM = """你是一名资深买方研究员，正在为「{company}�
 {rules}
 
 最终输出本部分的研究笔记（Markdown）：逐条回答研究问题，写出事实、数字、计算结果和出处；最后列出「仍不确定或缺失的数据」。
-笔记要精炼，控制在 3000 字以内，表格优先，不要写客套话，不要复述工具原文。"""
+写手只看得到这份笔记、看不到工具返回的原文，所以笔记以完整为准：凡是可能进入报告的数字都要写进来，并带口径、期间、币种与单位、出处；表格优先，表格和数字原样保留；不要大段抄工具返回的叙述性原文，不要写客套话。"""
 
 SECTIONS: list[tuple[str, str, str]] = [
     ("business", "业务与产业链", """研究问题：
@@ -487,7 +487,7 @@ def research(app: App, company: Company, key: str, title: str, questions: str, m
             + (f"{PRIOR_RULES}\n\n{_notes_text(prior)}\n\n" if prior else "")
             + "先规划要查什么，再调用工具逐项查证，最后输出本部分的研究笔记。")
     try:
-        res = app.llm.run_agent("research", system, user, box.specs(), box.call, max_steps=steps, max_tokens=12000)
+        res = app.llm.run_agent("research", system, user, box.specs(), box.call, max_steps=steps)
         text = res.text
     except LLMError as e:
         text = f"{FAILED_MARK}{e}）"
@@ -549,20 +549,25 @@ def fill_gaps(app: App, company: Company, notes: dict, market: str, progress) ->
                         for i, g in enumerate(gaps, 1))
             + f"\n\n当前行情：\n{market}\n{app.fx_line()}")
     try:
-        text = app.llm.run_agent("research", system, user, box.specs(), box.call, max_steps=steps, max_tokens=12000).text
+        text = app.llm.run_agent("research", system, user, box.specs(), box.call, max_steps=steps).text
     except LLMError as e:
         text = f"{FAILED_MARK}{e}）"
     for entry in box.log:
         entry["section"] = "补充研究"
     requests: list[dict] = []
     try:
-        items = app.llm.complete(
+        data = app.llm.complete(
             "dossier", [RESOLVE_SYSTEM.format(company_id=company.id)],
             "缺口清单：\n" + "\n".join(f"- {g['name']}：{g['why']}" for g in gaps) + f"\n\n补充研究笔记：\n{text}",
             schema=RESOLVE_SCHEMA, max_tokens=16000,
-        ).data["items"]
+        ).data
+        # complete() 这里没有 validate 钩子，模型可能漏字段：缺 name/ask 补默认值，缺 status 视为没找到
+        items = [{"name": str(it.get("name") or "未命名缺口"), "status": it.get("status") if it.get("status") in ("found", "partial", "missing") else "missing",
+                  "ask": str(it.get("ask") or "")}
+                 for it in (data or {}).get("items") or [] if isinstance(it, dict)]
         why = {g["name"]: g["why"] for g in gaps}
-        requests = [{"item": it["name"], "why": why.get(it["name"], ""), "ask": it["ask"]} for it in items if it["status"] != "found"]
+        requests = [{"item": it["name"], "why": why.get(it["name"], ""), "ask": it["ask"] or f"请补充：{it['name']}"}
+                    for it in items if it["status"] != "found"]
         count = {k: sum(1 for it in items if it["status"] == k) for k in ("found", "partial", "missing")}
         progress(f"  {company.name}：补缺完成，找到 {count['found']} 项、部分找到 {count['partial']} 项、没找到 {count['missing']} 项；"
                  f"需要你补充 {len(requests)} 项")
@@ -625,7 +630,9 @@ def apply_audit(report: str, claims: list[str], fixes: dict[int, dict]) -> tuple
 
 def _provenance_sources(header: str, notes: dict, tool_log: list, extra: str = "") -> list[str]:
     """数字溯源的语料：行情行、工具返回结果、研究笔记正文（以及使用者补充的数据）。"""
-    return [header] + [x["result"] for x in tool_log] + [x.get("text", "") for x in notes.values()] + ([extra] if extra else [])
+    # 审稿意见是模型对报告的评论，不是事实来源，不进溯源语料
+    return ([header] + [x["result"] for x in tool_log] + [x.get("text", "") for k, x in notes.items() if k != "review"]
+            + ([extra] if extra else []))
 
 
 def number_contexts(report: str, unverified: list[str], limit: int = REVISE_LIMIT) -> list[tuple[str, list[str]]]:
@@ -927,6 +934,17 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
         except LLMError as e:
             progress(f"  {company.name}：数字修订失败（报告保持原样）：{e}")
 
+    critique: dict = {}
+    if app.settings.report.review:
+        progress(f"  {company.name}：反方审稿（{app.llm.describe('review')}）…")
+        report, critique = review.review(app, report, notes_text, src)
+        if critique["objections"]:
+            high = sum(o["severity"] == "high" and not o.get("applied") for o in critique["objections"])
+            progress(f"  {company.name}：审稿提出 {len(critique['objections'])} 条意见，改写 {len(critique['applied'])} 处"
+                     + (f"，{high} 条高严重度意见未解决（见附录「审稿意见」）" if high else ""))
+        if text := review.markdown(critique):
+            notes["review"] = {"title": "审稿意见（反方）", "text": text}
+
     progress(f"  {company.name}：抽取跟踪卡…")
     listings = " / ".join(l.key for l in company.listings)
     band = app.settings.tracker.stance_band
@@ -978,7 +996,7 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
     app.db.resolve_requests(company.id, [r["item"] for r in requests])
     ids = app.db.add_requests(company.id, did, requests) if requests else []
     requests = [{**r, "id": i} for r, i in zip(requests, ids)]
-    html_path, pdf_path = render(app, company, did, report, card, header, tool_log, notes, applied, requests, added, revised)
+    html_path, pdf_path = render(app, company, did, report, card, header, tool_log, notes, applied, requests, added, revised, critique)
     app.db.set_dossier_paths(did, str(html_path), str(pdf_path) if pdf_path else None)
     return {"dossier_id": did, "html_path": html_path, "pdf_path": pdf_path, "card": card,
             "requests": requests, "fixes": applied, "added": added, "revised": revised}
@@ -1111,7 +1129,7 @@ def _find_chrome() -> str | None:
 def render(app: App, company: Company, dossier_id: int, report: str, card: dict, header: str, tool_log: list,
            notes: dict | None = None, applied: list[dict] | None = None,
            requests: list[dict] | None = None, added: list[dict] | None = None,
-           revised: list[dict] | None = None) -> tuple[Path, Path | None]:
+           revised: list[dict] | None = None, critique: dict | None = None) -> tuple[Path, Path | None]:
     now = datetime.now(CST)
     body_md = report.strip()
     # 把行情信息插到标题和导语之后
@@ -1139,6 +1157,8 @@ def render(app: App, company: Company, dossier_id: int, report: str, card: dict,
                               + (f"\n  依据：{r['evidence'][:160]}" if r["evidence"] else "") for r in fixed)
                   + ("\n" if fixed and kept else "")
                   + "\n".join(f"- 保留推算（{'、'.join(r['numbers'])}）：{r['evidence'][:160]}" for r in kept))
+    if critique and (text := review.markdown(critique)):
+        extra += "\n\n" + text
     if added:
         extra += (f"\n\n## § 关键事实补写\n\n撰写后检查了关键事实的覆盖情况，以下 {len(added)} 条原稿遗漏、已补写到对应章节：\n\n"
                   + "\n".join(f"- 〔{a['section']}〕{a['fact'][:140]}" for a in added))

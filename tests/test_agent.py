@@ -235,7 +235,7 @@ def test_dossier_end_to_end_with_mock(app, monkeypatch):
     assert "深 度 报 告" in html and "跟踪卡" in html and "研究过程与出处" in html
     d = app.db.latest_dossier("acme")
     notes = json.loads(d["notes_json"])
-    assert d["card"]["thesis"] and len(notes) == len(dossier.SECTIONS) + 2 and "gapfill" in notes and "snapshot" in notes
+    assert d["card"]["thesis"] and len(notes) == len(dossier.SECTIONS) + 3 and "gapfill" in notes and "snapshot" in notes and "review" in notes
     assert json.loads(d["tool_log_json"])  # 模拟 agent 调用过工具
     trig = app.db.triggers("acme")
     assert trig and trig[0]["kind"] == "price" and trig[0]["listing"] == "HK:01234"  # 无法识别时归到定价上市地（港股优先）
