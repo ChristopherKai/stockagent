@@ -15,7 +15,7 @@ from pathlib import Path
 import requests
 
 from . import app as appmod
-from . import brief, consensus, docs, dossier, evaluate, imafeed, jobs, monitor, newco, notify, profile, tracker, triage, twitterfeed
+from . import brief, consensus, coverage, docs, dossier, evaluate, imafeed, jobs, monitor, newco, notify, profile, tracker, triage, twitterfeed
 from .app import SOURCE_LABEL, App, backfill_releases, refine_news_dates
 from .config import ConfigError
 from .llm import LLMError
@@ -169,6 +169,10 @@ def _run(app: App, args) -> None:
     print(f"5/6 标的追踪（{app.llm.describe('tracker') if use_llm else '--no-llm：只检查新报告与待处理依据'}）…")
     res = tracker.run(app, companies, origin="run", use_llm=use_llm, progress=print)
     _print(res.msgs)
+    gaps = coverage.report(app, companies)
+    if gaps:
+        print("数据缺口汇总（完整列表：stock status）：")
+        _print(gaps)
     print("6/6 ", end="")
     _brief(app, companies, use_llm, args.push, args.open, tracked=res.notable)
     print(f"完成，用时 {time.monotonic() - t0:.0f} 秒")
@@ -840,6 +844,9 @@ def cmd_status(args) -> None:
     for t in LLM_TASKS:
         reason = app.llm.unavailable_reason(t)
         print(f"LLM {t}：{app.llm.describe(t)}" + (f"（不可用：{reason}）" if reason else ""))
+    gaps = coverage.report(app, app.watchlist.companies)
+    print("数据缺口：" + ("无" if not gaps else ""))
+    _print(gaps)
     chans = notify.channels(app.settings)
     print("推送渠道：" + ("、".join(chans) if chans else "未配置"))
     kbs = app.settings.sources.ima.knowledge_bases
