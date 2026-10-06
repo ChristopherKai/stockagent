@@ -15,9 +15,9 @@ import statistics
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from .tools import MATRIX_BASES, infer_basis, matrix_price
+from .tools import MATRIX_BASES, infer_basis, matrix_price, sotp_price
 
 ScenarioName = Literal["bull", "base", "bear"]
 SCENARIOS = ("bull", "base", "bear")
@@ -31,22 +31,35 @@ FX_STALE_DAYS = 5       # 汇率数据超过 5 天视为不可用
 TARGET_LABEL = "目标价（情景加权估值）"
 
 
+class Segment(BaseModel):
+    """SOTP 的一个分部：价值 = 驱动指标 × 倍数；归属价值 = 价值 × 持股 ×（1 − 折价）。"""
+    name: str
+    driver: float                  # 驱动指标（报告币种，如分部利润；没有拆分时为分部的 100% 价值，倍数为 1）
+    multiple: float
+    stake: float = 1.0
+    discount: float = 0.0
+    method: str = ""               # 估值依据（展示用）
+
+
 class ScenarioPoint(BaseModel):
     name: ScenarioName
-    driver: float
+    driver: float                  # method=sotp 时不用（0），价格由 segments 算出
     multiple: float
     probability: float
     low: float | None = None       # 深度报告原区间（只用于展示）
     high: float | None = None
     drivers_text: str = ""         # 跟踪卡中的关键驱动说明
+    segments: list[Segment] = []   # method=sotp：各分部的驱动与倍数（每个情景的分部名称与顺序一致）
+    holdco_discount: float | None = None  # method=sotp：本情景的控股公司折价（情景之间可以不同）；None = 用模型的默认值
 
 
 class ValuationModel(BaseModel):
     """method=matrix：情景股价 = 倍数 × 驱动 ÷ 股本 × 汇率（basis=equity，PE、PB 等股权倍数）
     或（倍数 × 驱动 + 净现金）÷ 股本 × 汇率（basis=ev，EV 倍数）；
+    method=sotp：分部加总，情景股价 =（Σ 分部驱动 × 倍数 × 持股 ×（1 − 折价）+ 净现金）×（1 − 控股公司折价）÷ 股本 × 汇率；
     method=range：没有可用矩阵时的退路，driver 即情景价格，只能按比例修正。"""
 
-    method: Literal["matrix", "range"] = "matrix"
+    method: Literal["matrix", "sotp", "range"] = "matrix"
     # 旧基线（区分口径之前）一律按「加净现金」算出卡片区间，缺省 ev 使其数值不变
     basis: Literal["equity", "ev"] = "ev"
     driver_label: str
@@ -60,6 +73,15 @@ class ValuationModel(BaseModel):
     source: str = ""
     scenarios: list[ScenarioPoint] = Field(min_length=1)
     anchor: dict | None = None     # 深度报告写作时的程序参考价（anchor.compute），只用于提示偏离，不参与计算
+    holdco_discount: float = 0.0   # method=sotp：控股公司折价的默认值（情景可以各自覆盖）
+
+    @model_validator(mode="after")
+    def _segments_consistent(self):
+        if self.method == "sotp":
+            names = [[g.name for g in s.segments] for s in self.scenarios]
+            if not names[0] or any(n != names[0] for n in names):
+                raise ValueError("SOTP 模型每个情景都要有分部，且分部名称与顺序一致")
+        return self
 
     def scenario(self, name: str) -> ScenarioPoint | None:
         return next((s for s in self.scenarios if s.name == name), None)
@@ -67,6 +89,10 @@ class ValuationModel(BaseModel):
     def price(self, s: ScenarioPoint) -> float:
         if self.method == "range":
             return max(0.0, s.driver)
+        if self.method == "sotp":
+            holdco = self.holdco_discount if s.holdco_discount is None else s.holdco_discount
+            return max(0.0, sotp_price([(g.driver * g.multiple, g.stake, g.discount) for g in s.segments],
+                                       self.shares, self.net_cash, self.fx, holdco))
         return max(0.0, matrix_price(s.driver, s.multiple, self.shares, self.net_cash, self.fx, self.basis))
 
     def prices(self) -> dict[str, float]:
@@ -328,6 +354,87 @@ def _range_model(card_scenarios: list[dict], listing: str, currency: str, source
                           source=source, scenarios=pts).normalized()
 
 
+def spec_scenarios(spec: dict) -> list[dict]:
+    """程序定价情景（scenarios.py）的价格区间：每个情景用倍数下沿 / 上沿按公式算出——
+    矩阵：（倍数 × 驱动 [+ 净现金]）÷ 股本 × 汇率；SOTP：各分部 驱动 × 倍数 × 持股 ×（1 − 折价）加总，加净现金、扣控股折价。
+    返回 [{name, price_low, price_high, probability, drivers}]（与跟踪卡的情景同形）。"""
+    if spec.get("kind") == "sotp":
+        seg = {g["name"]: g for g in spec["segments"]}
+
+        def price(point: dict, end: str) -> float:  # 折价与控股折价可以随情景变：优先用情景里的，没有再用清单 / spec 的默认值
+            return max(0.0, sotp_price([(x["driver"] * x[f"multiple_{end}"], seg[x["name"]]["stake"], x.get("discount", seg[x["name"]].get("discount", 0.0)))
+                                        for x in point["parts"]], spec["shares"], spec["net_cash"], spec["fx"],
+                                       point.get("holdco_discount", spec.get("holdco_discount", 0.0))))
+        return [{"name": p["name"], "price_low": round(price(p, "low"), 4), "price_high": round(price(p, "high"), 4),
+                 "probability": p["probability"], "drivers": p.get("drivers", "")} for p in spec["points"]]
+
+    def mprice(driver: float, multiple: float) -> float:
+        return max(0.0, matrix_price(driver, multiple, spec["shares"], spec["net_cash"], spec["fx"], spec["basis"]))
+    return [{"name": p["name"], "price_low": round(mprice(p["driver"], p["multiple_low"]), 4),
+             "price_high": round(mprice(p["driver"], p["multiple_high"]), 4),
+             "probability": p["probability"], "drivers": p.get("drivers", "")} for p in spec["points"]]
+
+
+def _year_flag(label: str) -> list[str]:
+    if (y := _year(label)) and y <= date.today().year:
+        return [f"驱动指标年份（{y}）已到，披露年报后应重跑深度报告，把驱动滚动到下一年"]
+    return []
+
+
+def _model_from_spec(app, listing, spec: dict, did, created: str, anchor_data: dict | None) -> tuple[ValuationModel, list[str]] | None:
+    """跟踪卡带有程序定价的情景（card["valuation_spec"]）时直接精确重建：驱动与倍数就是当时定下的点，不必从价格反推。
+    spec 残缺或股本对不上行情时返回 None，调用方退回从工具日志反推的旧办法。"""
+    sotp = spec.get("kind") == "sotp"
+    try:
+        shares, net_cash, fx = float(spec["shares"]), float(spec["net_cash"]), float(spec["fx"])
+        basis = "ev" if sotp else spec["basis"]
+        scen = spec_scenarios(spec)
+        pts = {p["name"]: p for p in spec["points"]}
+        seg = {g["name"]: g for g in spec["segments"]} if sotp else {}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if basis not in MATRIX_BASES or shares <= 0 or not scen:
+        return None
+    shares_ref = quote_shares(app.db.quote(app.secid(listing)), listing)
+    if shares_ref and abs(shares / shares_ref - 1) > SHARES_TOL:
+        return None
+    flags: list[str] = []
+    on = date.fromisoformat(created) if created else date.today()
+    report_ccy = infer_report_currency(app, fx, listing.currency, on, spec.get("driver_label", ""))
+    if not report_ccy:
+        flags.append(f"无法判断报告币种（矩阵汇率 {fx:g}），之后不按最新汇率刷新")
+    if sotp:  # 每个分部取倍数区间的中点：价格对倍数线性，所以情景价格恰好等于区间中点
+        points = [ScenarioPoint(
+            name=s["name"], driver=0.0, multiple=1.0, probability=s["probability"], low=s["price_low"], high=s["price_high"],
+            drivers_text=s["drivers"],
+            holdco_discount=pts[s["name"]].get("holdco_discount", spec.get("holdco_discount", 0.0)),
+            segments=[Segment(name=x["name"], driver=x["driver"], multiple=(x["multiple_low"] + x["multiple_high"]) / 2,
+                              stake=seg[x["name"]]["stake"], discount=x.get("discount", seg[x["name"]].get("discount", 0.0)),
+                              method=seg[x["name"]].get("method", ""))
+                      for x in pts[s["name"]]["parts"]]) for s in scen]
+        try:
+            model = ValuationModel(
+                method="sotp", driver_label="分部价值", multiple_label="分部倍数", shares=shares, net_cash=net_cash, fx=fx,
+                report_currency=report_ccy, price_currency=listing.currency, listing=listing.key,
+                holdco_discount=float(pts["base"].get("holdco_discount", spec.get("holdco_discount")) or 0.0) if "base" in pts else 0.0,
+                source=f"深度报告 #{did} · 程序定价情景（第 {int(spec.get('call', 0)) + 1} 次工具调用 sotp 的分部加总）",
+                scenarios=points, anchor=anchor_data).normalized()
+        except ValueError:
+            return None
+        return model, flags
+    points = [ScenarioPoint(name=s["name"], driver=pts[s["name"]]["driver"],
+                            multiple=(pts[s["name"]]["multiple_low"] + pts[s["name"]]["multiple_high"]) / 2,
+                            probability=s["probability"], low=s["price_low"], high=s["price_high"], drivers_text=s["drivers"])
+              for s in scen]
+    model = ValuationModel(
+        method="matrix", basis=basis, driver_label=spec.get("driver_label", "驱动指标"), multiple_label=spec.get("multiple_label", "倍数"),
+        shares=shares, net_cash=net_cash, fx=fx, report_currency=report_ccy, price_currency=listing.currency, listing=listing.key,
+        source=f"深度报告 #{did} · 程序定价情景（第 {int(spec.get('call', 0)) + 1} 次工具调用 valuation_matrix 的矩阵）",
+        scenarios=points, anchor=anchor_data,
+    ).normalized()
+    return model, flags + _year_flag(model.driver_label)
+
+
 def build_baseline(app, company, dossier: dict) -> tuple[ValuationModel, list[str]]:
     """由深度报告（跟踪卡的情景 + 工具日志里的估值矩阵）在代码中重建估值模型，不调用 LLM。
     返回 (模型, 标注)。标注提示需要人工留意的地方（股本存疑、驱动年份已到、只能按比例修正等）。"""
@@ -344,6 +451,10 @@ def build_baseline(app, company, dossier: dict) -> tuple[ValuationModel, list[st
     if not scen:
         raise ValueError(f"深度报告 #{did} 的跟踪卡没有情景价格，无法建立估值基线")
 
+    if spec := card.get("valuation_spec"):  # 程序定价的情景：精确重建，不必从价格反推
+        if built := _model_from_spec(app, listing, spec, did, str(dossier.get("created_at", ""))[:10], card.get("anchor")):
+            return built
+        flags.append("跟踪卡里程序定价的情景参数残缺或股本与行情不符，改从工具日志里的矩阵反推")
     shares_ref = quote_shares(app.db.quote(app.secid(listing)), listing)
     if shares_ref is None:
         flags.append(f"没有 {listing.display} 的行情快照，未能核对估值矩阵的股本")
@@ -389,9 +500,7 @@ def build_baseline(app, company, dossier: dict) -> tuple[ValuationModel, list[st
     if basis == "ev" and net_cash and infer_basis(model.multiple_label) == "equity":
         flags.append(f"矩阵对 {model.multiple_label} 这类股权倍数也加了净现金 {net_cash:g}（区分口径之前的旧算法），"
                      "情景价格按报告原样保留；重跑深度报告后按股权口径计算")
-    if (y := _year(model.driver_label)) and y <= date.today().year:
-        flags.append(f"驱动指标年份（{y}）已到，披露年报后应重跑深度报告，把驱动滚动到下一年")
-    return model, flags
+    return model, flags + _year_flag(model.driver_label)
 
 
 # ---------------------------------------------------------------- 修正路径
@@ -400,8 +509,11 @@ PATH_OPS = ("set", "add", "mul")
 
 
 def paths(model: ValuationModel) -> list[str]:
-    """模型中可以修正的路径（供 LLM 的 JSON schema 做枚举）。"""
+    """模型中可以修正的路径（供 LLM 的 JSON schema 做枚举）。SOTP 的分部路径形如 bull.p1.driver（p1 = 第 1 个分部）。"""
     names = [s.name for s in model.scenarios]
+    if model.method == "sotp":
+        segs = [f"p{i + 1}.{leaf}" for i in range(len(model.scenarios[0].segments)) for leaf in ("driver", "multiple")]
+        return [f"{n}.{x}" for n in names + ["all"] for x in segs] + ["g.shares", "g.net_cash"] + [f"prob.{n}" for n in names]
     out = [f"{n}.driver" for n in names] + ["all.driver"]
     if model.method == "matrix":
         out += [f"{n}.multiple" for n in names] + ["all.multiple", "g.shares"] + (["g.net_cash"] if model.basis == "ev" else [])
@@ -412,6 +524,10 @@ def paths(model: ValuationModel) -> list[str]:
 FACT_PATHS = ("g.shares", "g.net_cash")
 
 
+def _segment(s: ScenarioPoint, key: str) -> Segment:
+    return s.segments[int(key[1:]) - 1]
+
+
 def path_label(model: ValuationModel, path: str) -> str:
     head, _, attr = path.partition(".")
     if head == "g":
@@ -419,6 +535,10 @@ def path_label(model: ValuationModel, path: str) -> str:
     if head == "prob":
         return f"{SCENARIO_LABEL.get(attr, attr)}情景概率"
     who = "全部情景" if head == "all" else SCENARIO_LABEL.get(head, head)
+    if "." in attr:  # SOTP 分部
+        key, leaf = attr.split(".")
+        seg = _segment(model.scenarios[0], key)
+        return f"{who}·{seg.name}{'驱动指标' if leaf == 'driver' else '倍数'}"
     what = model.driver_label if attr == "driver" else f"{model.multiple_label} 倍数"
     return f"{who}·{what}"
 
@@ -432,6 +552,9 @@ def get_values(model: ValuationModel, path: str) -> list[tuple[str, float]]:
         s = model.scenario(attr)
         return [(path, s.probability)] if s else []
     targets = model.scenarios if head == "all" else [s for s in model.scenarios if s.name == head]
+    if "." in attr:
+        key, leaf = attr.split(".")
+        return [(f"{s.name}.{attr}", getattr(_segment(s, key), leaf)) for s in targets]
     return [(f"{s.name}.{attr}", getattr(s, attr)) for s in targets]
 
 
@@ -441,6 +564,9 @@ def set_value(model: ValuationModel, path: str, value: float) -> None:
         setattr(model, attr, value)
     elif head == "prob":
         model.scenario(attr).probability = value
+    elif "." in attr:
+        key, leaf = attr.split(".")
+        setattr(_segment(model.scenario(head), key), leaf, value)
     else:
         setattr(model.scenario(head), attr, value)
 
@@ -459,7 +585,7 @@ def check_value(model: ValuationModel, path: str, value: float) -> str | None:
     """新值的合法性；返回错误说明，合法返回 None。"""
     if not math.isfinite(value):
         return "结果不是有限数值"
-    attr = path.partition(".")[2]
+    attr = path.rpartition(".")[2]
     if path == "g.shares" and value <= 0:
         return "总股本必须为正"
     if attr == "multiple" and value <= 0:
@@ -598,6 +724,19 @@ def describe(model: ValuationModel, target_mode: str = "expected", price: float 
                 "|---|---|---|---|---|---|---|"]
         rows += [f"| {SCENARIO_LABEL[s.name]} | {fmt(s.driver)} | {fmt(s.multiple)} | {fmt(model.price(s))} | {probs[s.name]:.0%} | "
                  f"{fmt(s.low)}–{fmt(s.high)} | {s.drivers_text.replace('|', '/')} |" for s in model.scenarios]
+    elif model.method == "sotp":
+        head = (f"估值方法：{formula(model)}"
+                + (f"（1 {CURRENCY_LABEL.get(model.report_currency, model.report_currency)} 折合 "
+                   f"{fmt(model.fx, 4)} {CURRENCY_LABEL.get(ccy, ccy)}）" if model.report_currency else ""))
+        rows = [f"| 情景 | 股价（{ccy}） | 概率 | 报告原区间 | 关键驱动 |", "|---|---|---|---|---|"]
+        rows += [f"| {SCENARIO_LABEL[s.name]} | {fmt(model.price(s))} | {probs[s.name]:.0%} | {fmt(s.low)}–{fmt(s.high)} | "
+                 f"{s.drivers_text.replace('|', '/')} |" for s in model.scenarios]
+        rows += ["", "分部明细（路径 p1、p2… 对应第 1、2… 个分部；价值 = 驱动指标 × 倍数，归属价值 = 价值 × 持股 ×（1 − 折价））："]
+        for s in model.scenarios:
+            rows.append(f"- {SCENARIO_LABEL[s.name]}：" + "；".join(
+                f"p{i}={g.name} {fmt(g.driver)} × {fmt(g.multiple)}（持股 {g.stake:.0%}、折价 {g.discount:.0%}"
+                + (f"、{g.method}" if g.method else "") + "）" for i, g in enumerate(s.segments, 1))
+                + f"；控股公司折价 {(model.holdco_discount if s.holdco_discount is None else s.holdco_discount):.0%}")
     else:
         head = "估值方法：区间模型（报告没有可用的估值矩阵，情景价格取报告区间中值，只能按比例修正）"
         rows = [f"| 情景 | 股价（{ccy}） | 概率 | 报告原区间 | 关键驱动 |", "|---|---|---|---|---|"]
@@ -618,6 +757,9 @@ def describe(model: ValuationModel, target_mode: str = "expected", price: float 
 
 def formula(model: ValuationModel) -> str:
     """估值公式的一行说明（describe、WebUI 共用）。"""
+    if model.method == "sotp":
+        return (f"（Σ 分部[驱动指标 × 倍数 × 持股 ×（1 − 折价）] + 净现金 {fmt(model.net_cash)}）×（1 − 控股公司折价，各情景见分部明细）"
+                f"÷ 总股本 {fmt(model.shares, 4)} 亿股 × 汇率 {fmt(model.fx, 4)}")
     if model.basis == "ev":
         return (f"（{model.multiple_label} × {model.driver_label} + 净现金 {fmt(model.net_cash)}）÷ 总股本 "
                 f"{fmt(model.shares, 4)} 亿股 × 汇率 {fmt(model.fx, 4)}")

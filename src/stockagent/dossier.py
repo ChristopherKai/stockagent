@@ -23,7 +23,7 @@ import markdown as md
 from pydantic import BaseModel, field_validator, model_validator
 from requests import RequestException
 
-from . import anchor, imafeed, verify
+from . import anchor, imafeed, scenarios, valuation, verify
 from .app import MARKET_LABEL, App
 from .config import Company
 from .llm import LLMError
@@ -70,10 +70,11 @@ SECTIONS: list[tuple[str, str, str]] = [
 3. 反向 DCF：用 reverse_dcf 计算当前市值隐含的增长率（利润或现金流须为正，注意币种和单位一致）；亏损公司说明不适用，改用收入口径。
 4. 敏感性矩阵：选最关键的驱动指标（如下一年净利润或收入），给 4–6 个取值和 4–6 个倍数，用 valuation_matrix 计算隐含股价（股本、净现金、汇率要准确；股价、汇率与 current_price 一律用定价上市地，倍数要与定价上市地的市场一致——A+H 公司以 H 股定价时参照 H 股自身历史估值与港股可比，或按当前 AH 溢价折算），原样保留工具输出的表格。口径：PE、PB 等股权倍数用 basis=equity（倍数 × 净利润已是股权价值，不再加减净现金）；EV/EBITDA、EV/Sales 等企业价值倍数用 basis=ev 并填净现金（净负债为负数）。驱动指标的取值要覆盖一致预期，倍数要覆盖定价上市地自身的历史分位（见「程序参考价」；工具也会自动补上缺的行列）。
 5. 历史估值分位：用 valuation_history 看当前 PE/PB 处于过去 3–5 年的什么位置（同业也可以查）。
-6. 适用时补充：有上市子公司或多元业务的用 sotp 做分部加总；稳定分红的用 ddm 做股息贴现。
+6. 适用时补充：有上市子公司或多元业务的用 sotp 做分部加总（分部利润一律换算成归母口径：持股比例填公司实际持有的比例，或先扣掉少数股东损益再填 100%，不能把非全资子公司的全部利润算给母公司；按「驱动指标 × 倍数」估值的分部请填 driver 与 multiple，不要只写 value；牛 / 基准 / 熊各调用一次，分部名称、持股、股本、净现金、汇率保持一致，折价与控股公司折价可以随情景变，程序据此为情景定价）；稳定分红的用 ddm 做股息贴现。
 7. 卖方观点：用 broker_research 取一致预期（A 股为评级分布与盈利预测中位数，港股为目标价均值与区间），再用 web_search 查主要机构最新的目标价和盈利预测（注明机构与日期）；查不到就写「未查到」。用 earnings_vs_consensus 看一致预期近 30/90 天的修正方向，以及公司历史上业绩是否常超/不及预期。
 8. EV 与自由现金流：用 fcf_yield 取 EV、FCF Yield（TTM、近 3 个年度、3 年平均）、净现金占市值、是否 Negative EV、FCF 累计覆盖 EV 的年数；周期股以多年平均为准；FCF 为负或处于扩产期时，用卖方盈利预测或情景估算前瞻 FCF，传入 forward_fcf 计算前瞻 FCF Yield。可比公司也可以查。
-9. 股东回报与「免费期权」：分红、回购的历史、意愿与触发条件（如母公司偿债需求、港股通纳入、董事会政策）；主业估值能否覆盖市值，新业务是否被市场零估值。"""),
+9. 股东回报与「免费期权」：分红、回购的历史、意愿与触发条件（如母公司偿债需求、港股通纳入、董事会政策）；主业估值能否覆盖市值，新业务是否被市场零估值。
+10. 指定主锚：在笔记末尾明确写出 12 个月情景以哪一种估值为主锚（敏感性矩阵，或 SOTP 分部加总）及理由；同时做了矩阵和 SOTP 的，说明两者基准价的差距与原因。程序会按你指定的主锚为情景定价，并用另一种方法交叉检查。"""),
     ("recent", "近期动态、催化剂与风险", """研究问题：
 1. 用 company_events 查看近 90 天（days=90）的重要事件，概括最重要的 5–8 件及其影响；关键公告可用 fetch_url 读原文。最近一次业绩相对一致预期如何，用 earnings_vs_consensus（程序计算）。港股用 southbound 看南向资金的增减持，用 ccass 看近 20 日有无大额转仓或集中度变化。
 2. 未来 12 个月可能的催化剂：业绩披露、新产品或产能投产、解禁、指数或港股通调整、政策节点等，尽量给出时间和可检验的指标。
@@ -113,7 +114,7 @@ WRITER_PART2 = """前半部分已经写好（附在后面，供你保持观点�
 ## § 估值：框架与可比
 （可比公司表、EV 与 FCF Yield 表（注明 TTM 与多年平均的差异）、反向 DCF 结论、敏感性矩阵原样引用；股东回报意愿与市场给新业务的隐含估值）
 ## § 12 个月情景
-（牛市/基准/熊市：价格区间、相对现价涨跌幅、主观概率（合计 100%）、关键驱动；价格区间必须来自敏感性矩阵或笔记中的计算。笔记里有「程序参考价」时，写出基准情景相对参考价的偏离；偏离超过 ±{anchor_band} 的，必须说明是盈利假设还是倍数与一致预期、历史估值不同，依据是什么）
+（牛市/基准/熊市：价格区间、相对现价涨跌幅、主观概率（合计 100%）、关键驱动；价格区间必须来自敏感性矩阵、分部加总或笔记中的计算；笔记里有「12 个月情景（程序计算）」时，价格区间与概率必须逐项照抄，不得改动或重新估算，只写理由与分析。笔记里有「程序参考价」时，写出基准情景相对参考价的偏离；偏离超过 ±{anchor_band} 的，必须说明是盈利假设还是倍数与一致预期、历史估值不同，依据是什么）
 ## § 股权、控制与解禁
 ## § 监管与结构
 ## § 证伪条件：什么情况说明判断错了
@@ -127,7 +128,7 @@ WRITER_PART2 = """前半部分已经写好（附在后面，供你保持观点�
 
 CARD_SYSTEM = """你是风控研究员。根据深度报告整理一张可由程序自动跟踪的「跟踪卡」，只输出 JSON。
 - thesis：一句话核心判断；stance：bullish / neutral / bearish，按 12 个月情景定义——bullish 偏多 = 概率加权价格比现价高 {band} 以上，且跌破现价的概率低于 50%；bearish 偏空 = 概率加权价格比现价低 {band} 以上，或基准情景低于现价且跌破现价的概率高于 50%；其余为 neutral 中性。报告的判断与这个定义不一致时，按报告的判断填，但必须在 thesis 里写明理由（程序会按情景数字核对并标注）。
-- scenarios：bull / base / bear 三种情景。price_low、price_high 用报告中的价格（第一上市地 {price_listing} 的股价，单位 {currency}）；probability 用 0–1 的小数，三者合计为 1；drivers 写关键驱动。
+- scenarios：bull / base / bear 三种情景。price_low、price_high 用报告中的价格（第一上市地 {price_listing} 的股价，单位 {currency}；程序会用自己算出的情景覆盖，抽取时照报告写即可）；probability 用 0–1 的小数，三者合计为 1；drivers 写关键驱动。
 - kill_criteria：5–8 条证伪条件（一旦发生说明判断可能错了）。direction：down 向下（情况比判断更差）/ up 向上（情况比判断更好）。
   证伪的方向取决于立场：bullish 被 down 证伪、bearish 被 up 证伪、neutral 两个方向都会。bullish 至少 3 条 down；bearish 至少 3 条 up；neutral 两个方向各至少 2 条。与立场同向的条件（如偏空公司的「交付不及预期」）可以保留，作为风险加剧或印证的信号。
   · 能用价格衡量的写 kind=price，并给出 metric：close（收盘价）/ drawdown_from_high（距 250 日高点的回撤比例，0.3 表示 30%）/ ret_20d（20 日涨跌幅，小数）/ ah_premium（A 相对 H 的溢价，小数，仅 A+H 公司）；listing 取值 {listings}；operator 为 < 或 >；threshold 为数字。
@@ -181,6 +182,23 @@ AUDIT_SCHEMA = {"type": "object", "properties": {"checks": {"type": "array", "it
                    "evidence": {"type": "string"}},
     "required": ["id", "contradicted", "replacement", "evidence"], "additionalProperties": False}}},
     "required": ["checks"], "additionalProperties": False}
+
+REVISE_SYSTEM = """你是研究主管，负责核对报告里的数字有没有出处。下面给你研究笔记（事实来源，含工具查到的数据和使用者补充的数据）、报告全文（只用来看清句子的上下文和推算用到的其他数字），以及报告中程序没能在笔记里找到对应的数字所在的句子或表格行（每条带编号和数字）。
+逐条判断：
+- keep：该数字是推算出来的（增速、占比、倍数、概率加权值等），写法合理；evidence 写出推算过程与所用的数字。推算用到的数字可以来自研究笔记，也可以来自报告其他位置已经写明依据的数字（例如情景表里的价格与概率）。不改动。
+- fix：笔记里有对应的数字，但报告写错了或写法不同；replacement 写出改正后的完整句子或表格行，保持原来的意思、语气和格式，数字与出处照笔记写。
+- remove：笔记里找不到依据，也无法由笔记推算；replacement 写出去掉这个数字、其余意思不变的完整句子或表格行（需要时说明「笔记中未提供」）。
+硬性要求：replacement 只能使用笔记里已有的数字，不得引入任何新数字；表格行的列数必须与原行一致；不改动与该数字无关的内容。
+只输出 JSON。"""
+
+REVISE_SCHEMA = {"type": "object", "properties": {"checks": {"type": "array", "items": {
+    "type": "object",
+    "properties": {"id": {"type": "integer"}, "action": {"type": "string", "enum": ["keep", "fix", "remove"]},
+                   "replacement": {"type": "string"}, "evidence": {"type": "string"}},
+    "required": ["id", "action", "replacement", "evidence"], "additionalProperties": False}}},
+    "required": ["checks"], "additionalProperties": False}
+
+REVISE_LIMIT = 40  # 一次修订最多处理的句子数
 
 SECTION_NAMES = ["现状", "核心洞见", "公司与业务", "盈利驱动与利润率", "收入质量与客户结构", "资本、现金与稀释", "关键经营变量",
                  "估值：框架与可比", "12 个月情景", "股权、控制与解禁", "监管与结构", "证伪条件：什么情况说明判断错了"]
@@ -587,6 +605,70 @@ def apply_audit(report: str, claims: list[str], fixes: dict[int, dict]) -> tuple
     return report, applied
 
 
+def _provenance_sources(header: str, notes: dict, tool_log: list, extra: str = "") -> list[str]:
+    """数字溯源的语料：行情行、工具返回结果、研究笔记正文（以及使用者补充的数据）。"""
+    return [header] + [x["result"] for x in tool_log] + [x.get("text", "") for x in notes.values()] + ([extra] if extra else [])
+
+
+def number_contexts(report: str, unverified: list[str], limit: int = REVISE_LIMIT) -> list[tuple[str, list[str]]]:
+    """每个未追溯数字所在的表格整行或句子，同一句里的数字合并。返回 [(上下文, [数字])]。"""
+    units: list[str] = []
+    for line in report.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("|"):
+            units.append(line)
+        else:
+            units += [x.strip() for x in re.split(r"(?<=[。！？；])", line) if x.strip()]
+    found: dict[str, list[str]] = {}
+    for raw in unverified:
+        bare = raw.rstrip("%亿万")
+        for unit in units:
+            if raw in unit or bare in unit:
+                found.setdefault(unit, []).append(raw)
+                break
+    return list(found.items())[:limit]
+
+
+def revise_unverified(app: App, report: str, notes_text: str, sources: list[str]) -> tuple[str, list[dict], int]:
+    """把报告里无法追溯的数字所在的句子交给模型，对照研究笔记改正或去掉，只做一次。
+    返回 (报告, 记录, 待核对的数字个数)。记录 = [{action, original, replacement, evidence, numbers}]，action 含 keep（推算保留）。
+    模型的改写要经代码把关：不能引入原句没有的未追溯数字（表格行的列数由 apply_audit 把关）；某批失败时跳过该批。"""
+    chk = verify.check(report, sources)
+    ctxs = number_contexts(report, chk.unverified)
+    if not ctxs:
+        return report, [], len(chk.unverified)
+    claims = [c for c, _ in ctxs]
+    log_: list[dict] = []
+    fixes: dict[int, dict] = {}
+    for start in range(0, len(claims), CHECK_BATCH):
+        part = ctxs[start:start + CHECK_BATCH]
+        user = (f"研究笔记：\n{notes_text}\n\n报告全文：\n{report}\n\n需要核对的句子（括号内是找不到出处的数字）：\n"
+                + "\n".join(f"[{i}]（{'、'.join(nums)}）{c}" for i, (c, nums) in enumerate(part)))
+        try:
+            checks = app.llm.complete("dossier", [REVISE_SYSTEM], user, schema=REVISE_SCHEMA, max_tokens=16000).data["checks"]
+        except LLMError as e:
+            log.warning("数字修订第 %d–%d 条失败，跳过：%s", start + 1, start + len(part), e)
+            continue
+        for c in checks:
+            if not 0 <= c["id"] < len(part):
+                continue
+            idx, (orig, nums) = start + c["id"], part[c["id"]]
+            repl = c["replacement"].strip()
+            if c["action"] == "keep":
+                log_.append({"action": "keep", "original": orig, "replacement": "", "evidence": c["evidence"], "numbers": nums})
+            elif repl and repl != orig:
+                # 改写不能引入原句没有的无出处数字
+                if set(verify.check(repl, sources).unverified) <= set(verify.check(orig, sources).unverified):
+                    fixes[idx] = {"replacement": repl, "evidence": c["evidence"], "action": c["action"], "numbers": nums}
+    report, applied = apply_audit(report, claims, fixes)
+    by_orig = {claims[i]: fx for i, fx in fixes.items()}
+    log_ += [{"action": by_orig[a["original"]]["action"], "original": a["original"], "replacement": a["replacement"],
+              "evidence": a["evidence"], "numbers": by_orig[a["original"]]["numbers"]} for a in applied]
+    return report, log_, len(chk.unverified)
+
+
 def key_facts(app: App, notes_text: str) -> list[dict]:
     return app.llm.complete("dossier", [KEYFACTS_SYSTEM], notes_text, schema=KEYFACTS_SCHEMA, max_tokens=16000).data["facts"][:20]
 
@@ -623,6 +705,27 @@ def ensure_coverage(app: App, report: str, facts: list[dict]) -> tuple[str, list
     return report, added
 
 
+def failed_sections(notes: dict) -> list[tuple[str, str, str]]:
+    """研究笔记中失败的子任务 [(key, 标题, 笔记正文)]。"""
+    return [(key, title, notes.get(key, {}).get("text", "")) for key, title, _ in SECTIONS
+            if notes.get(key, {}).get("text", "").startswith(FAILED_MARK)]
+
+
+def _redo_failed(app: App, company: Company, notes: dict, tool_log: list, market: str, progress) -> tuple[dict, list]:
+    """把失败的研究子任务重做一次（并行）。成功的笔记与工具日志替换旧的，失败的保持原样由调用方处理。"""
+    failed = [sec for sec in SECTIONS if sec[0] in {k for k, _, _ in failed_sections(notes)}]
+    if not failed:
+        return notes, tool_log
+    progress(f"  {company.name}：重新研究失败的部分：{'、'.join(sec[1] for sec in failed)}…")
+    workers = len(failed) if app.settings.agent.parallel_sections else 1
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        redo = list(pool.map(lambda sec: research(app, company, *sec, market), failed))
+    for key, title, text, log_ in redo:
+        notes[key] = {"title": title, "text": text}
+        tool_log = [x for x in tool_log if x.get("section") != title] + log_
+    return notes, tool_log
+
+
 def generate(app: App, company: Company, progress=print, reuse_notes: bool = False, refill: bool = False) -> dict:
     """生成深度报告并保存；返回 {dossier_id, html_path, pdf_path, card, requests, fixes}。
     流程：研究（并行）→ 补缺检索 → 分段撰写（超长自动续写）→ 核对「未披露」说法 → 跟踪卡 → 渲染。
@@ -634,15 +737,6 @@ def generate(app: App, company: Company, progress=print, reuse_notes: bool = Fal
         notes_path, data = saved
         notes, tool_log = data["notes"], data["tool_log"]
         progress(f"  {company.name}：复用研究笔记 {notes_path.name}（工具调用 {len(tool_log)} 次）")
-        failed = [sec for sec in SECTIONS if notes.get(sec[0], {}).get("text", "").startswith(FAILED_MARK)]
-        if failed:  # 只重做失败的研究子任务
-            progress(f"  {company.name}：重新研究失败的部分：{'、'.join(sec[1] for sec in failed)}…")
-            workers = len(failed) if app.settings.agent.parallel_sections else 1
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                redo = list(pool.map(lambda sec: research(app, company, *sec, market), failed))
-            for key, title, text, log_ in redo:
-                notes[key] = {"title": title, "text": text}
-                tool_log = [x for x in tool_log if x.get("section") != title] + log_
     else:
         data = {"created_at": datetime.now(CST).isoformat()}
         progress(f"  {company.name}：计算程序参考价（一致预期 × 历史 PE）…")
@@ -656,12 +750,20 @@ def generate(app: App, company: Company, progress=print, reuse_notes: bool = Fal
         notes_path = _notes_dir(app) / f"{company.id}_{datetime.now(CST):%Y%m%d_%H%M%S}.json"
         progress(f"  {company.name}：研究完成（工具调用 {len(tool_log)} 次）")
 
+    requests = data.get("requests") or []
+
     def save() -> None:
         notes_path.write_text(json.dumps({**data, "notes": notes, "tool_log": tool_log, "requests": requests},
                                          ensure_ascii=False), encoding="utf-8")
 
-    requests = data.get("requests") or []
     save()
+    # 失败的研究子任务（新跑失败的、或复用笔记里上次失败的）自动重做一次；仍失败就中止，不拿残缺的笔记写报告
+    notes, tool_log = _redo_failed(app, company, notes, tool_log, market, progress)
+    save()
+    if still := failed_sections(notes):
+        raise LLMError(f"研究子任务重试后仍失败：{'、'.join(t for _, t, _ in still)}；"
+                       + "；".join(f"{t}：{x[len(FAILED_MARK):].rstrip('）')[:200]}" for _, t, x in still)
+                       + f"\n    研究笔记已保存：{notes_path}；问题解决后运行 `stock dossier {company.id} --reuse-notes` 只重做失败的部分")
     gap = notes.get("gapfill", {}).get("text", "")
     if gap and not gap.startswith(FAILED_MARK):
         # 上次补缺之后使用者补充了数据，或上次补缺时网页搜索大多不可用：带着上一轮的结果重新补缺
@@ -717,6 +819,15 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
     supplied = supplied_block(app, company)
     if supplied:
         notes_text += f"\n\n{supplied}"
+    # 情景价格由代码按估值矩阵定价：模型只选点，写手照抄，跟踪卡直接取用（见 scenarios.py）
+    spec, why = scenarios.propose(app, company, notes_text, tool_log, app.market_line(company), currency)
+    if spec:
+        sc_text = scenarios.table_text(spec, valuation._last_close(app, company.pricing_listing), currency)
+        notes["scenarios"] = {"title": "12 个月情景（程序计算）", "text": sc_text}
+        notes_text += f"\n\n=== 研究笔记：12 个月情景（程序计算）===\n{sc_text}"
+        progress(f"  {company.name}：情景已由程序按{scenarios.KIND_LABEL[spec['kind']]}定价（工具调用 #{spec['call'] + 1}）")
+    if why:
+        progress(f"  {company.name}：{why}")
     facts: list[dict] = []
     try:
         facts = key_facts(app, notes_text)
@@ -755,6 +866,15 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
         except LLMError as e:
             progress(f"  {company.name}：覆盖检查失败（报告保持原样）：{e}")
 
+    revised: list[dict] = []
+    src = _provenance_sources(header, notes, tool_log, supplied)
+    if (n_bad := len(verify.check(report, src).unverified)):
+        progress(f"  {company.name}：核对 {n_bad} 个无出处的数字…")
+        try:
+            report, revised, _ = revise_unverified(app, report, notes_text, src)
+        except LLMError as e:
+            progress(f"  {company.name}：数字修订失败（报告保持原样）：{e}")
+
     progress(f"  {company.name}：抽取跟踪卡…")
     listings = " / ".join(l.key for l in company.listings)
     band = app.settings.tracker.stance_band
@@ -765,6 +885,12 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
         validate=lambda d: Card.model_validate(d).model_dump(), max_tokens=16000,
     ).data
     card["price_listing"] = company.pricing_listing.key
+    if spec:  # 情景取程序价格，不用模型从正文抽出来的；矩阵参数一并存下，追踪时精确重建
+        card["scenarios"] = scenarios.compute(spec)
+        spec["report_mismatch"] = scenarios.report_mismatches(report, spec)
+        card["valuation_spec"] = spec
+        if spec["report_mismatch"]:
+            progress(f"  {company.name}：报告「12 个月情景」章节里找不到程序价格：{'、'.join(spec['report_mismatch'])}")
     bars = app.bars(app.secid(company.pricing_listing), limit=5)
     card["stats"] = card_stats(card, float(bars["close"].iloc[-1]) if bars is not None else None, band)
     card["anchor"] = anc
@@ -800,10 +926,10 @@ def _write(app: App, company: Company, notes: dict, tool_log: list, header: str,
     app.db.resolve_requests(company.id, [r["item"] for r in requests])
     ids = app.db.add_requests(company.id, did, requests) if requests else []
     requests = [{**r, "id": i} for r, i in zip(requests, ids)]
-    html_path, pdf_path = render(app, company, did, report, card, header, tool_log, notes, applied, requests, added)
+    html_path, pdf_path = render(app, company, did, report, card, header, tool_log, notes, applied, requests, added, revised)
     app.db.set_dossier_paths(did, str(html_path), str(pdf_path) if pdf_path else None)
     return {"dossier_id": did, "html_path": html_path, "pdf_path": pdf_path, "card": card,
-            "requests": requests, "fixes": applied, "added": added}
+            "requests": requests, "fixes": applied, "added": added, "revised": revised}
 
 
 # ---------------------------------------------------------------- 渲染
@@ -873,6 +999,12 @@ def _write_part(app: App, company: Company, system: list[str], user: str, sectio
 def _card_markdown(company: Company, card: dict) -> str:
     out = ["## § 跟踪卡（程序据此每日跟踪）", "", f"**核心判断**：{card['thesis']}（立场：{ {'bullish': '偏多', 'neutral': '中性', 'bearish': '偏空'}[card['stance']] }）", ""]
     if card["scenarios"]:
+        if sp := card.get("valuation_spec"):
+            out += [f"情景价格由程序按估值公式计算（{scenarios.describe_spec(sp)}）。"
+                    + (f"⚠ 正文「12 个月情景」章节里找不到这些程序价格：{'、'.join(sp['report_mismatch'])}，以本表为准。"
+                       if sp.get("report_mismatch") else ""), ""]
+            if cc := scenarios.cross_check_text(sp):
+                out += [("⚠ " if sp["cross_check"]["status"] != "ok" else "") + cc, ""]
         out += ["| 情景 | 价格区间 | 概率 | 驱动 |", "|---|---|---|---|"]
         names = {"bull": "牛市", "base": "基准", "bear": "熊市"}
         out += [f"| {names[s['name']]} | {num(s['price_low'])} – {num(s['price_high'])} | {pct(s['probability'], 0, sign=False)} | {s['drivers']} |"
@@ -926,7 +1058,8 @@ def _find_chrome() -> str | None:
 
 def render(app: App, company: Company, dossier_id: int, report: str, card: dict, header: str, tool_log: list,
            notes: dict | None = None, applied: list[dict] | None = None,
-           requests: list[dict] | None = None, added: list[dict] | None = None) -> tuple[Path, Path | None]:
+           requests: list[dict] | None = None, added: list[dict] | None = None,
+           revised: list[dict] | None = None) -> tuple[Path, Path | None]:
     now = datetime.now(CST)
     body_md = report.strip()
     # 把行情信息插到标题和导语之后
@@ -934,7 +1067,7 @@ def render(app: App, company: Company, dossier_id: int, report: str, card: dict,
     insert_at = next((i + 1 for i, l in enumerate(lines) if l.startswith(">")), 1 if lines and lines[0].startswith("# ") else 0)
     lines.insert(insert_at, f'\n<div class="stats">{header}</div>\n')
     body_md = "\n".join(lines)
-    sources = [header] + [x["result"] for x in tool_log] + [x.get("text", "") for x in (notes or {}).values()]
+    sources = _provenance_sources(header, notes or {}, tool_log, supplied_block(app, company))
     provenance = verify.markdown(verify.check(report, sources))
     extra = ""
     if requests:
@@ -945,6 +1078,15 @@ def render(app: App, company: Company, dossier_id: int, report: str, card: dict,
     if applied:
         extra += (f"\n\n## § 一致性核对\n\n撰写后自动核对了报告中的「未披露/未查到」说法，其中 {len(applied)} 处研究笔记里其实有数据，已改写：\n\n"
                   + "\n".join(f"- 原文：{a['original'][:120]}\n  改为：{a['replacement'][:160]}" for a in applied))
+    if revised:
+        fixed = [r for r in revised if r["action"] != "keep"]
+        kept = [r for r in revised if r["action"] == "keep"]
+        extra += ("\n\n## § 数字修订\n\n撰写后程序找出了没有出处的数字，交给模型对照研究笔记核对一次："
+                  f"{len(fixed)} 处已改写或去掉，{len(kept)} 处确认为推算而保留。\n\n"
+                  + "\n".join(f"- {'改写' if r['action'] == 'fix' else '去掉'}（{'、'.join(r['numbers'])}）：{r['original'][:120]}\n  改为：{r['replacement'][:160]}"
+                              + (f"\n  依据：{r['evidence'][:160]}" if r["evidence"] else "") for r in fixed)
+                  + ("\n" if fixed and kept else "")
+                  + "\n".join(f"- 保留推算（{'、'.join(r['numbers'])}）：{r['evidence'][:160]}" for r in kept))
     if added:
         extra += (f"\n\n## § 关键事实补写\n\n撰写后检查了关键事实的覆盖情况，以下 {len(added)} 条原稿遗漏、已补写到对应章节：\n\n"
                   + "\n".join(f"- 〔{a['section']}〕{a['fact'][:140]}" for a in added))

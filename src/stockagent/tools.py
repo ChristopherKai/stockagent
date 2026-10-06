@@ -189,9 +189,34 @@ def matrix_table(driver_label: str, driver_values: list[float], multiple_label: 
     return "\n".join(rows) + "\n" + note
 
 
+def sotp_part_value(p: dict) -> float:
+    """分部的 100% 口径价值：直接给 value，或给 driver（驱动指标）× multiple（倍数）；两者都给时必须一致（相差 1% 内）。"""
+    driver, multiple = p.get("driver"), p.get("multiple")
+    has_dm = driver is not None and multiple is not None
+    if p.get("value") is None and not has_dm:
+        raise ValueError(f"{p.get('name')}：需要 value，或同时给出 driver 与 multiple")
+    if not has_dm:
+        return float(p["value"])
+    product = float(driver) * float(multiple)
+    if p.get("value") is not None and abs(float(p["value"]) - product) > abs(product) * 0.01:
+        raise ValueError(f"{p.get('name')}：value {float(p['value']):g} 与 driver × multiple = {product:g} 不一致")
+    return product
+
+
+def sotp_price(parts: list[tuple[float, float, float]], shares: float, net_cash: float = 0.0, fx: float = 1.0,
+               holdco_discount: float = 0.0) -> float:
+    """分部加总的每股价值。parts = [(100% 口径价值, 持股比例, 折价)]：
+    股价 =（Σ 价值 × 持股 ×（1 − 折价）+ 净现金）×（1 − 控股公司折价）÷ 股本 × 汇率。sotp 工具与估值模型（valuation.py）共用。"""
+    if shares <= 0:
+        raise ValueError("shares 必须为正")
+    total = sum(v * stake * (1 - disc) for v, stake, disc in parts)
+    return (total + net_cash) * (1 - holdco_discount) / shares * fx
+
+
 def sotp_value(parts: list[dict], shares: float, net_cash: float = 0.0, fx: float = 1.0,
                holdco_discount: float = 0.0) -> tuple[list[dict], float, float]:
-    """分部加总：Σ(分部价值 × 持股比例 × (1 − 分部折价)) + 净现金，再扣控股公司折价；返回 (明细, 股权价值, 每股价值)。"""
+    """分部加总：Σ(分部价值 × 持股比例 × (1 − 分部折价)) + 净现金，再扣控股公司折价；返回 (明细, 股权价值, 每股价值)。
+    分部价值可以直接给 value，也可以给 driver × multiple（见 sotp_part_value）。"""
     if shares <= 0:
         raise ValueError("shares 必须为正")
     rows, total = [], 0.0
@@ -200,8 +225,9 @@ def sotp_value(parts: list[dict], shares: float, net_cash: float = 0.0, fx: floa
         disc = float(p.get("discount", 0.0))
         if not (0 < stake <= 1) or not (0 <= disc < 1):
             raise ValueError(f"{p.get('name')}：stake 应在 (0,1]，discount 应在 [0,1)")
-        attributable = float(p["value"]) * stake * (1 - disc)
-        rows.append({**p, "stake": stake, "discount": disc, "attributable": attributable})
+        value = sotp_part_value(p)
+        attributable = value * stake * (1 - disc)
+        rows.append({**p, "value": value, "stake": stake, "discount": disc, "attributable": attributable})
         total += attributable
     equity = (total + net_cash) * (1 - holdco_discount)
     return rows, equity, equity / shares * fx
@@ -975,12 +1001,16 @@ class ToolBox:
                  _obj({"ticker": {"type": "string"}}, []),
                  self.southbound),
             Tool("sotp",
-                 "分部加总估值（SOTP）：parts 为各业务/持股资产 [{name, value（100% 口径价值，单位与 net_cash 一致）, stake（持股比例 0–1）, "
-                 "discount（该部分折价 0–1，可选）, method（估值依据，如「上市子公司市值」「8× 分部利润」）}]；再加净现金、扣控股公司折价，"
-                 "除以股本并按 fx 换成股价货币。适合有上市子公司或多业务的公司。",
+                 "分部加总估值（SOTP），一律按归母口径：分部利润必须换算成归属母公司的部分——stake 填公司实际持有的比例（非全资子公司不能填 1，除非 driver/value 已先扣除少数股东损益），否则会高估。"
+                 "parts 为各业务/持股资产 [{name, value（100% 口径价值，单位与 net_cash 一致）, stake（持股比例 0–1）, "
+                 "discount（该部分折价 0–1，可选）, method（估值依据，如「上市子公司市值」「8× 分部利润」）}]；"
+                 "按「驱动指标 × 倍数」估值的分部请写 driver（如分部利润）与 multiple（倍数）代替 value（程序相乘），"
+                 "这样牛/基准/熊三组情景才能逐分部定价——请对每个情景各调用一次，分部名称、持股、股本、净现金、汇率保持一致（折价与控股公司折价可以随情景变）。"
+                 "再加净现金、扣控股公司折价，除以股本并按 fx 换成股价货币。适合有上市子公司或多业务的公司。",
                  _obj({"parts": {"type": "array", "items": {"type": "object", "properties": {
-                           "name": {"type": "string"}, "value": {"type": "number"}, "stake": {"type": "number"},
-                           "discount": {"type": "number"}, "method": {"type": "string"}}, "required": ["name", "value"]}},
+                           "name": {"type": "string"}, "value": {"type": "number"}, "driver": {"type": "number"},
+                           "multiple": {"type": "number"}, "stake": {"type": "number"},
+                           "discount": {"type": "number"}, "method": {"type": "string"}}, "required": ["name"]}},
                        "shares": {"type": "number"}, "net_cash": {"type": "number"}, "fx": {"type": "number"},
                        "holdco_discount": {"type": "number"}, "current_price": {"type": "number"}},
                       ["parts", "shares"]),
@@ -1278,7 +1308,9 @@ class ToolBox:
         rows, equity, per_share = sotp_value(parts, float(shares), float(net_cash), float(fx), float(holdco_discount))
         table = ["| 部分 | 100%价值 | 持股 | 折价 | 归属价值 | 依据 |", "|---|---|---|---|---|---|"]
         table += [f"| {r['name']} | {fmt_number(float(r['value']))} | {r['stake']:.1%} | {r['discount']:.0%} | "
-                  f"{fmt_number(r['attributable'])} | {r.get('method', '')} |" for r in rows]
+                  f"{fmt_number(r['attributable'])} | {r.get('method', '')}"
+                  + (f"（{float(r['driver']):g} × {float(r['multiple']):g}）" if r.get("driver") is not None and r.get("multiple") is not None else "")
+                  + " |" for r in rows]
         tail = (f"\n净现金 {fmt_number(float(net_cash))}；控股公司折价 {float(holdco_discount):.0%}；股权价值 {fmt_number(equity)}；"
                 f"股本 {fmt_number(float(shares))}；汇率 {fmt_number(float(fx))} → 每股价值 {per_share:,.2f}")
         if current_price:

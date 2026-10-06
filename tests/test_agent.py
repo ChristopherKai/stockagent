@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pandas as pd
 import pytest
 
-from stockagent import brief, dossier, monitor
+from stockagent import brief, dossier, monitor, verify
 from stockagent.config import LLMConfig
 from stockagent.docs import store_document
 from stockagent.llm import LLM, LLMError, parse_tool_calls, strip_think
@@ -484,3 +484,80 @@ def test_incomplete_report_part_is_rewritten(app, monkeypatch):
     monkeypatch.setattr(app.llm, "complete", lambda *a, **k: LLMResult(text="太短", data=None, model="m", profile="p", usage={}))
     with pytest.raises(LLMError, match="连续 3 次输出不完整"):
         dossier._write_part(app, app.watchlist.get("acme"), ["s"], "u", dossier.PART1_SECTIONS, "前半部分", msgs.append, title=True)
+
+
+_REAL_RESEARCH = dossier.research
+
+
+def _fake_research(calls, fail_keys):
+    real = _REAL_RESEARCH
+
+    def fake(app, company, key, title, questions, market):
+        calls.append(key)
+        if key in fail_keys and calls.count(key) <= fail_keys[key]:
+            return key, title, f"{dossier.FAILED_MARK}连接失败）", []
+        return real(app, company, key, title, questions, market)
+    return fake
+
+
+def test_failed_research_section_is_retried(app, monkeypatch):
+    monkeypatch.setattr(dossier, "_find_chrome", lambda: None)
+    calls: list[str] = []
+    monkeypatch.setattr(dossier, "research", _fake_research(calls, {"valuation": 1}))
+    msgs = []
+    dossier.generate(app, app.watchlist.get("acme"), progress=msgs.append)
+    assert calls.count("valuation") == 2 and calls.count("business") == 1
+    assert any("重新研究失败的部分" in m for m in msgs)
+    notes = json.loads(app.db.latest_dossier("acme")["notes_json"])
+    assert not any(n["text"].startswith(dossier.FAILED_MARK) for n in notes.values())
+
+
+def test_failed_research_aborts_before_writing_and_resumes(app, monkeypatch):
+    monkeypatch.setattr(dossier, "_find_chrome", lambda: None)
+    company = app.watchlist.get("acme")
+    calls: list[str] = []
+    monkeypatch.setattr(dossier, "research", _fake_research(calls, {"valuation": 99}))
+    with pytest.raises(LLMError, match="--reuse-notes") as ei:
+        dossier.generate(app, company, progress=lambda *_: None)
+    assert "市场与估值" in str(ei.value) and calls.count("valuation") == 2
+    assert app.db.latest_dossier("acme") is None
+    assert "gapfill" not in dossier.latest_notes(app, company)[1]["notes"]  # 补缺 agent 没有白跑
+    calls.clear()
+    monkeypatch.setattr(dossier, "research", _fake_research(calls, {}))
+    dossier.generate(app, company, progress=lambda *_: None, reuse_notes=True)
+    assert calls == ["valuation"] and app.db.latest_dossier("acme") is not None
+
+
+def test_number_contexts():
+    report = "收入增长 37.5%，毛利率 20%。\n\n| 项目 | 金额 |\n|---|---|\n| 净利润 | 12.3亿 |\n"
+    ctx = dict(dossier.number_contexts(report, ["37.5%", "12.3亿", "99.9%"]))
+    assert ctx == {"收入增长 37.5%，毛利率 20%。": ["37.5%"], "| 净利润 | 12.3亿 |": ["12.3亿"]}
+
+
+def _reply(monkeypatch, app, checks):
+    from stockagent.llm import LLMResult
+    monkeypatch.setattr(app.llm, "complete", lambda *a, **k: LLMResult(text="", data={"checks": checks}, model="m", profile="p", usage={}))
+
+
+def test_revise_unverified(app, monkeypatch):
+    sources = ["营业收入 1234.56 亿元，毛利率 31.25%"]
+    report = "收入 1288.88 亿元。\n毛利率 31.20%，同比提升。\n净利率 15.75%。\n| 项 | 值 |\n| 利润 | 88.88亿 |\n"
+    assert set(verify.check(report, sources).unverified) == {"1288.88亿", "31.20%", "15.75%", "88.88亿"}
+    _reply(monkeypatch, app, [
+        {"id": 0, "action": "fix", "replacement": "收入 1234.56 亿元。", "evidence": "笔记"},
+        {"id": 1, "action": "fix", "replacement": "毛利率 31.25%，同比提升至 77.77%。", "evidence": "x"},  # 引入新的无出处数字 → 丢弃
+        {"id": 2, "action": "keep", "replacement": "", "evidence": "净利润÷收入"},
+        {"id": 3, "action": "remove", "replacement": "| 利润 | 88.88亿 | 多余 |", "evidence": ""},  # 列数不一致 → 丢弃
+    ])
+    out, log_, n = dossier.revise_unverified(app, report, "笔记", sources)
+    assert n == 4 and "收入 1234.56 亿元。" in out and "1288.88" not in out
+    assert "31.20%" in out and "77.77" not in out and "| 利润 | 88.88亿 |" in out
+    assert {r["action"] for r in log_} == {"fix", "keep"}
+
+
+def test_revise_unverified_survives_llm_failure(app, monkeypatch):
+    def boom(*a, **k):
+        raise LLMError("down")
+    monkeypatch.setattr(app.llm, "complete", boom)
+    report = "收入 1288.88 亿元。\n"
+    assert dossier.revise_unverified(app, report, "笔记", ["x"]) == (report, [], 1)

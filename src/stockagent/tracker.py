@@ -89,6 +89,7 @@ ASSESS_SYSTEM = """你是研究主管。根据修正研究笔记，把估值修�
 - events：逐条给出每个依据编号（id 原样返回，包括 K、D、M 开头的编号）的影响：none 不影响估值 / minor 轻微（不改假设）/ material 实质影响（需要修改假设）；note 用一句话说明。
 - changes：新依据带来的新信息所要求的假设修改，没有就输出空数组，不要为了修正而修正。估值口径的调整、对报告已有数据的重新解读不放在这里。
   · path 从枚举中选（bull/base/bear 为情景，all 表示所有情景都做同样的修改；prob 为情景概率；g.shares 总股本（亿股）；g.net_cash 净现金）。
+    分部加总（SOTP）模型的路径形如 bull.p1.driver / bull.p1.multiple（p1、p2… 是第几个分部，对照估值模型说明里的分部明细）：分部的驱动指标是事实，倍数是判断。
   · op：set 直接设为 operand；add 加上 operand（可为负数）；mul 乘以 operand（1.05 表示上调 5%，0.9 表示下调 10%）。operand 必须是数字。
   · 修改驱动指标、股本、净现金时，operand 必须来自笔记中的事实或工具结果：derivation 写明数字来源与算式，evidence 列出依据编号；
     这类事实若是修正时用工具新查到的（例如公告原文里的回购金额），可以只引用工具结果的 T 编号。
