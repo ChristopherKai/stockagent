@@ -27,22 +27,15 @@ QUOTE_FIELDS = {
 }
 
 
-def secid_for(listing: Listing, session: requests.Session | None = None) -> str:
+def secid_for(listing: Listing) -> str:
     if listing.market == "HK":
         return f"116.{listing.code}"
     if listing.market == "A":
         return f"{1 if listing.exchange == 'SH' else 0}.{listing.code}"
     if listing.exchange in US_MARKETS:
         return f"{US_MARKETS[listing.exchange]}.{listing.code}"
-    # 未指定交易所：依次尝试纳斯达克 / 纽交所 / 美交所（用 K 线接口探测，比快照接口稳定）
-    if session is not None:
-        for prefix in US_MARKETS.values():
-            try:
-                if fetch_klines(session, f"{prefix}.{listing.code}", limit=1):
-                    return f"{prefix}.{listing.code}"
-            except requests.RequestException as e:
-                log.debug("探测 %s.%s 失败：%s", prefix, listing.code, e)
-    log.warning("无法确定美股 %s 的交易所，暂按纳斯达克处理；请在 watchlist.yaml 中为它填写 exchange", listing.code)
+    # 没填交易所的美股由 app.us_secid 识别；这里只给出缺省值
+    log.warning("美股 %s 没有 exchange，暂按纳斯达克处理；请在 watchlist.yaml 中为它填写 exchange", listing.code)
     return f"105.{listing.code}"
 
 

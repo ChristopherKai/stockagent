@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from stockagent import docs
 from stockagent.config import Company, Listing
@@ -343,3 +343,62 @@ def test_backfill_releases_stores_old_item_202_once(app, monkeypatch):
     assert appmod.backfill_releases(app, co) == ["Bloom：补入业绩新闻稿 1 份"]
     assert calls == ["0001-26-1"] and len(app.db.documents("bloom")) == 1
     assert appmod.backfill_releases(app, co) == [] and calls == ["0001-26-1"]  # 第二次不再下载
+
+
+def test_us_eps_points_fall_back_to_total_equity_less_minority():
+    """ASTS 型：归母权益标签停更、新报表只标含少数股东权益的合计，且 EPS 只按股别分列（没有无维度的 EPS）。"""
+    from stockagent import usdata
+
+    def inst(end, val):
+        return {"end": end, "val": val, "form": "10-Q", "filed": "2026-08-01"}
+
+    f = _flow_facts(extra={
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest": {"units": {"USD": [inst("2026-06-30", 2400)]}},
+        "MinorityInterest": {"units": {"USD": [inst("2026-06-30", 400)]}},
+        "WeightedAverageNumberOfDilutedSharesOutstanding": {"units": {"shares": [_fact("2026-04-01", "2026-06-30", 100)]}},
+    })
+    pts, _ = usdata.eps_bps_points(f)
+    p = next(x for x in pts if x[0] == "2026-08-14")  # 2026-06-30 + 45 天
+    assert p[1] is None and p[2] == 20.0  # (2400 − 400) ÷ 100
+
+
+def test_yahoo_chart_parsing_and_exchange():
+    from stockagent.sources import yahoo
+
+    node = {"meta": {"exchangeName": "NYQ", "gmtoffset": -14400, "regularMarketPrice": 11.0, "shortName": "X"},
+            "timestamp": [1759843800, 1759930200, 1760016600],  # 美东 09:30 开盘时刻，不能被 UTC 换算推到前一天
+            "indicators": {"quote": [{"open": [1, 2, None], "high": [2, 3, None], "low": [1, 2, None],
+                                      "close": [1.5, 2.5, None], "volume": [10, 20, None]}]}}
+    bars = yahoo._bars(node)
+    assert [b["date"] for b in bars] == ["2025-10-07", "2025-10-08"] and bars[1]["close"] == 2.5  # 缺值日被跳过
+    assert yahoo.symbol_for("106.BRK.B") == "BRK-B" and yahoo.symbol_for("116.00700") is None
+    assert yahoo.EXCHANGE_PREFIX["NMS"] == "105" and yahoo.EXCHANGE_PREFIX["NYQ"] == "106"
+
+
+def test_us_secid_resolution_and_no_poisoned_cache(app, monkeypatch):
+    """东方财富断连时不能把「猜的 105」永久写进缓存（LMT / FRO / DHT 就是这样被记成纳斯达克的）。"""
+    import requests
+
+    from stockagent import app as appmod
+    from stockagent.sources import eastmoney, tencent, yahoo
+
+    def boom(*a, **k):
+        raise requests.ConnectionError("down")
+
+    monkeypatch.setattr(yahoo, "exchange_prefix", boom)
+    monkeypatch.setattr(tencent, "fetch_klines", boom)
+    monkeypatch.setattr(eastmoney, "fetch_klines", boom)
+    assert appmod.us_secid(app, "LMT") == "105.LMT"  # 全部失败：临时缺省
+    assert app.db.kv_get("us_secid:LMT") is None  # 且不缓存
+
+    app.down.clear()
+    for src in ("yahoo", "tencent", "eastmoney"):
+        app.db.kv_delete(f"down:{src}")
+    monkeypatch.setattr(yahoo, "exchange_prefix", lambda s, c: "106")  # Yahoo 恢复：识别为纽交所并缓存
+    assert appmod.us_secid(app, "LMT") == "106.LMT" and app.db.kv_get("us_secid:LMT") == "106.LMT"
+
+    monkeypatch.setattr(yahoo, "exchange_prefix", lambda s, c: None)  # Yahoo 不认识：回到腾讯探测
+    today = date.today().isoformat()
+    ok = [{"date": today, "close": 1.0}] * 3
+    monkeypatch.setattr(tencent, "fetch_klines", lambda s, secid, limit=5: ok if secid.startswith("106.") else [])
+    assert appmod.us_secid(app, "FRO") == "106.FRO"

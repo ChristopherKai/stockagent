@@ -157,6 +157,12 @@ def eps_bps_points(facts: dict) -> tuple[list[tuple[str, float | None, float | N
     _, gaap, cur, c = t
     eps = _clean_eps(sec.merged_values(gaap, c["eps"], f"{cur}/shares"), gaap, cur, c)
     equity = sec.merged_values(gaap, c["equity"], cur, instant=True)
+    if gaap is not None and "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest" in gaap:
+        # 有少数股东权益的发行人（如 ASTS）新报表常只标含少数股东权益的合计：缺归母权益的期末用「合计 − 少数股东权益」补
+        total = sec.merged_values(gaap, ["StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"], cur, instant=True)
+        minority = sec.merged_values(gaap, c["minority"], cur, instant=True)
+        for k, v in total.items():
+            equity.setdefault(k, v - minority.get(k, 0.0))
     shares = sec.merged_values(gaap, c["shares_out"], "shares", instant=True)
     weighted = sec.merged_values(gaap, c["wshares"], "shares")
     wend: dict[str, float] = {}  # 每个截止日取最短一段的加权股数（期末股数缺失时的备选）
@@ -164,7 +170,7 @@ def eps_bps_points(facts: dict) -> tuple[list[tuple[str, float | None, float | N
         wend[e] = v
     annual_ends = {e for (s, e) in eps if 350 <= sec._days(s, e) <= 380}
     points = []
-    for end in sorted({e for _, e in eps}):
+    for end in sorted({e for _, e in eps} | {e for _, e in equity}):  # 没有 EPS 的期末（EPS 只按股别分列时）也要有每股净资产
         ttm = sec.ttm_at(eps, end)
         eq, sh = equity.get((None, end)), shares.get((None, end)) or wend.get(end)
         bps = eq / sh if eq is not None and sh else None

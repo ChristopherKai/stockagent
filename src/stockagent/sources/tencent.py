@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 
 import requests
 
@@ -26,6 +27,15 @@ def symbol_for(secid: str) -> str | None:
     if prefix == "0":
         return f"{'bj' if code.startswith(('4', '8', '92')) else 'sz'}{code}"
     return {"105": f"us{code}.OQ", "106": f"us{code}.N", "107": f"us{code}.AM"}.get(prefix)
+
+
+def recent_series(bars: list[dict] | None) -> bool:
+    """交易所后缀不对时，腾讯只返回 1 根当前价，或返回已换所旧代码的陈旧历史再拼上当前价；
+    最近 3 根是连续的近期交易日才算识别成功。"""
+    if not bars or len(bars) < 3:
+        return False
+    ds = [date.fromisoformat(b["date"]) for b in bars[-3:]]
+    return (ds[-1] - ds[0]).days <= 10 and (date.today() - ds[-1]).days <= 10
 
 
 def fetch_klines(session: requests.Session, secid: str, limit: int = 400) -> list[dict]:
