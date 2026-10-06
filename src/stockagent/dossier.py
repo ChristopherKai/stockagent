@@ -526,16 +526,20 @@ def _notes_text(notes: dict) -> str:
     return "\n\n".join(f"=== 研究笔记：{n['title']} ===\n{n['text']}" for n in notes.values())
 
 
-def fill_gaps(app: App, company: Company, notes: dict, market: str, progress) -> tuple[dict, list, list[dict]]:
-    """找出对判断最关键的数据缺口 → 补缺 agent 专门检索 → 返回 (补充研究笔记, 工具日志, 仍需使用者补充的数据)。"""
-    try:
-        gaps = app.llm.complete("dossier", [GAPS_SYSTEM], _notes_text(notes), schema=GAPS_SCHEMA, max_tokens=16000).data["gaps"][:8]
-    except LLMError as e:
-        progress(f"  {company.name}：提取数据缺口失败：{e}")
-        return {"title": "补充研究", "text": ""}, [], []
-    if not gaps:
-        return {"title": "补充研究", "text": "（没有需要补充的关键数据）"}, [], []
-    progress(f"  {company.name}：补缺检索 {len(gaps)} 项关键数据：{'、'.join(g['name'] for g in gaps)}…")
+def _gap_groups(gaps: list[dict], agents: int) -> list[list[dict]]:
+    """把缺口按顺序切成至多 agents 组（每组缺口数尽量均匀），每组交给一个补缺 agent。"""
+    n = max(1, min(agents, len(gaps)))
+    size, extra = divmod(len(gaps), n)
+    groups, start = [], 0
+    for i in range(n):
+        end = start + size + (1 if i < extra else 0)
+        groups.append(gaps[start:end])
+        start = end
+    return groups
+
+
+def _gap_agent(app: App, company: Company, gaps: list[dict], market: str) -> tuple[str, list]:
+    """一个补缺 agent（自己的 ToolBox）检索一组缺口。返回 (笔记正文，失败时以 FAILED_MARK 开头, 工具日志)。"""
     box = ToolBox(app, company)
     steps = app.settings.agent.max_steps + 6
     system = [FILL_SYSTEM.format(company=company.title, rules=AGENT_RULES.format(today=today_local(), max_steps=steps)),
@@ -554,6 +558,32 @@ def fill_gaps(app: App, company: Company, notes: dict, market: str, progress) ->
         text = f"{FAILED_MARK}{e}）"
     for entry in box.log:
         entry["section"] = "补充研究"
+    return text, box.log
+
+
+def fill_gaps(app: App, company: Company, notes: dict, market: str, progress) -> tuple[dict, list, list[dict]]:
+    """找出对判断最关键的数据缺口 → 补缺 agent 专门检索 → 返回 (补充研究笔记, 工具日志, 仍需使用者补充的数据)。"""
+    try:
+        gaps = app.llm.complete("dossier", [GAPS_SYSTEM], _notes_text(notes), schema=GAPS_SCHEMA, max_tokens=16000).data["gaps"][:8]
+    except LLMError as e:
+        progress(f"  {company.name}：提取数据缺口失败：{e}")
+        return {"title": "补充研究", "text": ""}, [], []
+    if not gaps:
+        return {"title": "补充研究", "text": "（没有需要补充的关键数据）"}, [], []
+    groups = _gap_groups(gaps, app.settings.agent.gap_agents if app.settings.agent.parallel_sections else 1)
+    progress(f"  {company.name}：补缺检索 {len(gaps)} 项关键数据（{len(groups)} 个 agent 并行）：{'、'.join(g['name'] for g in gaps)}…"
+             if len(groups) > 1 else f"  {company.name}：补缺检索 {len(gaps)} 项关键数据：{'、'.join(g['name'] for g in gaps)}…")
+    with ThreadPoolExecutor(max_workers=len(groups)) as pool:
+        results = list(pool.map(lambda g: _gap_agent(app, company, g, market), groups))
+    log_ = [entry for _, box_log in results for entry in box_log]
+    failed = [g for g, (text, _) in zip(groups, results) if text.startswith(FAILED_MARK)]
+    if len(failed) == len(groups):  # 全部失败：与单 agent 时一样整体标记失败，下次复用笔记时重做
+        text = results[0][0]
+    else:
+        text = "\n\n".join([t for t, _ in results if not t.startswith(FAILED_MARK)]
+                            + [f"（以下缺口的检索失败，未取得结果：{'、'.join(x['name'] for x in g)}）" for g in failed])
+        if failed:
+            progress(f"  {company.name}：{len(failed)} 组补缺检索失败，其余已完成")
     requests: list[dict] = []
     try:
         data = app.llm.complete(
@@ -573,7 +603,7 @@ def fill_gaps(app: App, company: Company, notes: dict, market: str, progress) ->
                  f"需要你补充 {len(requests)} 项")
     except LLMError as e:
         progress(f"  {company.name}：判断补缺结果失败：{e}")
-    return {"title": "补充研究", "text": text}, box.log, requests
+    return {"title": "补充研究", "text": text}, log_, requests
 
 
 def gap_claims(text: str, limit: int = 60) -> list[str]:

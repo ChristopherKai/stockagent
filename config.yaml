@@ -188,6 +188,7 @@ sources:
 agent:
   max_steps: 20                     # 每个研究子任务最多调用工具的轮数
   valuation_extra_steps: 8          # 估值情景子任务（读完前序笔记后建模）在 max_steps 之上多给的轮数
+  gap_agents: 3                     # 补缺检索最多同时跑几个 agent（缺口分组并行）；1 = 不并行
   tool_result_chars: 4000           # 单次工具结果最多返回给模型的字数
   # 网页搜索源。搜索 API 排在最前：exa（经 agent-reach 配置的 mcporter 调用，本机装了就启用）、
   # bocha 博查 / tavily / serper（.env 填了 key 才启用）；免费源中前三个轮流使用，其余在它们都失败时备用

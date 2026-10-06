@@ -89,6 +89,26 @@ class Queue:
         self.requests: list[dict] = []
 
 
+def _as_sse(reply: dict) -> bytes:
+    choice = reply["choices"][0]
+    msg = choice["message"]
+
+    def chunk(delta, finish=None, usage=None):
+        d = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": reply["model"],
+             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}] if usage is None else []}
+        if usage is not None:
+            d["usage"] = usage
+        return f"data: {json.dumps(d)}\n\n"
+
+    parts = []
+    if msg.get("content"):
+        parts.append(chunk({"role": "assistant", "content": msg["content"]}))
+    for i, tc in enumerate(msg.get("tool_calls") or []):
+        parts.append(chunk({"tool_calls": [{"index": i, "id": tc["id"], "type": "function", "function": tc["function"]}]}))
+    parts += [chunk({}, choice["finish_reason"]), chunk({}, usage=reply["usage"]), "data: [DONE]\n\n"]
+    return "".join(parts).encode()
+
+
 @pytest.fixture
 def fake():
     q = Queue()
@@ -100,9 +120,15 @@ def fake():
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             q.requests.append({"path": self.path, "body": body})
-            payload = json.dumps(q.replies.pop(0)).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
+            reply = q.replies.pop(0)
+            if body.get("stream"):  # 默认流式：把整条回复拆成 SSE 分片
+                payload = _as_sse(reply)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+            else:
+                payload = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)

@@ -30,7 +30,7 @@ class LLMProfile(BaseModel):
     auth: Literal["api_key", "bearer"] = "api_key"
     max_tokens: int = 32000  # 单次输出上限（调用方的需求会被它截断）
     timeout: float = 600
-    max_retries: int = 3
+    max_retries: int = 3  # openai 协议只对很快就失败的瞬时故障（限流、502/503）重试，网关超时（504）与读超时不重试，直接换备用模型
     # ---- anthropic 协议专用
     effort: Effort | None = None
     thinking: Literal["adaptive", "off"] = "adaptive"
@@ -39,6 +39,8 @@ class LLMProfile(BaseModel):
     prompt_cache: bool = True
     # ---- openai 兼容协议专用
     json_mode: bool = True
+    # 流式请求：网关常给非流式请求设总时限（实测 2 分钟，长输出必超时）；服务不支持 stream 时改为 false
+    stream: bool = True
     max_tokens_param: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
     extra_body: dict = Field(default_factory=dict)
     # agent 调用工具的方式：native 用接口的 tools 参数；text 用 <tool_call> 文本协议（服务端不支持工具调用时）
@@ -195,6 +197,7 @@ class AgentConfig(BaseModel):
 
     max_steps: int = 12              # 每个研究子任务最多调用工具的轮数
     valuation_extra_steps: int = 8   # 估值情景子任务（阶段 2，读完前序笔记后用矩阵 / SOTP 建模）在 max_steps 之上多给的轮数
+    gap_agents: int = 3              # 补缺检索最多同时跑几个 agent（缺口分组并行）；1 = 不并行；parallel_sections 关闭时也不并行
     tool_result_chars: int = 4000    # 单次工具结果最多返回给模型的字数
     # 网页搜索源：搜索 API 优先——exa（经 agent-reach 的 mcporter 调用，装了就启用）、bocha / tavily / serper（.env 填了 key 才启用）；
     # 免费源中前三个轮流使用（分摊请求量、减少被反爬拦截），其余在它们都失败时依次备用
