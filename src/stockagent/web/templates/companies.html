@@ -2,6 +2,7 @@
 {% from "_macros.html" import stance_badge, view_cells, scene_stance, ratio_cell, filter_bar %}
 {% block title %}观察清单{% endblock %}
 {% block content %}
+{% set banner_next = '/companies' %}{% include "_scen_banner.html" %}
 <section class="card">
   <div class="card-head"><h2>观察清单 <span class="muted small">{{ rows | length }} 家</span></h2><a class="btn ghost" href="/companies/new">+ 手动填写新增</a></div>
   <form method="post" action="/companies/quick" class="quick-add">{{ csrf_field }}
@@ -12,12 +13,13 @@
   </form>
   <form method="post" action="/companies/track" id="bulk">{{ csrf_field }}</form>
   {{ filter_bar('#watch') }}
-  <p class="muted small">默认排序：置顶在前，然后按情景立场（偏多在上），同立场按空间、再按多空比（上行 / 下行）从高到低；也可以在上面改成按空间、多空比或报告日期排序。有多个上市地的公司按上市地分行展示：定价上市地用报告的估值，其他上市地按同股同权汇率平价折算（含两地溢价），各自有现价、目标价与立场。</p>
+  <p class="muted small">默认排序：置顶在前，然后按情景立场（偏多在上），同立场按空间、再按多空比（上行 / 下行）从高到低；也可以在上面改成按空间、多空比或报告日期排序。有多个上市地的公司按上市地分行展示：定价上市地用报告的估值，其他上市地按同股同权汇率平价折算（含两地溢价），各自有目标价与立场（现价在仪表盘）。</p>
   <div class="tblwrap">
   <table class="tbl watch" id="watch">
-    <thead><tr><th><input type="checkbox" data-select-all="ids" title="全选（当前筛选结果）"></th><th>公司</th><th>上市地</th><th class="r">现价</th>
+    <thead><tr><th><input type="checkbox" data-select-all="ids" title="全选（当前筛选结果）"></th><th>公司</th><th>上市地</th>
       <th class="r sortable" data-sort="upside" title="{{ TARGET_LABEL }}，括号为相对现价；点击按空间排序">目标价 / 空间</th><th class="r">牛 / 基 / 熊（相对现价）</th>
       <th class="r sortable" data-sort="ratio" title="上行 / 下行：高于现价部分与低于现价部分的期望幅度之比；点击排序">多空比</th><th class="sortable" data-sort="date" title="最新一版深度报告的生成日期；点击排序">报告日期</th>
+      <th class="r" title="报告生成当天的价格（跟踪卡价格 → 基线价格 → 当日收盘价），下方为现价相对它的涨跌">报告日价格 / 至今</th>
       <th title="最新深度报告的立场">报告立场</th><th class="sortable" data-sort="" title="按情景数字与该上市地现价由代码算出的立场；点击恢复默认排序（情景立场 → 空间 → 多空比）">情景立场</th>
       <th>追踪</th><th></th></tr></thead>
     {% for row in rows %}{% set c = row.company %}
@@ -34,9 +36,11 @@
           <div class="muted small">{{ c.id }}</div>
           {% if row.dossier %}<div class="small"><a href="/c/{{ c.id }}/report">报告</a> · <a href="/c/{{ c.id }}/reports">历史</a></div>
           {% else %}<div class="small muted">无深度报告</div>{% endif %}</td>
-        {{ view_cells(v) }}
+        {{ view_cells(v, price=False) }}
         {{ ratio_cell(v) }}
         <td class="grp nowrap small">{{ row.report_at | when(false) if row.report_at else '—' }}</td>
+        <td class="grp r nowrap small">{% set rp = row.report_px %}{% if rp and rp.price %}<b>{{ rp.price | num }}</b> <span class="muted">{{ rp.listing.currency }}</span>
+          <div class="{{ rp.since | dirclass }}" title="现价相对报告日（{{ rp.day }}）价格的涨跌">{{ rp.since | pct if rp.since is not none else '—' }}</div>{% else %}<span class="muted">—</span>{% endif %}</td>
         <td class="grp">{{ stance_badge(row.report_stance) if row.report_stance else '' }}{% if not row.report_stance %}<span class="muted">—</span>{% endif %}</td>
         <td>{{ scene_stance(v) }}</td>
         <td class="grp">

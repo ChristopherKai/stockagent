@@ -22,7 +22,7 @@ from .. import dossier as dossier_mod
 from ..config import Company
 from ..docs import DOC_TYPES, SUPPORTED
 from ..utils import CST, iso, lock_holder, parse_iso, today_local, utcnow
-from ..valuation import SCENARIO_LABEL, _last_bar, _range_model, listing_views, load_model, risk_stats, stance_check, view_sort_key
+from ..valuation import SCENARIO_LABEL, _range_model, display_price, listing_views, load_model, risk_stats, stance_check, view_sort_key
 from . import charts, yamledit
 from .render import safe_url
 from .security import SANDBOX_CSP, verify_csrf
@@ -77,8 +77,8 @@ def _price_views(app, c: Company) -> list[dict]:
     """没有估值模型（还没有深度报告或情景价格）时：各上市地只有现价。"""
     out = []
     for l in c.listings:
-        price, day = _last_bar(app, l)
-        out.append({"listing": l, "key": l.key, "label": l.display, "currency": l.currency, "price": price, "price_date": day,
+        px = display_price(app, l)
+        out.append({"listing": l, "key": l.key, "label": l.display, "currency": l.currency, "price": px["price"], "price_date": px["day"], "px": px,
                     "primary": l.key == c.pricing_listing.key, "multi": len(c.listings) > 1, "convertible": True, "target": None, "upside": None,
                     "scenarios": {}, "stats": None, "stance": None, "reason": "", "premium": None})
     return out
@@ -95,11 +95,12 @@ def watch_rows(app) -> list[dict]:
         s = tracker.status(app, c)
         views = (s["views"] if s else (tracker.card_views(app, c, d) if d else [])) or _price_views(app, c)
         views = sorted(views, key=lambda v: (view_sort_key([v]), not v["primary"]))
+        report = _report_price(app, c, d, baselines={r["dossier_id"]: r for r in app.db.revisions(c.id) if r["kind"] == "baseline"}) if d else None
         rows.append({"company": c, "dossier": d, "tracker": t, "s": s, "views": views, "pinned": PIN_PREFIX + c.id in pins,
                      "enabled": bool(s and s["enabled"]), "report_stance": d["card"].get("stance") if d else None,
                      "thesis": d["card"].get("thesis") if d else None,
                      "thesis_status": s["revision"]["thesis_status"] if s else None,
-                     "key": view_sort_key(views), "report_at": d["created_at"] if d else None})
+                     "key": view_sort_key(views), "report_at": d["created_at"] if d else None, "report_px": report})
     rows.sort(key=lambda r: (not r["pinned"], r["key"], r["company"].name))
     return rows
 
@@ -115,6 +116,7 @@ def dashboard(request: Request):
     catalysts = sorted(((names[c.id], x) for c in app.watchlist.companies for x in monitor.upcoming(app, c, days=30)),
                        key=lambda p: p[1]["due_date"])
     return page(request, "dashboard.html", rows=rows, untracked=untracked, names=names, alerts=alerts, catalysts=catalysts,
+                scen_events=app.db.scenario_events(unread_only=True, limit=20),
                 revisions=app.db.recent_revisions(12, kinds=("revision", "review")),
                 requests=app.db.requests(status="open"), active=app.db.jobs(20, statuses=("queued", "running")),
                 recent_jobs=app.db.jobs(6), schedule=scheduler.next_runs(app),
@@ -127,7 +129,21 @@ def dashboard(request: Request):
 def companies(request: Request):
     app = holder(request).app
     _, etag = yamledit.load(holder(request).watchlist_path)
-    return page(request, "companies.html", rows=watch_rows(app), etag=etag)
+    return page(request, "companies.html", rows=watch_rows(app), etag=etag, scen_events=app.db.scenario_events(unread_only=True, limit=20),
+                names={c.id: c.name for c in app.watchlist.companies})
+
+
+@router.post("/scenario-events/{event_id}/read")
+async def scenario_event_read(request: Request, event_id: int):
+    """横幅上的「知道了」：只标记已读，回到原页面。"""
+    holder(request).app.db.mark_scenario_events_read(event_id)
+    return back(await return_to(request, "/"))
+
+
+@router.post("/scenario-events/read-all")
+async def scenario_events_read_all(request: Request):
+    holder(request).app.db.mark_scenario_events_read(None)
+    return back(await return_to(request, "/"))
 
 
 @router.post("/companies/{cid}/pin")
@@ -636,6 +652,19 @@ def _bar_close_on(app, listing, day: str) -> float | None:
     return float(older["close"].iloc[-1]) if len(older) else None
 
 
+def _report_price(app, c: Company, d: dict, baselines: dict | None = None) -> dict:
+    """某版深度报告的报告日价格（只读库）：跟踪卡 stats.price → 基线修正的 price → 报告日（含）之前最近的收盘价；
+    再给出现价（display_price，盘中为最新价）与至今涨跌。{listing, day, price, now, since}"""
+    card = d["card"]
+    listing = next((l for l in c.listings if l.key == card.get("price_listing")), c.listings[0])
+    day = utc_day(d["created_at"])
+    if baselines is None:
+        baselines = {r["dossier_id"]: r for r in app.db.revisions(c.id) if r["kind"] == "baseline"}
+    price = (card.get("stats") or {}).get("price") or (baselines.get(d["id"]) or {}).get("price") or _bar_close_on(app, listing, day)
+    now = display_price(app, listing)["price"]
+    return {"listing": listing, "day": day, "price": price, "now": now, "since": now / price - 1 if now and price else None}
+
+
 def _history(app, c: Company) -> list[dict]:
     """每一版深度报告的摘要：报告日价格、立场、情景价格（跟踪卡区间中值）、情景加权目标价与空间、至今涨跌。"""
     tr = app.db.tracker(c.id)
@@ -644,17 +673,15 @@ def _history(app, c: Company) -> list[dict]:
     rows = []
     for i, d in enumerate(app.db.dossier_history(c.id)):
         card = d["card"]
-        listing = next((l for l in c.listings if l.key == card.get("price_listing")), c.listings[0])
-        day = utc_day(d["created_at"])
-        price = (card.get("stats") or {}).get("price") or (baselines.get(d["id"]) or {}).get("price") or _bar_close_on(app, listing, day)
+        rp = _report_price(app, c, d, baselines)
+        listing, day, price, now = rp["listing"], rp["day"], rp["price"], rp["now"]
         scen = [x for x in card.get("scenarios", []) if x.get("name") in SCENARIO_LABEL and x.get("price_low") and x.get("price_high")]
         mids = {x["name"]: (x["price_low"] + x["price_high"]) / 2 for x in scen}
         target = _range_model(scen, listing.key, listing.currency, "").target(mode) if scen else None
-        now, _ = _last_bar(app, listing)
         rows.append({"d": d, "day": day, "listing": listing, "price": price, "stance": card.get("stance"), "thesis": card.get("thesis"),
                      "mids": mids, "probs": {x["name"]: x.get("probability") for x in scen}, "target": target,
                      "upside": target / price - 1 if target and price else None, "now": now,
-                     "since": now / price - 1 if now and price else None, "latest": i == 0,
+                     "since": rp["since"], "latest": i == 0,
                      "baseline": bool(tr and tr["enabled"] and tr["dossier_id"] == d["id"]), "revisions": d["id"] in baselines})
     return rows
 

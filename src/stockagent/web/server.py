@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import threading
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
@@ -52,6 +53,29 @@ def asset_url(name: str) -> str:
 
 
 templates.env.globals["asset_url"] = asset_url
+
+
+def _build_info() -> str:
+    """当前运行代码的版本与 commit，如 `v0.1.0 · 852043f`（工作区有未提交改动时加 `+`）；非 git 环境只显示版本号。
+    进程启动时算一次：它描述的是这个 stock web 进程加载的代码。"""
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        ver = f"v{version('stockagent')}"
+    except PackageNotFoundError:
+        ver = ""
+    root = Path(__file__).resolve().parents[3]
+    try:
+        def git(*args: str) -> str:
+            return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+        rev = git("rev-parse", "--short", "HEAD")
+        if git("status", "--porcelain", "--", "src"):
+            rev += "+"
+    except (OSError, subprocess.SubprocessError):
+        rev = ""
+    return " · ".join(x for x in (ver, rev) if x)
+
+
+templates.env.globals["BUILD_INFO"] = _build_info()
 
 
 class AppHolder:

@@ -32,7 +32,7 @@ from .triage import DIRECTIONS, event_label, listing_market, short_id
 from .utils import fmt_local, iso, log, parse_iso, pct, sha1, today_local, utcnow
 from .valuation import (
     FACT_PATHS, SCENARIOS, TARGET_LABEL, ValuationModel, _range_model, apply_op, build_baseline, check_value, describe, fmt,
-    get_values, listing_views, load_model, path_label, paths, refresh_fx, risk_stats, set_value, stance_check,
+    display_price, get_values, listing_views, load_model, path_label, paths, refresh_fx, risk_stats, set_value, stance_check,
 )
 
 THESIS_STATUS = {"intact": "完好", "strengthened": "加强", "weakened": "削弱", "broken": "失效"}
@@ -252,7 +252,8 @@ def status(app: App, company: Company) -> dict | None:
     model = load_model(rev["model"])
     live_model, fx_note = refresh_fx(app, model)
     live = live_model.target(app.settings.tracker.target)
-    price, price_date = pricing_close(app, company, model.listing)
+    px = display_price(app, next((l for l in company.listings if l.key == model.listing), company.pricing_listing))  # 盘中为最新价；与情景统计同一个价
+    price, price_date = px["price"], px["day"]
     since = iso(utcnow() - timedelta(days=app.settings.tracker.redo_cooldown_days))
     redo = app.db.recent_job("dossier", company.id, since)
     stats = risk_stats(live_model, price)

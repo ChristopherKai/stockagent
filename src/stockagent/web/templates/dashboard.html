@@ -3,6 +3,7 @@
 {% block title %}仪表盘{% endblock %}
 {% block content %}
 {% if llm_reason %}<div class="flash err">标的追踪的模型暂不可用：{{ llm_reason }}（到「设置 → LLM」配置）</div>{% endif %}
+{% set banner_next = '/' %}{% include "_scen_banner.html" %}
 
 <section class="card">
   <div class="card-head"><h2>追踪中的标的</h2><a class="btn small" href="/companies">管理观察清单</a></div>

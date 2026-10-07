@@ -265,6 +265,9 @@ scheduler:
     - {name: 早盘日报, task: run, args: [--push], cron: 30 8 * * 1-5, enabled: false}
     - {name: 收盘日报, task: run, args: [--push], cron: 30 17 * * 1-5, enabled: false}
     - {name: 盘中提醒, task: alert, args: [], cron: '*/20 9-16 * * 1-5', enabled: false}
+    # 行情刷新：每 5 分钟取追踪中公司的实时快照（无模型；调度器在 web 进程内直接执行，不产生任务记录；休市的市场自动跳过）。
+    - {name: 行情刷新·日间与美股夜盘, task: quotes_refresh, args: [], cron: '*/5 9-16,21-23 * * 1-5', enabled: true}
+    - {name: 行情刷新·美股凌晨, task: quotes_refresh, args: [], cron: '*/5 0-5 * * 2-6', enabled: true}
     - {name: 周末深度报告, task: dossier, args: [], cron: 0 20 * * 6, enabled: false}
     - {name: 选股·事件池, task: screen_run, args: [--event-only], cron: 0 18 * * 1-5, enabled: true}
     - {name: 选股·长线池, task: screen_run, args: [--long-only], cron: 0 10 * * 6, enabled: true}

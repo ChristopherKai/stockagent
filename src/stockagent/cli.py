@@ -15,7 +15,8 @@ from pathlib import Path
 import requests
 
 from . import app as appmod
-from . import brief, consensus, coverage, docs, dossier, evaluate, imafeed, jobs, monitor, newco, notify, profile, tracker, triage, twitterfeed
+from . import (brief, consensus, coverage, docs, dossier, evaluate, imafeed, jobs, monitor, newco, notify, profile, quotes, scenario_watch,
+               tracker, triage, twitterfeed)
 from .app import SOURCE_LABEL, App, backfill_releases, refine_news_dates
 from .config import ConfigError
 from .llm import LLMError
@@ -145,6 +146,7 @@ def _run(app: App, args) -> None:
     _print(docs.import_inbox(app.db, app.data_dir, app.watchlist) or ["收件箱为空"])
     print("2/6 抓取行情、公告、新闻…")
     _print(appmod.fetch(app, companies))
+    _print(scenario_watch.check(app, tracker.tracked(app, companies), push=args.push))  # 收盘行情已入库：现价所处情景有没有变
     if app.settings.consensus.enabled:
         print("   业绩对比一致预期…")
         _print(consensus.snapshot(app, companies) + consensus.check(app, companies) or ["没有新发布的业绩"])
@@ -169,6 +171,7 @@ def _run(app: App, args) -> None:
     print(f"5/6 标的追踪（{app.llm.describe('tracker') if use_llm else '--no-llm：只检查新报告与待处理依据'}）…")
     res = tracker.run(app, companies, origin="run", use_llm=use_llm, progress=print)
     _print(res.msgs)
+    _print(scenario_watch.check(app, tracker.tracked(app, companies), push=args.push))  # 估值修正后情景归属可能变
     gaps = coverage.report(app, companies)
     if gaps:
         print("数据缺口汇总（完整列表：stock status）：")
@@ -176,6 +179,15 @@ def _run(app: App, args) -> None:
     print("6/6 ", end="")
     _brief(app, companies, use_llm, args.push, args.open, tracked=res.notable)
     print(f"完成，用时 {time.monotonic() - t0:.0f} 秒")
+
+
+def cmd_quotes(args) -> None:
+    app = _load(args)
+    with app.lock("quotes") as ok:
+        if not ok:
+            print("已有行情刷新在运行，跳过")
+            return
+        _print(quotes.refresh(app, app.watchlist.select(args.company), push=not args.no_push) or ["追踪中公司所在的市场均已休市（或没有追踪中的公司），无需刷新"])
 
 
 def cmd_alert(args) -> None:
@@ -323,6 +335,7 @@ def cmd_target(args) -> None:
             print(f"标的追踪（{app.llm.describe('tracker')}）…")
             res = tracker.run(app, targets, origin="cli", progress=print)
             _print(res.msgs)
+            _print(scenario_watch.check(app, targets, push=args.push))
             if args.push and res.notable:
                 _print(notify.push(app.settings, f"【目标价修正】{today_local():%Y-%m-%d}",
                                    "\n".join(res.notable) + f"\n（{tracker.DISCLAIMER}）") or ["未配置推送渠道（见 config.yaml notify）"])
@@ -897,6 +910,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--open", action="store_true")
     sp.add_argument("--no-llm", action="store_true")
     sp.set_defaults(func=cmd_brief)
+
+    qp = sub.add_parser("quotes", help="行情刷新（无模型）：追踪中公司各上市地的实时快照，休市的市场跳过；刷新后检查情景切换")
+    qsub = qp.add_subparsers(dest="quotes_cmd", required=True)
+    sp = with_company(qsub.add_parser("refresh", help="取快照（价格、昨收、涨跌幅），不拉日线；价格进入新的情景时页面通知并推送"))
+    sp.add_argument("--no-push", action="store_true", help="情景切换只写库与页面，不推送")
+    sp.set_defaults(func=cmd_quotes)
 
     sp = with_company(sub.add_parser("alert", help="盘中：抓公告和新闻→分级→推送重要事件"))
     sp.add_argument("--no-push", action="store_true")

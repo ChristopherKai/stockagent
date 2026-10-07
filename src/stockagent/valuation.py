@@ -12,12 +12,14 @@ import json
 import math
 import re
 import statistics
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from . import marketclock
 from .tools import MATRIX_BASES, infer_basis, matrix_price, sotp_price
+from .utils import CST, parse_iso
 
 ScenarioName = Literal["bull", "base", "bear"]
 SCENARIOS = ("bull", "base", "bear")
@@ -798,30 +800,87 @@ def equivalents(app, model: ValuationModel, company, target: float) -> list[str]
     return out
 
 
+QUOTE_STALE_MIN = 30    # 盘中快照超过多少分钟没更新，页面标灰并提示「行情未更新」
+
+
+def _bar_tail(app, secid: str) -> tuple[float | None, str | None, float | None]:
+    """最近一根日线的 (收盘价, 日期, 前一根收盘价)。"""
+    bars = app.bars(secid, limit=5)
+    if bars is None:
+        return None, None, None
+    prev = float(bars["close"].iloc[-2]) if len(bars) > 1 else None
+    return float(bars["close"].iloc[-1]), str(bars["date"].iloc[-1]), prev
+
+
+def _quote_change(q: dict, price: float) -> float | None:
+    if q.get("change_pct") is not None:
+        return float(q["change_pct"])
+    return price / q["prev_close"] - 1 if q.get("prev_close") else None
+
+
+def display_price(app, listing, ts: datetime | None = None) -> dict:
+    """页面展示用的价格（只读库，不联网）：{price, change_pct, status, day, time, taken_at, stale, source}。
+    - status="live"（该上市地此刻开盘，且有当天的快照）：快照最新价与日涨跌幅，time = 快照时刻（北京时间 HH:MM），
+      快照超过 QUOTE_STALE_MIN 分钟没更新则 stale=True；
+    - status="close"（收盘后 / 休市 / 没有可用快照）：收盘价与当日涨跌幅，day = 收盘日。收盘价取最近一根日线；
+      收盘后取到的快照比日线更新（日线晚上才抓）时用快照价。涨跌幅优先用收盘后取到的快照（与该收盘日一致），否则由最近两根日线收盘价算；
+    - 既没有快照也没有日线：price=None、status=None。
+    估值统计（空间、情景立场）与展示用同一个价，现价与空间不会对不上。"""
+    ts = ts or marketclock.now()
+    m, secid = listing.market, app.secid(listing)
+    q = app.db.quote(secid)
+    if q and not (q.get("price") and q["price"] > 0):
+        q = None
+    taken = parse_iso(q["taken_at"]) if q else None
+    out = {"price": None, "change_pct": None, "status": None, "day": None, "time": None, "taken_at": q["taken_at"] if q else None,
+           "stale": False, "source": None}
+    if q and marketclock.is_open(m, ts) and marketclock.local_day(m, taken) == marketclock.local_day(m, ts):
+        out.update(price=float(q["price"]), change_pct=_quote_change(q, float(q["price"])), status="live", source="quote",
+                   day=marketclock.local_day(m, ts).isoformat(), time=taken.astimezone(CST).strftime("%H:%M"),
+                   stale=ts - taken > timedelta(minutes=QUOTE_STALE_MIN))
+        return out
+    close, day, prev = _bar_tail(app, secid)
+    final = q is not None and marketclock.is_final(m, taken)  # 收盘后取到的快照
+    qday = None
+    if final:  # 休市日取到的快照 = 上一交易日收盘价：日期往回退到最近的交易日
+        qday = marketclock.local_day(m, taken)
+        while not marketclock.is_trading_day(m, qday):
+            qday -= timedelta(days=1)
+    if final and (day is None or qday.isoformat() > day):  # 快照比日线新：日线晚上才抓
+        price = float(q["price"])
+        out.update(price=price, change_pct=_quote_change(q, price), status="close", day=qday.isoformat(), source="quote")
+    elif close is not None:
+        chg = _quote_change(q, close) if final and qday.isoformat() == day else (close / prev - 1 if prev else None)
+        out.update(price=close, change_pct=chg, status="close", day=day, source="bar")
+    return out
+
+
 def _last_bar(app, listing) -> tuple[float | None, str | None]:
-    bars = app.bars(app.secid(listing), limit=5)
-    return (float(bars["close"].iloc[-1]), str(bars["date"].iloc[-1])) if bars is not None else (None, None)
+    """最近一根日线的 (收盘价, 日期)；展示与估值统计请用 display_price。"""
+    close, day, _ = _bar_tail(app, app.secid(listing))
+    return close, day
 
 
 STANCE_RANK = {"bullish": 0, "neutral": 1, "bearish": 2}
 
 
 def listing_views(app, company, model: ValuationModel, band: float, mode: str = "expected") -> list[dict]:
-    """每个上市地各自的视图（只读库，不联网）：现价、目标价、牛 / 基准 / 熊价格与各自的空间、按该地现价算的参考立场。
+    """每个上市地各自的视图（只读库，不联网）：现价（display_price：盘中最新价或收盘价）、日涨跌幅、目标价、牛 / 基准 / 熊价格与各自的空间、按该地现价算的参考立场。
     定价上市地直接用模型；其他上市地按同股同权的汇率平价折算（ADS 乘换股比例，缺汇率或缺 ads_ratio 时折算不了），
     所以 AH / ADS 溢价会体现为两地不同的空间与立场（例如 H 股折价→偏多，A 股溢价→偏空）。
     统计量（空间、跌破概率、参考立场）用「该地现价折回定价上市地口径」代入 risk_stats，与定价上市地的算法一致。"""
     base = next((l for l in company.listings if l.key == model.listing), None) or company.pricing_listing
-    p0, _ = _last_bar(app, base)
+    p0 = display_price(app, base)["price"]
     out = []
     for l in company.listings:
-        price, day = _last_bar(app, l)
+        px = display_price(app, l)
+        price, day = px["price"], px["day"]
         k: float | None = 1.0
         if l.key != base.key:
             r = fx_rate(app, model.price_currency, l.currency)
             a, b = _ads(l), _ads(base)
             k = r[0] * a / b if r and a and b else None
-        v = {"listing": l, "key": l.key, "label": l.display, "currency": l.currency, "price": price, "price_date": day,
+        v = {"listing": l, "key": l.key, "label": l.display, "currency": l.currency, "price": price, "price_date": day, "px": px,
              "primary": l.key == base.key, "multi": len(company.listings) > 1, "convertible": k is not None, "target": None, "upside": None, "scenarios": {},
              "stats": None, "stance": None, "reason": "", "premium": None}
         if k is not None and price:

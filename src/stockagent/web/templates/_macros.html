@@ -69,12 +69,18 @@
 {%- endmacro %}
 
 
-{# 各上市地的视图单元格：上市地、现价、目标价（相对现价）、牛 / 基准 / 熊价格（各自相对现价）。v 来自 valuation.listing_views #}
-{% macro view_cells(v, scen=True) -%}
+{# 各上市地的视图单元格：上市地、现价（盘中最新价 + 日涨跌幅 + 「盘中 HH:MM」，收盘后为收盘价与「收盘 MM-DD」）、目标价（相对现价）、牛 / 基准 / 熊价格（各自相对现价）。v 来自 valuation.listing_views #}
+{% macro view_cells(v, scen=True, price=True) -%}
 <td class="lst"><span class="mk mk-{{ v.listing.market }}">{{ MARKET_LABEL.get(v.listing.market, v.listing.market) }}</span>
   <span class="small">{{ v.label }}</span>{% if v.primary and v.multi %} <span class="muted small" title="估值按这个上市地定价，其他上市地按汇率平价折算">·定价</span>{% endif %}
   {%- if v.premium is not none %}<div class="muted small" title="按汇率平价折回定价上市地口径的溢价（正）/ 折价（负）">较定价地 <span class="{{ v.premium | dirclass }}">{{ v.premium | pct(0) }}</span></div>{% endif %}</td>
-<td class="r nowrap">{% if v.price %}<b>{{ v.price | num }}</b><div class="muted small" title="{{ v.price_date or '' }}">{{ v.currency }}</div>{% else %}<span class="muted">—</span>{% endif %}</td>
+{% if price %}<td class="r nowrap px{{ ' px-stale' if v.px.stale }}">{% if v.price %}<div class="px-main"><b>{{ v.price | num }}</b> <span class="muted small">{{ v.currency }}</span></div>
+  <div class="px-sub small">
+    {%- if v.px.change_pct is not none %}<span class="{{ v.px.change_pct | dirclass }}">{{ v.px.change_pct | pct(2) }}</span>{% endif %}
+    {%- if v.px.status == 'live' %} <span class="tag px-live" title="盘中最新价，快照时间 {{ v.px.taken_at | when }}">盘中 {{ v.px.time }}</span>
+    {%- elif v.px.status == 'close' %} <span class="tag" title="收盘价（{{ v.px.day }}）">收盘 {{ v.px.day[5:] }}</span>{% endif %}
+    {%- if v.px.stale %} <span class="px-warn" title="盘中快照超过 30 分钟没有更新（行情刷新没有在运行，或数据源暂时不可用）">行情未更新</span>{% endif %}</div>
+  {%- else %}<span class="muted">—</span>{% endif %}</td>{% endif %}
 <td class="r nowrap">{% if v.target is not none %}<b>{{ v.target | num }}</b><div class="small {{ v.upside | dirclass }}">{{ v.upside | pct }}</div>
   {%- elif v.price and not v.convertible %}<span class="muted small" title="缺汇率数据或美股 ADS 换股比例，无法按平价折算">无法折算</span>
   {%- else %}<span class="muted">—</span>{% endif %}</td>

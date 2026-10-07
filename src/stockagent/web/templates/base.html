@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="csrf-token" content="{{ csrf }}">
-<title>{% block title %}stockagent{% endblock %} · 自选股研究</title>
+<title>{% block title %}stockagent{% endblock %} · 自选股研究{% if BUILD_INFO %}（{{ BUILD_INFO }}）{% endif %}</title>
 <link rel="stylesheet" href="{{ asset_url('app.css') }}">
 <script src="{{ asset_url('app.js') }}" defer></script>
 </head>
 <body class="{{ 'red-up' if red_up else 'green-up' }}">
 {% set path = request.url.path %}
 <header class="top">
-  <a class="brand" href="/">stockagent<span>自选股研究</span></a>
+  <a class="brand" href="/">stockagent<span>自选股研究</span>{% if BUILD_INFO %}<span class="ver" title="当前运行的版本与 commit（+ = src 有未提交改动）">{{ BUILD_INFO }}</span>{% endif %}</a>
   <nav>
     <a href="/" class="{{ 'on' if path == '/' }}">仪表盘</a>
     <a href="/companies" class="{{ 'on' if path.startswith('/companies') or path.startswith('/c/') }}">观察清单</a>

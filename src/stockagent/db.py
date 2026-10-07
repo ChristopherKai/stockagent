@@ -6,6 +6,7 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -278,6 +279,23 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, id);
 
+CREATE TABLE IF NOT EXISTS scenario_events (  -- 情景切换：追踪中的公司现价进入了另一个情景（scenario_watch.py，代码计算）
+    id           INTEGER PRIMARY KEY,
+    company_id   TEXT NOT NULL,
+    listing      TEXT NOT NULL,           -- 定价上市地（显示用，如 00700.HK）
+    old_scenario TEXT NOT NULL,           -- bull | base | bear
+    new_scenario TEXT NOT NULL,
+    price        REAL,                    -- 触发时的现价（定价上市地币种）
+    change_pct   REAL,                    -- 当日涨跌幅（小数）
+    snapshot_json TEXT,                   -- 各情景价格 / 空间 / 驱动与目标价
+    reason       TEXT NOT NULL,           -- price | valuation（估值修正后归属变化）
+    revision_id  INTEGER,
+    stance       TEXT,
+    created_at   TEXT NOT NULL,
+    read_at      TEXT                     -- 页面上点了「知道了」的时间
+);
+CREATE INDEX IF NOT EXISTS idx_scenario_events_unread ON scenario_events(read_at, id);
+
 CREATE TABLE IF NOT EXISTS chats (          -- 报告研读对话（只供理解报告，不作为追踪修正或深度报告的依据）
     id           INTEGER PRIMARY KEY,
     company_id   TEXT NOT NULL,
@@ -511,11 +529,11 @@ class DB:
         )
         return pd.DataFrame(rows)
 
-    def save_quote(self, secid: str, data: dict) -> None:
+    def save_quote(self, secid: str, data: dict, taken_at: datetime | None = None) -> None:
         self._exec(
             "INSERT INTO quotes(secid, taken_at, data_json) VALUES(?,?,?) "
             "ON CONFLICT(secid) DO UPDATE SET taken_at=excluded.taken_at, data_json=excluded.data_json",
-            (secid, iso(utcnow()), json.dumps(data, ensure_ascii=False)),
+            (secid, iso(taken_at or utcnow()), json.dumps(data, ensure_ascii=False)),
         )
 
     def quote(self, secid: str) -> dict | None:
@@ -992,6 +1010,30 @@ class DB:
         """某公司某类任务在 since 之后的最近一次（排队、运行或已完成；取消的不算）。"""
         return self._one("SELECT * FROM jobs WHERE task=? AND company_id=? AND created_at>=? AND status NOT IN ('cancelled') "
                          "ORDER BY id DESC LIMIT 1", (task, company_id, since))
+
+    # ------------------------------------------------------------ 情景切换
+
+    def add_scenario_event(self, ev: dict) -> int:
+        return self._exec(
+            "INSERT INTO scenario_events(company_id, listing, old_scenario, new_scenario, price, change_pct, snapshot_json, reason, "
+            "revision_id, stance, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (ev["company_id"], ev["listing"], ev["old_scenario"], ev["new_scenario"], ev["price"], ev["change_pct"],
+             json.dumps(ev["snapshot"], ensure_ascii=False), ev["reason"], ev.get("revision_id"), ev.get("stance"), iso(utcnow()))).lastrowid
+
+    def scenario_events(self, unread_only: bool = False, company_id: str | None = None, limit: int = 50) -> list[dict]:
+        where = [x for x, on in (("read_at IS NULL", unread_only), ("company_id=?", company_id is not None)) if on]
+        rows = self._all("SELECT * FROM scenario_events" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY id DESC LIMIT ?",
+                         (*([company_id] if company_id is not None else []), limit))
+        for r in rows:
+            r["snapshot"] = json.loads(r.pop("snapshot_json") or "{}")
+        return rows
+
+    def mark_scenario_events_read(self, event_id: int | None = None) -> int:
+        """event_id 为空 = 全部标为已读；返回标记的条数。"""
+        now = iso(utcnow())
+        if event_id is None:
+            return self._exec("UPDATE scenario_events SET read_at=? WHERE read_at IS NULL", (now,)).rowcount
+        return self._exec("UPDATE scenario_events SET read_at=? WHERE id=? AND read_at IS NULL", (now, event_id)).rowcount
 
     # ------------------------------------------------------------ 报告研读对话
 

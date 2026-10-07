@@ -1,0 +1,23 @@
+{# 未读的情景切换横幅（scenario_watch.py）：每条有「知道了」。用法：{% set banner_next = '/' %}{% include "_scen_banner.html" %}；需要 scen_events、names #}
+{% if scen_events %}
+<section class="card scen-banner">
+  <div class="card-head"><h2>情景切换 <span class="muted small">{{ scen_events | length }} 条未读</span></h2>
+    {% if scen_events | length > 1 %}<form method="post" action="/scenario-events/read-all" class="inline">{{ csrf_field }}<input type="hidden" name="next" value="{{ banner_next }}">
+      <button class="btn tiny ghost">全部知道了</button></form>{% endif %}</div>
+  {% for e in scen_events %}
+  <div class="scen-ev">
+    <div><a href="/c/{{ e.company_id }}"><b>{{ names.get(e.company_id, e.company_id) }}</b></a>
+      <span class="muted small">{{ e.listing }}</span>
+      {{ SCENARIO_LABEL[e.old_scenario] }} → <b class="scn-{{ e.new_scenario }}">{{ SCENARIO_LABEL[e.new_scenario] }}</b>{% if e.reason == 'valuation' %}<span class="badge warn" title="现价没有越界，是估值修正后现价所处的情景变了">估值修正后</span>{% endif %}
+      <span class="muted">现价</span> <b>{{ e.price | num }}</b> <span class="muted small">{{ e.snapshot.currency }}</span>
+      {% if e.change_pct is not none %}<span class="small {{ e.change_pct | dirclass }}">{{ e.change_pct | pct(2) }}</span>{% endif %}
+      <span class="muted small">{{ e.created_at | when }}</span></div>
+    <div class="small muted">{% for n in ['bull', 'base', 'bear'] %}{% set x = e.snapshot.scenarios.get(n) %}{% if x %}{{ SCENARIO_LABEL[n] }} {{ x.price | num }}（{{ x.upside | pct(0) }}）{% if not loop.last %}　{% endif %}{% endif %}{% endfor %}
+      ｜{{ TARGET_LABEL }} {{ e.snapshot.target | num }}</div>
+    <form method="post" action="/scenario-events/{{ e.id }}/read" class="inline">{{ csrf_field }}<input type="hidden" name="next" value="{{ banner_next }}">
+      <button class="btn tiny">知道了</button></form>
+  </div>
+  {% endfor %}
+  <p class="muted small">情景由代码按现价落在哪个情景的价格区间判定（1% 缓冲）；{{ DISCLAIMER }}</p>
+</section>
+{% endif %}

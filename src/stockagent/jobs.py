@@ -34,6 +34,7 @@ class Task:
     category: str = "常用"              # WebUI 分组
     desc: str = ""                     # WebUI 上的一句话说明
     listing: bool = False              # 接受 市场 + 代码（新增公司；在观察清单页提交，不出现在任务页和日程里）
+    inline: bool = False               # 轻量任务：内置调度器在 web 进程内直接执行，不落 jobs 记录（scheduler.INLINE）；手动提交仍是普通任务
 
 
 TASKS: dict[str, Task] = {t.key: t for t in [
@@ -45,6 +46,8 @@ TASKS: dict[str, Task] = {t.key: t for t in [
          desc="4 个研究 agent 并行研究后撰写报告，每家数分钟；不选公司表示全部；同一时间只运行一个"),
     Task("alert", "盘中提醒", ("alert",), ("--no-push",), "any", "pipeline",
          desc="盘中抓取公告和新闻并分级，推送重要事件与触发的证伪条件（不修正估值）"),
+    Task("quotes_refresh", "行情刷新", ("quotes", "refresh"), ("--no-push",), "any", category="追踪管理", inline=True,
+         desc="只取追踪中公司的实时快照（盘中最新价与日涨跌幅，休市的市场跳过，不调用模型），并检查情景切换；日程里每 5 分钟一次，由调度器直接执行，不产生任务记录"),
     Task("fetch", "抓取行情、公告、新闻", ("fetch",), ("--no-prices", "--no-filings", "--no-news"), "any", category="资料与分级",
          desc="日常流程的第一步；单独运行时不调用模型"),
     Task("triage", "事件分级", ("triage",), (), "any", category="资料与分级", desc="给还没分级的新闻和公告打分（重要性、方向）"),
