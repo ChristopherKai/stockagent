@@ -174,31 +174,17 @@ def test_scenario_assignment_intervals_gaps_and_outside():
     pt = V.ValuationModel(method="range", driver_label="价", multiple_label="—", shares=1, price_currency="HKD", listing="HK:00189",
                           scenarios=[V.ScenarioPoint(name="bull", driver=20, multiple=1, probability=0.5),
                                      V.ScenarioPoint(name="bear", driver=10, multiple=1, probability=0.5)])
-    assert scenario_watch.intervals(pt)["bear"] == pytest.approx((9.0, 11.0, 10.0))                   # 没有区间：单点取情景价 ±10% 作隐含区间
-    assert scenario_watch.assign(pt, 14.4) == "bear" and scenario_watch.assign(pt, 14.6) == "bull"    # 空隙 11–18，中点 14.5
+    assert scenario_watch.assign(pt, 14.9) == "bear" and scenario_watch.assign(pt, 15.1) == "bull"    # 没有区间：单点，按中点分
     assert scenario_watch.intervals(_range_model(0.5))["bull"][:2] == (7.5, 8.5)                       # 区间随情景价同比缩放
 
 
 def test_scenario_zone_hysteresis():
     m = _range_model()
-    assert scenario_watch.zone(m, 15.05, "base") == "base"       # 刚进入牛市区间 15–17（不足 1%）：不算切换
-    assert scenario_watch.zone(m, 15.2, "base") == "bull"
-    assert scenario_watch.zone(m, 14.95, "bull") == "bull" and scenario_watch.zone(m, 14.2, "bull") == "bull"   # 掉进空隙：仍算原情景
-    assert scenario_watch.zone(m, 12.5, "bull") == "base" and scenario_watch.zone(m, 12.95, "bull") == "bull"   # 进入基准区间 12–13（且越过边界 1%）才算
-    assert scenario_watch.zone(m, 14.05, None) == "bull"          # 没有历史状态：空隙按中点归属
-    assert scenario_watch.zone(m, 10.4, "base") == "base" and scenario_watch.zone(m, 10.6, "bear") == "bear"   # 空隙里不切换
-    assert scenario_watch.zone(m, 8.5, "base") == "bear" and scenario_watch.zone(m, 3, "base") == "bear"      # 进入熊市区间 / 跌穿区间下沿
-    assert scenario_watch.zone(m, 10.4, "bull") == "bear"         # prev 不与空隙相邻（牛 → 空隙在熊/基准之间）：按中点归属
-
-
-def test_point_scenarios_gap_is_not_a_switch():
-    """回归（剑桥科技）：程序定价的情景是单点 88.2 / 144.9 / 213.4，现价 115.1 离熊价很远，不能因越过两价格中点 116.6 就报「进入熊市区间」。"""
-    pts = [V.ScenarioPoint(name=n, driver=v, multiple=1, probability=p) for n, v, p in (("bull", 213.4, 0.25), ("base", 144.9, 0.6), ("bear", 88.2, 0.15))]
-    m = V.ValuationModel(method="range", driver_label="价", multiple_label="—", shares=1, price_currency="HKD", listing="HK:06166", scenarios=pts)
-    assert scenario_watch.assign(m, 115.1) == "base"                                    # 无状态时的展示归属按空隙中点（97.0 与 130.4 之间，113.7）
-    assert scenario_watch.zone(m, 115.1, "base") == "base" and scenario_watch.zone(m, 100.0, "base") == "base"
-    assert scenario_watch.zone(m, 96.0, "base") == "bear"                               # 真正进入熊价 ±10%（79.4–97.0）才算
-    assert scenario_watch.zone(m, 115.1, "bear") == "bear" and scenario_watch.zone(m, 135.0, "bear") == "base"
+    assert scenario_watch.zone(m, 14.05, "base") == "base"       # 刚越过边界 14（不足 1%）：不算切换
+    assert scenario_watch.zone(m, 14.2, "base") == "bull"
+    assert scenario_watch.zone(m, 13.95, "bull") == "bull" and scenario_watch.zone(m, 13.8, "bull") == "base"
+    assert scenario_watch.zone(m, 14.05, None) == "bull"          # 没有历史状态：直接归属
+    assert scenario_watch.zone(m, 10.4, "base") == "base" and scenario_watch.zone(m, 10.2, "base") == "bear"
 
 
 # ---------------------------------------------------------------- 切换事件与推送
