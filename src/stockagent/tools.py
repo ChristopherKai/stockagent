@@ -899,7 +899,7 @@ class ToolBox:
                  "敏感性矩阵。basis 决定口径：equity 股权倍数（PE、PB、PS）——隐含股价 = 倍数 × 驱动指标 ÷ 股本 × 汇率，"
                  "倍数 × 净利润已是股权价值，不再加减净现金；ev 企业价值倍数（EV/EBITDA、EV/Sales）——隐含股价 =（倍数 × 驱动指标 + 净现金）÷ 股本 × 汇率，"
                  "净负债填负数。不填 basis 时按倍数名称判断（含 EV 为 ev，否则 equity）。例如驱动指标取 2027 年净利润、倍数取 PE（equity）；"
-                 "亏损公司可取收入、倍数取 EV/Sales（ev）。股本与驱动指标用同一数量级（如亿股与亿元）。"
+                 "亏损公司可取收入、倍数取 EV/Sales（ev）。股本一律以「亿股」为单位，驱动指标与净现金折成同一数量级的「亿」（报告币种；如百万美元的 900 写成 9），程序会按行情核对股本。"
                  "fx 把财报货币换成股价货币，必须使用上下文给出的最新汇率（不要凭记忆），current_price 用于算相对现价涨跌。"
                  "程序会自动补上缺少的一致预期净利行与定价上市地历史 PE 分位列（能取到数据时）。",
                  _obj({"driver_label": {"type": "string"}, "driver_values": {"type": "array", "items": {"type": "number"}},
@@ -992,7 +992,7 @@ class ToolBox:
                  "discount（该部分折价 0–1，可选）, method（估值依据，如「上市子公司市值」「8× 分部利润」）}]；"
                  "按「驱动指标 × 倍数」估值的分部请写 driver（如分部利润）与 multiple（倍数）代替 value（程序相乘），"
                  "这样牛/基准/熊三组情景才能逐分部定价——请对每个情景各调用一次，分部名称、持股、股本、净现金、汇率保持一致（折价与控股公司折价可以随情景变）。"
-                 "再加净现金、扣控股公司折价，除以股本并按 fx 换成股价货币。适合有上市子公司或多业务的公司。",
+                 "再加净现金、扣控股公司折价，除以股本并按 fx 换成股价货币。股本一律以「亿股」为单位，value/driver 与 net_cash 折成同一数量级的「亿」（报告币种），程序会按行情核对股本。适合有上市子公司或多业务的公司。",
                  _obj({"parts": {"type": "array", "items": {"type": "object", "properties": {
                            "name": {"type": "string"}, "value": {"type": "number"}, "driver": {"type": "number"},
                            "multiple": {"type": "number"}, "stake": {"type": "number"},
@@ -1050,8 +1050,25 @@ class ToolBox:
         return (f"当前市值隐含未来 {years} 年年均增长 {pct(g, 1, sign=False)}"
                 f"（折现率 {pct(discount_rate, 1, sign=False)}，永续增长 {pct(terminal_growth, 1, sign=False)}，净现金 {fmt_number(net_cash)}）")
 
+    def _shares_error(self, shares: float) -> str | None:
+        """shares 与行情推算的总股本（亿股）差一个数量级以上（单位写错：百万股、万股、股）时返回错误说明。
+        后面的程序定价与追踪都按「亿股」解读 shares，单位错了整个矩阵会被丢弃（情景价格退回报告正文抽取），所以在这里当场让模型改。"""
+        if self.company is None or shares <= 0:
+            return None
+        from . import valuation  # valuation → tools：放在函数里避免循环导入
+
+        listing = self.company.pricing_listing
+        ref = valuation.quote_shares(self.app.db.quote(self.app.secid(listing)), listing)
+        if not ref or abs(shares / ref - 1) <= valuation.SHARES_TOL:
+            return None
+        return (f"错误：shares={shares:g} 与行情推算的总股本约 {ref:.2f} 亿股不符。shares 必须以「亿股」为单位，"
+                f"驱动指标与 net_cash 折成同一数量级的「亿」（报告币种），例如财报以百万美元计的 900 写成 9（亿美元）、"
+                f"2,280.5 百万股写成 22.805（亿股）。请改正后重新调用。")
+
     def valuation_matrix(self, driver_label, driver_values, multiple_label, multiples, shares, net_cash=0.0, fx=1.0,
                          current_price=None, basis=None) -> str:
+        if err := self._shares_error(float(shares)):
+            return err
         basis = basis if basis in MATRIX_BASES else infer_basis(multiple_label)
         drivers, mults = [float(x) for x in driver_values], [float(x) for x in multiples]
         shares, net_cash, fx = float(shares), float(net_cash or 0), float(fx or 1)
@@ -1291,6 +1308,8 @@ class ToolBox:
         return "\n".join(out)
 
     def sotp(self, parts, shares, net_cash=0.0, fx=1.0, holdco_discount=0.0, current_price=None) -> str:
+        if err := self._shares_error(float(shares)):
+            return err
         rows, equity, per_share = sotp_value(parts, float(shares), float(net_cash), float(fx), float(holdco_discount))
         table = ["| 部分 | 100%价值 | 持股 | 折价 | 归属价值 | 依据 |", "|---|---|---|---|---|---|"]
         table += [f"| {r['name']} | {fmt_number(float(r['value']))} | {r['stake']:.1%} | {r['discount']:.0%} | "

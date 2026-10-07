@@ -519,3 +519,30 @@ def test_card_shows_the_cross_check_divergence(app, monkeypatch):
     assert "⚠ 交叉检查：矩阵基准价" in md and "不自动采用 SOTP" in md
     ok = {**card, "valuation_spec": {**spec, "cross_check": {**spec["cross_check"], "status": "ok", "switched": False}}}
     assert "⚠ 交叉检查" not in dossier._card_markdown(app.watchlist.get("acme"), ok) and "交叉检查：" in dossier._card_markdown(app.watchlist.get("acme"), ok)
+
+
+# ---------------------------------------------------------------- 工具层核对股本单位（金斯瑞：百万股被当成亿股，矩阵整体被丢弃）
+
+def test_matrix_and_sotp_reject_shares_in_wrong_unit(app):
+    """金斯瑞 2026-10 实例：财报以百万美元计，模型把股本写成 2280.5（百万股）。价格算得对，但后面的程序定价与追踪都按亿股解读，
+    整个矩阵会被丢弃、情景价格退回报告正文抽取。所以工具当场报错，让模型改成 22.805（亿股）并把驱动折成亿。"""
+    app.db.save_quote("116.01234", {"price": 42.88, "market_cap": 42.88 * 22.805e8})
+    box = ToolBox(app, app.watchlist.get("acme"))
+    args = {"driver_label": "2027E收入（百万美元）", "driver_values": [900, 1000], "multiple_label": "EV/Sales", "multiples": [6, 8],
+            "net_cash": 255, "fx": 7.848}
+    out = box.call("valuation_matrix", {**args, "shares": 2280.5})
+    assert out.startswith("错误") and "亿股" in out and "22.80" in out
+    parts = [{"name": "A", "driver": 250, "multiple": 22}]
+    assert box.call("sotp", {"parts": parts, "shares": 2280.5, "net_cash": 255, "fx": 7.848}).startswith("错误")
+    ok = box.call("valuation_matrix", {**args, "driver_values": [9, 10], "net_cash": 2.55, "shares": 22.805})  # 折成亿后通过
+    assert not ok.startswith("错误") and "隐含股价" in ok
+    assert not box.call("sotp", {"parts": [{"name": "A", "driver": 2.5, "multiple": 22}], "shares": 22.805, "net_cash": 2.55,
+                                 "fx": 7.848}).startswith("错误")
+
+
+def test_shares_unit_check_needs_a_quote(app):
+    """没有行情快照（新公司、行情源挂了）无从核对，不拦。"""
+    box = ToolBox(app, app.watchlist.get("acme"))
+    out = box.call("valuation_matrix", {"driver_label": "d", "driver_values": [10], "multiple_label": "PE", "multiples": [8],
+                                        "shares": 2280.5})
+    assert not out.startswith("错误")

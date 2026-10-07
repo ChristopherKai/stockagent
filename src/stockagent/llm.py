@@ -236,7 +236,15 @@ class LLM:
             mt = min(route.max_tokens or max_tokens, prof.max_tokens)
             prompt = user
             for i in range(2):
-                text, usage, model, truncated = self._call_logged(task, pname, prof, route, system, prompt, schema, mt)
+                for k in range(self.EMPTY_RETRIES + 1):  # 正文为空（推理模型偶发只吐思考）：同一请求再来一次，不让空结果走到调用方
+                    text, usage, model, truncated = self._call_logged(task, pname, prof, route, system, prompt, schema, mt)
+                    if text.strip() or truncated:
+                        break
+                    log.warning("[%s] 模型返回空正文，重试 %d/%d", pname, k + 1, self.EMPTY_RETRIES)
+                if truncated and not text.strip() and mt < prof.max_tokens and i == 0:  # 思考用完了整个输出预算、正文一个字没写：续写无从谈起，放宽预算重来
+                    log.warning("[%s] 输出预算 max_tokens=%d 被思考用完、正文为空，改用 %d 重试", pname, mt, prof.max_tokens)
+                    mt = prof.max_tokens
+                    continue
                 if truncated and schema is None:  # 文本：从中断处续写并拼接
                     text, usage = self._continue(task, pname, prof, route, system, prompt, text, usage, mt)
                 elif truncated:  # JSON 无法续写：用该模型的最大输出上限重试一次
@@ -353,6 +361,8 @@ class LLM:
 
         return self._with_fallback(name, attempt, use_fallback=profile is None)
 
+    EMPTY_RETRIES = 1  # complete()：正文为空时同请求重试的次数
+
     # 失败得这么快才值得重试（限流、瞬时 5xx）；耗了很久才失败（网关超时、读超时）重试只会再等一轮，直接换备用模型
     RETRY_FAST_S = 30.0
 
@@ -419,6 +429,7 @@ class LLM:
         stream = client.chat.completions.create(**kwargs, stream=True, stream_options={"include_usage": True})
         split = StreamSplitter(on_event, hide_tool_calls=prof.tool_mode != "native")
         content: list[str] = []
+        reasoning: list[str] = []
         calls: dict[int, dict] = {}
         finish, model, u = None, prof.model, None
         for chunk in stream:
@@ -431,6 +442,7 @@ class LLM:
             extra = getattr(d, "model_extra", None) or {}
             thinking = extra.get("reasoning_content") or extra.get("reasoning")  # DeepSeek、Qwen 等把思考放在单独字段
             if isinstance(thinking, str) and thinking:
+                reasoning.append(thinking)
                 on_event({"type": "thinking", "text": thinking})
             if d.content:
                 content.append(d.content)
@@ -446,7 +458,7 @@ class LLM:
         split.flush()
         tool_calls = [SimpleNamespace(id=c["id"] or f"call_{i}", function=SimpleNamespace(name=c["name"], arguments=c["arguments"] or "{}"))
                       for i, c in sorted(calls.items())]
-        message = SimpleNamespace(content="".join(content), tool_calls=tool_calls or None)
+        message = SimpleNamespace(content="".join(content), tool_calls=tool_calls or None, reasoning_content="".join(reasoning))
         resp = SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish)], model=model)
         usage = {"input_tokens": getattr(u, "prompt_tokens", None), "output_tokens": getattr(u, "completion_tokens", None),
                  "cache_read": 0, "cache_write": 0}
@@ -748,7 +760,20 @@ class LLM:
             kwargs["extra_body"] = prof.extra_body
         resp, usage, model = self._openai_create(name, prof, kwargs)
         choice = resp.choices[0]
-        return (strip_think(choice.message.content or ""), choice.finish_reason == "length"), usage, model
+        text = strip_think(choice.message.content or "")
+        if not text:
+            self._note_empty(name, choice, usage, max_tokens)
+        return (text, choice.finish_reason == "length"), usage, model
+
+    @staticmethod
+    def _note_empty(name: str, choice, usage: dict, max_tokens: int) -> None:
+        """正文为空时把现场写进日志：是思考把输出预算用完（finish=length）、正文放进了思考字段，还是别的原因。"""
+        msg = choice.message
+        raw = msg.content or ""
+        think = getattr(msg, "reasoning_content", None) or (getattr(msg, "model_extra", None) or {}).get("reasoning_content") or ""
+        brief = lambda t: (t if len(t) <= 160 else t[:80] + " … " + t[-80:]).replace("\n", "\\n")  # noqa: E731
+        log.warning("[%s] 模型返回的正文为空：finish=%s，输出 %s token（上限 %d），原始正文 %d 字，思考 %d 字；正文 %r；思考 %r",
+                    name, choice.finish_reason, usage.get("output_tokens"), max_tokens, len(raw), len(think), brief(raw), brief(think))
 
     # ------------------------------------------------------------ 模拟
 

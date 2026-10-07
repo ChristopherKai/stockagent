@@ -96,3 +96,18 @@ def test_fill_gaps_all_groups_failed_marks_failed(monkeypatch, app):
 
     note, _l, _r = _run(monkeypatch, app, {}, run_agent=run_agent)
     assert note["text"].startswith(dossier.FAILED_MARK)
+
+
+def test_write_part_rewrites_empty_output_with_large_budget(monkeypatch, app):
+    """金斯瑞前半部分「只有 0 字」：推理型模型的思考用光输出预算。撰写的输出预算要给足（不是 16000），空输出要重写。"""
+    full = "# 标题\n\n" + "".join(f"## § {s}\n" + "正文。" * 300 + "\n\n" for s in dossier.PART1_SECTIONS)
+    replies, budgets, notes = ["", full], [], []
+
+    def complete(task, system, user, *, max_tokens=16000, **k):
+        budgets.append(max_tokens)
+        return LLMResult(text=replies.pop(0), data=None, model="m", profile="p", usage={})
+
+    monkeypatch.setattr(app.llm, "complete", complete)
+    out = dossier._write_part(app, app.watchlist.companies[0], ["s"], "u", dossier.PART1_SECTIONS, "前半部分", notes.append, title=True)
+    assert out == full.strip() and budgets == [dossier.WRITE_MAX_TOKENS] * 2 and dossier.WRITE_MAX_TOKENS > 16000
+    assert len(notes) == 1 and "只有 0 字" in notes[0] and "重写第 1 次" in notes[0]

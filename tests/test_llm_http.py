@@ -30,7 +30,7 @@ def _sse(text: str, stop_reason: str = "end_turn") -> bytes:
     return "".join(f"event: {e}\ndata: {json.dumps(d)}\n\n" for e, d in events).encode()
 
 
-def _chat_sse(model: str, text: str, finish: str = "stop") -> bytes:
+def _chat_sse(model: str, text: str, finish: str = "stop", reasoning: str = "") -> bytes:
     def chunk(delta, finish_reason=None, usage=None, choices=True):
         d = {"id": "c1", "object": "chat.completion.chunk", "created": 0, "model": model,
              "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}] if choices else []}
@@ -38,7 +38,8 @@ def _chat_sse(model: str, text: str, finish: str = "stop") -> bytes:
             d["usage"] = usage
         return f"data: {json.dumps(d)}\n\n"
 
-    parts = [chunk({"role": "assistant", "content": text[:2]}), chunk({"content": text[2:]}), chunk({}, finish),
+    parts = ([chunk({"role": "assistant", "reasoning_content": reasoning})] if reasoning else [])
+    parts += [chunk({"role": "assistant", "content": text[:2]}), chunk({"content": text[2:]}), chunk({}, finish),
              chunk({}, usage={"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}, choices=False), "data: [DONE]\n\n"]
     return "".join(parts).encode()
 
@@ -50,6 +51,7 @@ class Recorder:
         self.reply_text = '{"ok": true}'
         self.stop_reason = "end_turn"
         self.finish_reason = "stop"
+        self.replies: list[dict] = []  # 依次作为流式回复（text / finish / reasoning），耗尽后用 reply_text
 
 
 @pytest.fixture
@@ -75,7 +77,8 @@ def server():
                 for k, v in headers.items():
                     self.send_header(k, v)
             elif body.get("stream"):
-                payload = _chat_sse(body["model"], rec.reply_text, rec.finish_reason)
+                r = rec.replies.pop(0) if rec.replies else {}
+                payload = _chat_sse(body["model"], r.get("text", rec.reply_text), r.get("finish", rec.finish_reason), r.get("reasoning", ""))
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
             else:
@@ -268,3 +271,33 @@ def test_openai_truncated_text_is_continued(server, monkeypatch):
     res = llm.complete("t", ["s"], "u")
     assert res.text == "上半部分，下半部分。" and res.usage["output_tokens"] == 2
     llm._openai = orig
+
+
+def test_openai_empty_body_is_retried_and_logged(server, monkeypatch, caplog):
+    """推理模型偶发只吐思考、正文为空（研报前半部分「只有 0 字」）：同请求重试一次，并把现场写进日志。"""
+    monkeypatch.setenv("DS_KEY", "k")
+    server.replies = [{"text": "", "reasoning": "先想一想报告怎么写"}, {"text": "# 报告正文"}]
+    llm = _llm({"protocol": "openai", "base_url": server.url + "/v1", "model": "m", "api_key_env": "DS_KEY", "max_retries": 0})
+    with caplog.at_level("WARNING", logger="stockagent"):
+        res = llm.complete("t", ["s"], "u")
+    assert res.text == "# 报告正文" and len(server.requests) == 2
+    assert "正文为空" in caplog.text and "思考 9 字" in caplog.text and "finish=stop" in caplog.text
+
+
+def test_openai_empty_body_twice_is_returned_empty(server, monkeypatch):
+    """重试一次后仍为空：不无限重试，空文本交给调用方（dossier 的完整性检查会再重写）。"""
+    monkeypatch.setenv("DS_KEY", "k")
+    server.replies = [{"text": "", "reasoning": "想"}, {"text": "", "reasoning": "想"}]
+    llm = _llm({"protocol": "openai", "base_url": server.url + "/v1", "model": "m", "api_key_env": "DS_KEY", "max_retries": 0})
+    assert llm.complete("t", ["s"], "u").text == "" and len(server.requests) == 2
+
+
+def test_openai_thinking_ate_the_budget_retries_with_full_budget(server, monkeypatch):
+    """思考把 max_tokens 用完、正文一个字没写（finish=length）：不能拿空文本去「续写」，改用 profile 的最大输出上限重来。"""
+    monkeypatch.setenv("DS_KEY", "k")
+    server.replies = [{"text": "", "reasoning": "想" * 50, "finish": "length"}, {"text": "写好了"}]
+    llm = _llm({"protocol": "openai", "base_url": server.url + "/v1", "model": "m", "api_key_env": "DS_KEY", "max_retries": 0,
+                "max_tokens": 8000})
+    res = llm.complete("t", ["s"], "u", max_tokens=1000)
+    assert res.text == "写好了"
+    assert [r["body"]["max_tokens"] for r in server.requests] == [1000, 8000]
