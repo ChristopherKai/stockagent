@@ -189,6 +189,10 @@ class NotifyConfig(BaseModel):
     wecom_webhook_env: str | None = None
     telegram_token_env: str | None = None
     telegram_chat_id: str | None = None
+    feishu_app_id_env: str | None = None       # 飞书应用机器人（APP ID / APP SECRET）：长连接收消息、对话启动任务、发文件
+    feishu_app_secret_env: str | None = None
+    feishu_chat_id: str | None = None          # 应用机器人定时推送的会话（oc_ 开头）；不填则发到最近私聊过机器人的会话（data/feishu_home_chat.txt）
+    feishu_allowed_users: list[str] = Field(default_factory=list)   # 允许下指令的用户 open_id（ou_ 开头）或 user_id；空 = 谁也不能下指令
     alert_min_materiality: int = 4
 
 

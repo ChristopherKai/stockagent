@@ -318,7 +318,7 @@ def save_raw(path: Path, text: str, etag: str | None, backup_dir: Path, kind: st
 
 # 只允许密钥类变量名：避免借「设置 key」改写 PATH、PYTHONPATH 之类会影响子进程的环境变量
 SECRET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*_(KEY|TOKEN|SECRET|WEBHOOK)$")
-EXTRA_SECRET_NAMES = {"TWITTER_CT0"}  # twitter-cli 要求的变量名（x.com 的 ct0 Cookie），不以上述后缀结尾；只放行这一个确切的名字
+EXTRA_SECRET_NAMES = {"TWITTER_CT0", "FEISHU_APP_ID"}  # twitter-cli 要求的变量名（x.com 的 ct0 Cookie）、飞书应用的 APP ID，不以上述后缀结尾；只放行这些确切的名字
 
 
 def secret_name_ok(name: str) -> bool:

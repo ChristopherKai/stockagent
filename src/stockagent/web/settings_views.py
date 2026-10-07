@@ -409,7 +409,8 @@ def _secret_names(h) -> dict[str, list[str]]:
         if p.api_key_env:
             names.setdefault(p.api_key_env, []).append(f"模型 profile {n}")
     for field, label in (("feishu_webhook_env", "飞书 webhook"), ("feishu_secret_env", "飞书签名"),
-                         ("wecom_webhook_env", "企业微信 webhook"), ("telegram_token_env", "Telegram token")):
+                         ("wecom_webhook_env", "企业微信 webhook"), ("telegram_token_env", "Telegram token"),
+                         ("feishu_app_id_env", "飞书应用 APP ID"), ("feishu_app_secret_env", "飞书应用 APP SECRET")):
         if env := getattr(s.notify, field):
             names.setdefault(env, []).append(label)
     for env, label in {**SEARCH_KEYS, **TWITTER_KEYS}.items():

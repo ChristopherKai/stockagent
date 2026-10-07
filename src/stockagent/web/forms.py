@@ -73,6 +73,10 @@ LABELS: dict[str, tuple[str, str]] = {
     "notify.telegram_token_env": ("Telegram token 环境变量名", ""),
     "notify.telegram_chat_id": ("Telegram chat id", "先在 Telegram 里给你的 bot 发一条消息，再用浏览器打开 https://api.telegram.org/bot<token>/getUpdates，"
                                                     "返回里 message.chat.id 的数字就是它（群组为负数）"),
+    "notify.feishu_app_id_env": ("飞书应用 APP ID 环境变量名", "应用机器人：长连接收消息、对话启动任务、发文件；值在「密钥」页设置，修改后重启 stock web 生效"),
+    "notify.feishu_app_secret_env": ("飞书应用 APP SECRET 环境变量名", ""),
+    "notify.feishu_chat_id": ("飞书应用定时推送会话 ID", "oc_ 开头；日报、提醒也会通过应用机器人推送到该会话。不填则发到最近私聊过机器人的会话"),
+    "notify.feishu_allowed_users": ("飞书允许下指令的用户 open_id（每行一个）", "open_id（ou_ 开头）或 user_id 均可；空 = 谁也不能下指令。先给机器人发一条消息，回复里会带上你的 open_id"),
     "notify.alert_min_materiality": ("盘中提醒的最低重要性", "1–5"),
     # WebUI
     "web.port": ("端口", "修改后重启 stock web 生效"),

@@ -24,6 +24,7 @@ dependencies = [
     "python-multipart>=0.0.32",
     "ruamel-yaml>=0.19.1",
     "nh3>=0.3.7",
+    "lark-oapi>=1.7.3",
 ]
 
 [project.scripts]

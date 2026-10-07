@@ -239,8 +239,6 @@ def _dossier(app: App, args) -> None:
             print("    需要你补充的数据（补齐后运行 stock dossier " + c.id + " --reuse-notes）：")
             for line in lines:
                 print("      " + line)
-            if notify.channels(app.settings):
-                _print(notify.push(app.settings, f"【需要你补充的数据】{c.name} {len(lines)} 项", "\n".join(lines)))
         if (t := app.db.tracker(c.id)) and t["enabled"]:  # 追踪中的公司：用新报告重建估值基线
             try:
                 rev = tracker.rebase(app, c, origin="dossier")

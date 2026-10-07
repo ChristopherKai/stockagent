@@ -11,7 +11,7 @@ import signal
 import sys
 import traceback
 
-from . import cli
+from . import cli, feishu
 from .app import App
 from .utils import iso, utcnow
 
@@ -64,6 +64,11 @@ def main(argv: list[str] | None = None) -> int:
     status = "done" if code == 0 else ("cancelled" if code == CANCELLED else "failed")
     print(f"\n【任务 #{job['id']}】{ {'done': '完成', 'failed': '失败', 'cancelled': '已取消'}[status] }（退出码 {code}）", flush=True)
     app.db.update_job(job["id"], status=status, exit_code=code, finished_at=iso(utcnow()))
+    try:
+        if job["source"] == feishu.SOURCE:   # 来自飞书的任务：把结果发回原会话（重新加载，新公司此时已在观察清单里）
+            feishu.job_finished(App.load(args.config), job["id"], status)
+    except Exception:  # noqa: BLE001 - 推送失败不能改变任务的退出状态
+        traceback.print_exc()
     return code
 
 

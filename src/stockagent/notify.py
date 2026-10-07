@@ -9,15 +9,9 @@ import time
 
 import requests
 
+from . import feishu
 from .config import Settings, env
-from .utils import log
-
-
-def _truncate_bytes(s: str, limit: int) -> str:
-    b = s.encode("utf-8")
-    if len(b) <= limit:
-        return s
-    return b[: limit - 20].decode("utf-8", errors="ignore") + "\n……（已截断）"
+from .utils import log, truncate_bytes
 
 
 def channels(settings: Settings) -> list[str]:
@@ -25,6 +19,8 @@ def channels(settings: Settings) -> list[str]:
     out = []
     if env(n.feishu_webhook_env):
         out.append("飞书")
+    if feishu.credentials(settings) and feishu.home_chat(settings):
+        out.append("飞书应用")
     if env(n.wecom_webhook_env):
         out.append("企业微信")
     if env(n.telegram_token_env) and n.telegram_chat_id:
@@ -42,6 +38,10 @@ def missing(settings: Settings) -> list[str]:
         out.append(f"Telegram 已填写 chat id，但环境变量 {n.telegram_token_env} 里没有 token（设置 → 密钥）")
     if env(n.feishu_secret_env) and not env(n.feishu_webhook_env):
         out.append(f"飞书只设置了签名密钥，缺少 webhook（{n.feishu_webhook_env}）")
+    if env(n.feishu_app_id_env) and not env(n.feishu_app_secret_env):
+        out.append(f"飞书应用只设置了 APP ID，缺少 APP SECRET（{n.feishu_app_secret_env or '未配置环境变量名'}）")
+    if feishu.credentials(settings) and not n.feishu_allowed_users:
+        out.append("飞书应用已配置，但 notify.feishu_allowed_users 为空：谁也不能下指令（先给机器人发一条消息，按回复里的 open_id 填写）")
     return out
 
 
@@ -51,15 +51,23 @@ def push(settings: Settings, title: str, text: str) -> list[str]:
     results = []
 
     if url := env(n.feishu_webhook_env):
-        body: dict = {"msg_type": "text", "content": {"text": _truncate_bytes(f"{title}\n{text}", 29000)}}
+        body: dict = {"msg_type": "text", "content": {"text": truncate_bytes(f"{title}\n{text}", 29000)}}
         if secret := env(n.feishu_secret_env):
             ts = str(int(time.time()))
             sign = hmac.new(f"{ts}\n{secret}".encode(), digestmod=hashlib.sha256).digest()
             body.update(timestamp=ts, sign=base64.b64encode(sign).decode())
         results.append(_post("飞书", url, body, lambda d: d.get("code", d.get("StatusCode", -1)) == 0))
 
+    if (cli := feishu.client(settings)) and (chat_id := feishu.home_chat(settings)):
+        try:
+            cli.send_text(f"{title}\n{text}", chat_id=chat_id)
+            results.append("已推送到飞书应用")
+        except feishu.FeishuError as e:
+            log.warning("飞书应用推送失败：%s", e)
+            results.append(f"✗ 飞书应用推送失败：{e}")
+
     if url := env(n.wecom_webhook_env):
-        body = {"msgtype": "markdown", "markdown": {"content": _truncate_bytes(f"**{title}**\n{text}", 4000)}}
+        body = {"msgtype": "markdown", "markdown": {"content": truncate_bytes(f"**{title}**\n{text}", 4000)}}
         results.append(_post("企业微信", url, body, lambda d: d.get("errcode", -1) == 0))
 
     if (token := env(n.telegram_token_env)) and n.telegram_chat_id:

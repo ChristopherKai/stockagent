@@ -21,7 +21,7 @@ from markupsafe import Markup, escape
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .. import chat, config, dossier, jobs, scheduler, tracker, triage, valuation
+from .. import chat, config, dossier, feishu, jobs, scheduler, tracker, triage, valuation
 from ..app import MARKET_LABEL, SOURCE_LABEL, App
 from ..db import DB
 from ..jobs import JobRunner
@@ -154,6 +154,9 @@ def create_app(config_path: str | Path = "config.yaml", allowed_hosts: list[str]
                 holder.app.db.fail_pending_chat_messages(chat.INTERRUPTED)  # 上次退出时没写完的回答
                 runner.start()
                 stack.callback(runner.stop)
+                bot = feishu.Listener(holder)   # 飞书应用机器人：配了 APP ID / SECRET 才启动
+                if bot.start():
+                    stack.callback(bot.stop)
                 if start_scheduler:
                     sched.start()
                     stack.callback(sched.stop)

@@ -45,7 +45,7 @@
       <tr><td><a href="/jobs/{{ j.id }}">#{{ j.id }}</a></td>
         <td><a href="/jobs/{{ j.id }}">{{ j.title }}</a>{% if j.note %}<div class="muted small">{{ j.note }}</div>{% endif %}</td>
         <td><span class="badge job-{{ j.status }}">{{ status_label.get(j.status, j.status) }}</span>{% if j.exit_code %} <span class="muted small">退出码 {{ j.exit_code }}</span>{% endif %}</td>
-        <td class="small">{{ {'web': 'WebUI', 'scheduler': '日程', 'tracker': '标的追踪'}.get(j.source, j.source) }}</td>
+        <td class="small">{{ {'web': 'WebUI', 'scheduler': '日程', 'tracker': '标的追踪', 'feishu': '飞书'}.get(j.source, j.source) }}</td>
         <td class="small nowrap">{{ j.created_at | when }}</td><td class="small nowrap">{{ j.started_at | when if j.started_at else '' }}</td>
         <td class="small nowrap">{{ j.finished_at | when if j.finished_at else '' }}</td>
         <td>{% if j.status in ('queued', 'running') %}<form method="post" action="/jobs/{{ j.id }}/cancel" class="inline" data-confirm="取消任务 #{{ j.id }}？">{{ csrf_field }}<button class="btn tiny ghost">取消</button></form>{% endif %}</td></tr>

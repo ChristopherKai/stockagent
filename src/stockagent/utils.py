@@ -35,6 +35,14 @@ BROWSER_UA = (
 )
 
 
+def truncate_bytes(s: str, limit: int) -> str:
+    """按 UTF-8 字节数截断（推送渠道的长度限制是字节）。"""
+    b = s.encode("utf-8")
+    if len(b) <= limit:
+        return s
+    return b[: limit - 20].decode("utf-8", errors="ignore") + "\n……（已截断）"
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
