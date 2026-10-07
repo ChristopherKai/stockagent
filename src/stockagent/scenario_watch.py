@@ -1,9 +1,11 @@
 """情景切换检测（代码计算，不调用模型）：追踪中的公司，现价进入了牛 / 基准 / 熊哪个情景的价格区间。
 
-- 归属：价格落进某个情景的区间（ScenarioPoint.low/high，按当前情景价同比缩放，缩放方式同 valuation.risk_stats；
-  没有区间则当作单点）就属于它；区间重叠时取情景价最近的；落在区间之间的空隙或区间之外，
-  按相邻两个区间边界的中点归给较近的一个——任何价格都归属于牛 / 基准 / 熊之一。
-- 滞后：已处于某情景时，价格要越过边界 BUFFER（1%）才算切换，避免在边界附近来回抖动。
+- 归属：价格落进某个情景的区间（ScenarioPoint.low/high，按当前情景价同比缩放，缩放方式同 valuation.risk_stats）就属于它；
+  程序定价的情景只有单点（low = high），按情景价 ±POINT_BAND 取一个隐含区间；区间重叠时取情景价最近的；
+  落在区间之间的空隙，按相邻两个区间边界的中点归给较近的一个（assign，用于首次记录与展示）——任何价格都归属于牛 / 基准 / 熊之一。
+- 切换（zone）：只有价格真正进入另一个情景的区间才算切换；已处于某情景、价格落在它与相邻情景之间的空隙时，仍算原情景
+  （否则单点情景下，价格越过两价格的中点就会收到「进入熊市区间」，而价格其实离熊价还很远）。
+  进入新区间要越过边界 BUFFER（1%）才算，避免在边界附近来回抖动。
 - 只对定价上市地判断（model.listing）。状态存 kv `scen_zone:<公司 id>`（情景、所用修正 id、价格），第一次只记录不通知。
 - 切换写入 scenario_events（页面横幅，可「知道了」），并推送【情景切换】；估值修正后情景归属变化也推送，标注「估值修正后」。
 - 触发时机：每次行情刷新（quotes.py）之后；stock run 抓取行情之后、标的追踪之后；stock target run 修正之后。
@@ -21,6 +23,7 @@ from .valuation import (
 )
 
 BUFFER = 0.01           # 越过边界多少（相对价格）才算切换
+POINT_BAND = 0.10       # 单点情景（程序定价）的隐含区间：情景价上下各多少
 KV_PREFIX = "scen_zone:"
 DRIVER_CHARS = 240      # 推送里新进入情景的驱动说明最多多少字；其他情景更短
 OTHER_DRIVER_CHARS = 70
@@ -28,7 +31,7 @@ DISCLAIMER = "情景加权估值，非投资建议"
 
 
 def intervals(model: ValuationModel) -> dict[str, tuple[float, float, float]]:
-    """各情景的价格区间 {情景: (低, 高, 情景价)}：原区间按「当前情景价 ÷ 原区间中点」同比缩放；没有区间则低 = 高 = 情景价。"""
+    """各情景的价格区间 {情景: (低, 高, 情景价)}：原区间按「当前情景价 ÷ 原区间中点」同比缩放；没有区间（单点）则取情景价 ± POINT_BAND。"""
     out = {}
     for s in model.scenarios:
         v = model.price(s)
@@ -37,7 +40,7 @@ def intervals(model: ValuationModel) -> dict[str, tuple[float, float, float]]:
             k = v / ((lo + hi) / 2)
             lo, hi = lo * k, hi * k
         else:
-            lo = hi = v
+            lo, hi = v * (1 - POINT_BAND), v * (1 + POINT_BAND)
         out[s.name] = (lo, hi, v)
     return out
 
@@ -58,13 +61,22 @@ def assign(model: ValuationModel, price: float) -> str:
 
 
 def zone(model: ValuationModel, price: float, prev: str | None) -> str:
-    """带滞后的归属：已在 prev 情景时，价格要越过边界 BUFFER 才切换。"""
+    """带滞后的归属：已在 prev 情景时，价格要真正进入另一个情景的区间（越过边界 BUFFER）才切换；
+    落在两个区间之间的空隙里、prev 是空隙两侧之一时，仍算 prev。"""
     z = assign(model, price)
-    if prev is None or prev not in {s.name for s in model.scenarios} or z == prev:
+    iv = intervals(model)
+    if prev is None or prev not in iv or z == prev:
         return z
-    # 把价格朝 prev 情景所在的方向推 BUFFER：仍然归 prev 说明只是刚越界，不算
-    toward = 1 + BUFFER if intervals(model)[prev][2] > price else 1 - BUFFER
-    return prev if assign(model, price * toward) == prev else z
+    if not any(lo <= price <= hi for lo, hi, _ in iv.values()):
+        below = [n for n, (_, hi, _) in iv.items() if hi < price]
+        above = [n for n, (lo, _, _) in iv.items() if lo > price]
+        if below and above and prev in (max(below, key=lambda n: iv[n][1]), min(above, key=lambda n: iv[n][0])):
+            return prev
+        return z
+    # 价格在 z 的区间里：把价格朝 prev 所在的方向推 BUFFER，仍在 z 的区间里才算真的进入
+    toward = 1 + BUFFER if iv[prev][2] > price else 1 - BUFFER
+    lo, hi, _ = iv[z]
+    return z if lo <= price * toward <= hi else prev
 
 
 def live_model(app, company: Company, rev: dict) -> tuple[ValuationModel, object]:
