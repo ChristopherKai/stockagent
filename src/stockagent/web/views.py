@@ -804,7 +804,7 @@ def status_page(request: Request):
     breakers = []
     for key, at in app.db.kv_prefix("down:").items():
         age = (utcnow() - parse_iso(at)).total_seconds() / 60
-        breakers.append({"source": key[5:], "at": at, "active": age < appmod.DOWN_MINUTES})
+        breakers.append({"source": key[5:], "at": at, "active": age < appmod.down_minutes(key[5:])})
     locks = {name: lock_holder(app.lock_path(name)) for name in ("dossier", "pipeline", "web")}
     return page(request, "status.html", stats=app.db.stats(), breakers=breakers, usage=app.db.llm_usage_by(since),
                 channels=notify.channels(app.settings), missing=notify.missing(app.settings), locks=locks, config_path=h.config_path,
@@ -816,7 +816,9 @@ def status_page(request: Request):
 @router.post("/status/breaker/{source}/reset")
 def breaker_reset(request: Request, source: str):
     app = holder(request).app
-    app.db.kv_delete(f"down:{source}")
+    for key in [k for k in app.db.kv_prefix("down:") if k == f"down:{source}" or k.startswith(f"down:{source}@")]:
+        app.db.kv_delete(key)
+    app.down.discard_source(source)  # 长驻的 web 进程里还有内存中的熔断，只删 kv 不够
     return back("/status", ok=f"已复位 {source}：下次抓取会重新尝试")
 
 

@@ -37,7 +37,7 @@ class App:
     db: DB
     llm: LLM
     _session: requests.Session | None = field(default=None, repr=False)
-    down: set[str] = field(default_factory=set)  # 本次运行中已熔断的数据源
+    down: "Breakers" = field(default_factory=lambda: Breakers())  # 本进程内已熔断的数据源（有时效，长驻的 web 进程也会恢复）
 
     @classmethod
     def load(cls, config_path: str | Path = "config.yaml") -> "App":
@@ -235,36 +235,96 @@ def fetch(app: App, companies: list[Company], *, prices: bool = True, filings: b
 PRICE_SOURCES = {"eastmoney": eastmoney, "tencent": tencent, "sina": sina, "yahoo": yahoo}
 
 
-DOWN_MINUTES = 60  # 数据源被封或连接失败后，多久内不再尝试
+DOWN_MINUTES = 10  # 数据源连接失败后，多久内不再尝试（跨进程，记在 kv `down:<键>`）
+DOWN_MINUTES_BY_SOURCE = {"twitter": 60}  # 限流 / 凭证失效要等更久（X 的搜索额度按 15 分钟窗口计）
+NETWORK_DOWN_SOURCES = 4  # 这么多个不同的源在 NETWORK_WINDOW_S 秒内先后连接失败，视为本机网络故障而非对方封锁
+NETWORK_WINDOW_S = 120
+NETWORK_RETRY_MIN = 5  # 网络故障时只在本进程内暂停这么久，且不写 kv，免得睡醒后网络没恢复的一次失败把所有源封一小时
 
 
-def _is_down(app: App, source: str) -> bool:
-    if source in app.down:
+def down_minutes(key: str) -> int:
+    """熔断键（`源` 或 `源@范围`）的冷却分钟数。"""
+    return DOWN_MINUTES_BY_SOURCE.get(key.split("@", 1)[0], DOWN_MINUTES)
+
+
+class Breakers:
+    """进程内的熔断表：键 → (熔断时间, 冷却分钟, 是否连接失败)。`in` 会检查是否过期，所以长驻的 web 进程不会永远封住某个源。"""
+
+    def __init__(self) -> None:
+        self._d: dict[str, tuple[datetime, float, bool]] = {}
+
+    def add(self, key: str, minutes: float | None = None, conn: bool = False) -> None:
+        self._d[key] = (utcnow(), down_minutes(key) if minutes is None else minutes, conn)
+
+    def __contains__(self, key: str) -> bool:
+        item = self._d.get(key)
+        if item is None:
+            return False
+        if utcnow() - item[0] >= timedelta(minutes=item[1]):
+            del self._d[key]
+            return False
         return True
-    since = app.db.kv_get(f"down:{source}")
-    if since and utcnow() - parse_iso(since) < timedelta(minutes=DOWN_MINUTES):
-        app.down.add(source)
+
+    def discard(self, key: str) -> None:
+        self._d.pop(key, None)
+
+    def discard_source(self, source: str) -> None:
+        for k in [k for k in self._d if k == source or k.startswith(f"{source}@")]:
+            del self._d[k]
+
+    def clear(self) -> None:
+        self._d.clear()
+
+    def recent_conn(self, seconds: int) -> list[str]:
+        """最近 seconds 秒内因连接失败熔断的键。"""
+        now = utcnow()
+        return [k for k, (at, _, conn) in self._d.items() if conn and now - at < timedelta(seconds=seconds)]
+
+
+def _is_down(app: App, key: str) -> bool:
+    if key in app.down:
+        return True
+    since = app.db.kv_get(f"down:{key}")
+    if since and (left := timedelta(minutes=down_minutes(key)) - (utcnow() - parse_iso(since))) > timedelta(0):
+        app.down.add(key, minutes=left.total_seconds() / 60)
         return True
     return False
 
 
-def _trip(app: App, source: str) -> None:
-    """熔断某个数据源：本进程与其他进程在 DOWN_MINUTES 分钟内都跳过它。"""
-    app.down.add(source)
-    app.db.kv_set(f"down:{source}", iso(utcnow()))
+def _trip(app: App, key: str, conn: bool = False) -> None:
+    """熔断一个数据源：本进程与其他进程在冷却期内都跳过它。conn=True 表示因连接失败熔断（计入"本机断网"判断）。
+    多个不同的源几乎同时连不上，多半是本机网络没恢复（比如刚睡醒），这时只在本进程内短暂暂停，不写 kv。"""
+    app.down.add(key, conn=conn)
+    if conn:
+        sources = {k.split("@", 1)[0] for k in app.down.recent_conn(NETWORK_WINDOW_S)}
+        if len(sources) >= NETWORK_DOWN_SOURCES:
+            for k in app.down.recent_conn(NETWORK_WINDOW_S):
+                app.down.add(k, minutes=NETWORK_RETRY_MIN, conn=True)
+                app.db.kv_delete(f"down:{k}")
+            log.warning("%d 个数据源（%s）几乎同时连接失败，按本机网络故障处理，%d 分钟后重试",
+                        len(sources), "、".join(sorted(sources)), NETWORK_RETRY_MIN)
+            return
+    app.db.kv_set(f"down:{key}", iso(utcnow()))
+
+
+def breaker_scope(fn) -> str | None:
+    """同一个源的不同接口常在不同域名上（东财的 K 线在 push2his、快照在 push2），分开熔断：一个被拒不连累另一个。"""
+    return {"fetch_klines": "kline", "fetch_quote": "quote"}.get(getattr(fn, "__name__", ""))
 
 
 def _try(app: App, source: str, fn, *args, **kwargs):
-    """调用某个数据源；连接被拒时熔断该源（本次运行及之后 DOWN_MINUTES 分钟内跳过），避免每个请求都卡在重试上。"""
-    if _is_down(app, source):
+    """调用某个数据源；连接被拒时熔断该源（冷却 DOWN_MINUTES 分钟内跳过），避免每个请求都卡在重试上。"""
+    scope = breaker_scope(fn)
+    key = f"{source}@{scope}" if scope else source
+    if _is_down(app, key):
         return None
     try:
         return fn(*args, **kwargs)
     except (requests.ConnectionError, requests.exceptions.RetryError) as e:
-        _trip(app, source)
-        log.warning("%s 连接失败，%d 分钟内不再使用：%s", source, DOWN_MINUTES, str(e)[:120])
+        _trip(app, key, conn=True)
+        log.warning("%s 连接失败，%d 分钟内不再使用：%s", key, down_minutes(key), str(e)[:120])
     except requests.RequestException as e:
-        log.info("%s 请求失败：%s", source, str(e)[:120])
+        log.info("%s 请求失败：%s", key, str(e)[:120])
     return None
 
 
