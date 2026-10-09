@@ -1,7 +1,7 @@
 """股票池、日线与指标。
 
 两阶段，避免触发东方财富限流：
-1. 第一阶段只用选股器已入库的全市场批量数据（screen_universe：港股通 + 全部 A 股）：排除 ST、退市整理、上市不满一年、
+1. 第一阶段只用选股器已入库的全市场批量数据（screen_universe：港股默认只取港股通标的，加全部 A 股）：排除 ST、退市整理、上市不满一年、
    市值低于下限的，再按市值取前 N 只（bars_universe）。不发任何请求。
 2. 第二阶段只对这 N 只用日线：晚间任务（refresh_bars）逐只限速请求、出错退避、可中断续跑，结果存进 bars 表；
    盘前计划只读库，不联网。流动性下限（20 日成交额中位数）、相对强度排名都在这一阶段按缓存的日线计算。
@@ -30,11 +30,15 @@ from .config import FundsFile
 def stage1(app: App, cfg: FundsFile, market: str, limit: int | None = None) -> tuple[list[dict], dict[str, int]]:
     """选股器全市场表 → 排除 → 按市值取前 N。返回 (股票, 剔除原因计数)。"""
     from ..screen import store as sc_store
+    from ..screen.universe import in_hk_scope
 
     uc = cfg.universe
     dropped: dict[str, int] = {}
     out = []
     for u in sc_store.universe(app.db, market):
+        if not in_hk_scope(u, "connect" if uc.hk_connect_only else "all"):
+            dropped["不在港股通"] = dropped.get("不在港股通", 0) + 1
+            continue
         why = exclude_reason(u, uc.min_mcap[market], uc.min_listing_days)
         if why:
             dropped[why] = dropped.get(why, 0) + 1

@@ -94,18 +94,23 @@ def hk_code(secucode: str) -> str:
 
 # ---------------------------------------------------------------- 港股
 
-def hk_connect(session: requests.Session) -> dict[str, dict]:
-    """港股通标的（沪、深港股通任一）：{代码: {name, org_code, sh, sz, security_type, board, listing_date}}。"""
+def hk_listed(session: requests.Session) -> dict[str, dict]:
+    """全部港股证券（主板 + 创业板的股票；每次一次查询）：
+    {代码: {name, org_code, sh, sz, security_type, board, listing_date}}，sh / sz 表示是否在沪 / 深港股通名单内。"""
     out: dict[str, dict] = {}
-    for field, key in (("GANGGUTONGBIAODIHU", "sh"), ("GANGGUTONGBIAODISHEN", "sz")):
-        for r in rows_all(session, DC, "SECUCODE", reportName="RPT_HKF10_INFO_SECURITYINFO",
-                          columns="SECUCODE,SECURITY_NAME_ABBR,ORG_CODE,SECURITY_TYPE,BOARD,LISTING_DATE", filter=f'({field}="是")'):
-            d = out.setdefault(hk_code(r["SECUCODE"]), {"name": r.get("SECURITY_NAME_ABBR"), "org_code": r.get("ORG_CODE"),
-                                                        "sh": False, "sz": False,
-                                                        "security_type": r.get("SECURITY_TYPE"), "board": r.get("BOARD"),
-                                                        "listing_date": (r.get("LISTING_DATE") or "")[:10] or None})
-            d[key] = True
+    for r in rows_all(session, DC, "SECUCODE", reportName="RPT_HKF10_INFO_SECURITYINFO",
+                      columns="SECUCODE,SECURITY_NAME_ABBR,ORG_CODE,SECURITY_TYPE,BOARD,LISTING_DATE,GANGGUTONGBIAODIHU,GANGGUTONGBIAODISHEN"):
+        out[hk_code(r["SECUCODE"])] = {
+            "name": r.get("SECURITY_NAME_ABBR"), "org_code": r.get("ORG_CODE"),
+            "sh": r.get("GANGGUTONGBIAODIHU") == "是", "sz": r.get("GANGGUTONGBIAODISHEN") == "是",
+            "security_type": r.get("SECURITY_TYPE"), "board": r.get("BOARD"),
+            "listing_date": (r.get("LISTING_DATE") or "")[:10] or None}
     return out
+
+
+def hk_connect(session: requests.Session) -> dict[str, dict]:
+    """港股通标的（沪、深港股通任一），形状同 hk_listed。"""
+    return {c: d for c, d in hk_listed(session).items() if d["sh"] or d["sz"]}
 
 
 def hk_profiles(session: requests.Session, codes: list[str]) -> dict[str, dict]:

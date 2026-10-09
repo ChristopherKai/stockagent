@@ -20,19 +20,40 @@ from .views import back, holder, submit_job
 
 router = APIRouter(dependencies=[Depends(verify_csrf)])
 
+# 结果页的范围筛选（只过滤已有候选，不重新运行）：键 → (标签, 判断)
+SCOPES = {
+    "all": ("全部", lambda h: True),
+    "hkc": ("港股通", lambda h: h["market"] == "HK" and in_connect(h)),
+    "hko": ("非港股通港股", lambda h: h["market"] == "HK" and not in_connect(h)),
+    "hk": ("全部港股", lambda h: h["market"] == "HK"),
+    "a": ("A 股", lambda h: h["market"] == "A"),
+}
+HK_SCOPE_LABEL = {"all": "全部港股", "connect": "仅港股通"}
+
+
+def in_connect(h: dict) -> bool:
+    """候选是否在港股通内；没有标记的旧运行只含港股通标的。"""
+    return bool((h.get("metrics", {}).get("info") or {}).get("in_connect", True))
+
 
 @router.get("/screen")
-def screen_page(request: Request, pool: str = "long", run: int | None = None, show: str = "ABC"):
+def screen_page(request: Request, pool: str = "long", run: int | None = None, show: str = "ABC", scope: str = "all"):
     app = holder(request).app
     if pool not in buckets.POOL_LABEL:
         raise HTTPException(404, "没有这个池")
     runs = store.runs(app.db, pool, 20)
     cur = next((r for r in runs if r["id"] == run), None) if run else next((r for r in runs if r["status"] == "done"), None)
     hits = store.hits(app.db, cur["id"]) if cur else []
+    if scope not in SCOPES:
+        raise HTTPException(404, "没有这个范围")
+    n_all = len(hits)
+    hits = [h for h in hits if SCOPES[scope][1](h)]
     groups = [(t, [h for h in hits if h["tier"] == t]) for t in ("A", "B", "C", "D", "X") if t in show or show == "all"]
     watch = {l.key: c.id for c in app.watchlist.companies for l in c.listings}
     promoted = store.promoted(app.db)
     return page(request, "screen.html", pool=pool, runs=runs, cur=cur, groups=groups, show=show, watch=watch, promoted=promoted,
+                scope=scope, scopes={k: v[0] for k, v in SCOPES.items()}, n_hits=len(hits), n_all=n_all,
+                run_scope=((cur or {}).get("params") or {}).get("hk_scope"), HK_SCOPE_LABEL=HK_SCOPE_LABEL, in_connect=in_connect,
                 counts={t: sum(1 for h in hits if h["tier"] == t) for t in ("A", "B", "C", "D", "X")},
                 ideas=store.theme_ideas(app.db), POOL_LABEL=buckets.POOL_LABEL, TIER_LABEL=buckets.TIER_LABEL,
                 BUCKET_LABEL=buckets.BUCKET_LABEL, VERDICT_LABEL=VERDICT_LABEL, EVENT_LABEL=EVENT_LABEL,
@@ -53,6 +74,8 @@ async def screen_run(request: Request):
     flags = {"long": ["--long-only"], "event": ["--event-only"]}.get(pool, [])
     if form.get("no_llm"):
         flags.append("--no-llm")
+    if form.get("hk_scope") in HK_SCOPE_LABEL:
+        flags.append(f"--hk-scope={form.get('hk_scope')}")
     return submit_job(request, "screen_run", flags=flags)
 
 

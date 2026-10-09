@@ -1,6 +1,6 @@
-"""L0 股票池与报表数据：港股通 + A 股，全部来自东方财富数据中心的批量接口（不逐只请求）。
+"""L0 股票池与报表数据：全部港股（标出是否在港股通内）+ A 股，全部来自东方财富数据中心的批量接口（不逐只请求）。
 
-- 港股：港股通名单 → 公司资料（行业、机构类型、核数师）→ 主要指标（当前总市值、股息率、利润增速、毛利率）
+- 港股：全部港股名单（含港股通标记）→ 公司资料（行业、机构类型、核数师）→ 主要指标（当前总市值、股息率、利润增速、毛利率）
   → 现金流量表 / 资产负债表所需科目（按代码分批）。
 - A 股：最新交易日估值快照（市值、价格、行业）→ 按报告期取全市场现金流量表、资产负债表、主要指标（缓存；
   已披露一年以上的报告期只抓一次）。
@@ -53,18 +53,19 @@ def _same_period(rows: list[dict], latest: dict, field: str) -> dict | None:
 
 def refresh_hk(app: App, force: bool = False, progress: Callable[[str], None] = lambda m: None) -> list[str]:
     s = session(app)
-    progress("港股通名单…")
-    connect = _try(app, SOURCE, emscreen.hk_connect, s)
-    if not connect:
-        return ["✗ 没有取到港股通名单（东方财富数据中心不可用？）"]
-    codes = sorted(connect)
-    progress(f"港股通 {len(codes)} 只：公司资料与主要指标…")
+    progress("港股名单…")
+    listed = _try(app, SOURCE, emscreen.hk_listed, s)
+    if not listed:
+        return ["✗ 没有取到港股名单（东方财富数据中心不可用？）"]
+    codes = sorted(listed)
+    n_connect = sum(1 for d in listed.values() if d["sh"] or d["sz"])
+    progress(f"港股 {len(codes)} 只（其中港股通 {n_connect} 只）：公司资料与主要指标…")
     profiles = _try(app, SOURCE, emscreen.hk_profiles, s, codes) or {}
     since = (today_local() - timedelta(days=800)).isoformat()
     inds = _try(app, SOURCE, emscreen.hk_indicators, s, codes, since) or {}
     rows = []
     for code in codes:
-        c, p, ind = connect[code], profiles.get(code, {}), inds.get(code) or []
+        c, p, ind = listed[code], profiles.get(code, {}), inds.get(code) or []
         latest = ind[0] if ind else {}
         prev = _same_period(ind, latest, "STD_REPORT_DATE") if latest else None
         mcap, shares = to_float(latest.get("TOTAL_MARKET_CAP")), to_float(latest.get("ISSUED_COMMON_SHARES"))
@@ -76,6 +77,7 @@ def refresh_hk(app: App, force: bool = False, progress: Callable[[str], None] = 
             "report_ccy": infer_hk_currency(ind) if ind else None,
             "pe_ttm": to_float(latest.get("PE_TTM")), "pb": to_float(latest.get("PB_TTM")), "quote_date": today_local().isoformat(),
             "info": {
+                "in_connect": bool(c["sh"] or c["sz"]),
                 "connect": "、".join(k for k, v in (("沪", c["sh"]), ("深", c["sz"])) if v), "security_type": c.get("security_type"),
                 "industry_type": p.get("industry_type"), "auditor": p.get("auditor"),
                 "report_date": (latest.get("STD_REPORT_DATE") or "")[:10] or None,
@@ -88,7 +90,7 @@ def refresh_hk(app: App, force: bool = False, progress: Callable[[str], None] = 
             },
         })
     store.upsert_universe(app.db, rows, "HK")
-    msgs = [f"港股通股票池 {len(rows)} 只（有主要指标 {sum(1 for r in rows if r['mcap'])} 只）"]
+    msgs = [f"港股股票池 {len(rows)} 只（港股通 {n_connect} 只；有主要指标 {sum(1 for r in rows if r['mcap'])} 只）"]
     last = [u["fcf_at"] for u in store.universe(app.db, "HK") if u.get("fcf_at")]
     if force or len(last) < len(rows) * 0.8 or _stale(min(last, default=None), app.settings.screen.refresh_days):
         progress("港股报表（现金流量表、资产负债表）…")
@@ -218,3 +220,9 @@ def age_days(u: dict) -> int | None:
         return (today_local() - date.fromisoformat(u["listing_date"][:10])).days
     except ValueError:
         return None
+
+
+def in_hk_scope(u: dict, scope: str) -> bool:
+    """股票是否在港股筛选范围内。scope = connect 时港股只留港股通标的；A 股不受影响。
+    没有 in_connect 标记的旧快照来自只含港股通的时期，视为港股通。"""
+    return u["market"] != "HK" or scope != "connect" or bool((u.get("info") or {}).get("in_connect", True))

@@ -429,3 +429,75 @@ def test_screen_page_and_promote(seeded, project, monkeypatch):
     assert holder.app.watchlist.get("hk00001") is not None
     assert holder.app.db.jobs(5)[0]["task"] == "onboard"
     assert client.post(f"/screen/promote/{hit['id']}", follow_redirects=False).status_code == 403  # 没有 CSRF
+
+
+# ---------------------------------------------------------------- 港股范围：全部港股 / 仅港股通
+
+def test_refresh_hk_keeps_all_listed_and_marks_connect(app, monkeypatch):
+    from stockagent.screen import universe
+
+    listed = {
+        "00001": {"name": "港股通甲", "org_code": "O1", "sh": True, "sz": False, "security_type": "非H股", "board": "主板", "listing_date": "2000-01-01"},
+        "08001": {"name": "创业板乙", "org_code": "O2", "sh": False, "sz": False, "security_type": "非H股", "board": "创业板", "listing_date": "2010-01-01"},
+    }
+    ind = {c: [{"STD_REPORT_DATE": "2026-06-30", "TOTAL_MARKET_CAP": 1e10, "ISSUED_COMMON_SHARES": 1e9}] for c in listed}
+    monkeypatch.setattr(emscreen, "hk_listed", lambda s: listed)
+    monkeypatch.setattr(emscreen, "hk_profiles", lambda s, codes: {})
+    monkeypatch.setattr(emscreen, "hk_indicators", lambda s, codes, since: ind)
+    monkeypatch.setattr(emscreen, "hk_statements", lambda s, codes, a, b: {})
+    msgs = universe.refresh_hk(app)
+    assert "港股通 1 只" in msgs[0] and "2 只" in msgs[0]
+    rows = {u["code"]: u for u in store.universe(app.db, "HK")}
+    assert set(rows) == {"00001", "08001"}
+    assert rows["00001"]["info"]["in_connect"] is True and rows["08001"]["info"]["in_connect"] is False
+    assert universe.in_hk_scope(rows["08001"], "all") and not universe.in_hk_scope(rows["08001"], "connect")
+    assert universe.in_hk_scope(rows["00001"], "connect")
+    assert universe.in_hk_scope({"market": "A", "info": {}}, "connect")
+    assert universe.in_hk_scope({"market": "HK", "info": {}}, "connect")  # 旧快照没有标记：当时只有港股通
+
+
+def test_run_hk_scope_filters_non_connect(seeded):
+    app = seeded
+    other = uni(secid="116.08001", code="08001", name="非通牛", info={"in_connect": False})
+    seed(app, [*store.universe(app.db, "HK"), other])  # upsert 整体替换某个市场的快照
+    assert any(h["code"] == "00001" for h in store.universe(app.db, "HK"))
+    all_ = sc_run.run(app, ("long",), use_llm=False, refresh=False, progress=lambda m: None)
+    assert any(h["code"] == "08001" for h in store.hits(app.db, all_.runs["long"]))
+    run = store.runs(app.db, "long", 1)[0]
+    assert run["params"]["hk_scope"] == "all"
+    only = sc_run.run(app, ("long",), use_llm=False, refresh=False, progress=lambda m: None, hk_scope="connect")
+    assert all(h["code"] != "08001" for h in store.hits(app.db, only.runs["long"]))
+    assert any("仅港股通" in m for m in only.msgs)
+    assert store.runs(app.db, "long", 1)[0]["params"]["hk_scope"] == "connect"
+    app.settings.screen.hk_scope = "connect"  # 不指定时用配置
+    cfg_run = sc_run.run(app, ("long",), use_llm=False, refresh=False, progress=lambda m: None)
+    assert all(h["code"] != "08001" for h in store.hits(app.db, cfg_run.runs["long"]))
+
+
+def test_hk_scope_job_flag_and_page_filter(seeded, project):
+    from fastapi.testclient import TestClient
+
+    from stockagent.web.server import create_app
+
+    steps, _, _ = jobs.build(seeded.watchlist, seeded.settings.llm.profiles, "screen_run", flags=["--hk-scope=connect", "--no-llm"])
+    assert steps == [["screen", "run", "--hk-scope=connect", "--no-llm"]]
+    with pytest.raises(jobs.JobError):
+        jobs.build(seeded.watchlist, seeded.settings.llm.profiles, "screen_run", flags=["--hk-scope=bogus"])
+    seed(seeded, [*store.universe(seeded.db, "HK"), uni(secid="116.08001", code="08001", name="非通牛", info={"in_connect": False})])
+    sc_run.run(seeded, ("long",), use_llm=False, refresh=False, progress=lambda m: None)
+    web = create_app(project / "config.yaml", allowed_hosts=["testserver"], start_background=False)
+    client = TestClient(web)
+    client.get("/")
+    html = client.get("/screen?show=all&scope=all").text
+    assert "<b>非通牛</b>" in html and "<b>现金牛</b>" in html and "非港股通" in html
+    only_other = client.get("/screen?show=all&scope=hko").text
+    assert "<b>非通牛</b>" in only_other and "<b>现金牛</b>" not in only_other
+    assert "<b>非通牛</b>" not in client.get("/screen?show=all&scope=hkc").text
+    assert "<b>甲公司</b>" not in client.get("/screen?show=all&scope=hk").text
+    assert client.get("/screen?scope=nope").status_code == 404
+    # 运行表单把港股范围变成任务开关
+    r = client.post("/screen/run", data={"csrf_token": client.cookies.get("stock_csrf"), "pool": "long", "hk_scope": "connect"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    job = web.state.holder.app.db.jobs(1)[0]
+    assert job["task"] == "screen_run" and "--hk-scope=connect" in str(job["argv"])

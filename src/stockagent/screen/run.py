@@ -55,9 +55,11 @@ def liquidity(app: App, c: dict) -> dict | None:
 
 
 def run(app: App, pools: tuple[str, ...] = ("long", "event"), markets: list[str] | None = None, use_llm: bool = True,
-        refresh: bool = True, progress: Callable[[str], None] = print) -> Result:
+        refresh: bool = True, progress: Callable[[str], None] = print, hk_scope: str | None = None) -> Result:
+    """hk_scope：all 全部港股 | connect 只看港股通标的；不填用配置 screen.hk_scope。"""
     cfg = app.settings.screen
     markets = markets or cfg.markets
+    hk_scope = hk_scope or cfg.hk_scope
     res = Result()
     if refresh:
         res.msgs += universe.refresh(app, markets, progress=progress)
@@ -66,11 +68,17 @@ def run(app: App, pools: tuple[str, ...] = ("long", "event"), markets: list[str]
     progress("代码打分…")
     mem, missing = themes.memberships(app)
     if missing:
-        res.msgs.append("themes.yaml 中不在股票池的代码（非港股通或代码有误）：" + "；".join(missing[:10])
+        res.msgs.append("themes.yaml 中不在股票池的代码（不在股票池或代码有误）：" + "；".join(missing[:10])
                         + (f" 等 {len(missing)} 个" if len(missing) > 10 else ""))
-    rows = [u for m in markets for u in store.universe(app.db, m)]
-    if not rows:
+    pool_rows = [u for m in markets for u in store.universe(app.db, m)]
+    if not pool_rows:
         res.msgs.append("股票池为空：先运行 stock screen refresh（或去掉 --no-refresh）")
+        return res
+    rows = [u for u in pool_rows if universe.in_hk_scope(u, hk_scope)]
+    if len(rows) < len(pool_rows):
+        res.msgs.append(f"港股范围：仅港股通（排除非港股通港股 {len(pool_rows) - len(rows)} 只）")
+    if not rows:
+        res.msgs.append("港股范围内没有标的（先运行 stock screen refresh）")
         return res
     ctx = buckets.Ctx(cfg=cfg, hkdcny=fx_hkdcny(app) if "HK" in markets else None, events=events.recent(app), themes=mem,
                       calendar=calendar.build(app, rows))
@@ -88,7 +96,8 @@ def run(app: App, pools: tuple[str, ...] = ("long", "event"), markets: list[str]
         "（" + "，".join(f"{k} {v}" for k, v in dropped.most_common()) + "）" if dropped else ""))
     liq_cache: dict[str, dict | None] = {}
     for pool in pools:
-        run_id = store.start_run(app.db, pool, {"markets": markets, "use_llm": use_llm, "cfg": cfg.model_dump()})
+        run_id = store.start_run(app.db, pool, {"markets": markets, "hk_scope": hk_scope, "use_llm": use_llm,
+                                                 "cfg": cfg.model_dump()})
         try:
             stats = _pool(app, pool, evals, ctx, use_llm, liq_cache, progress)
         except Exception:

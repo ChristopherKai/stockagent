@@ -8,7 +8,7 @@
       <a class="btn tiny ghost" href="/screen/eval">事后检验</a>
     </div>
   </div>
-  <p class="muted small">港股通 + A 股全市场：代码按五个策略桶打分（现金地板、质量红利、产业链瓶颈 → 长线池；事件催化、预期修正 → 事件池），模型快筛只能淘汰、不能升级。
+  <p class="muted small">全部港股（可只看港股通）+ A 股全市场：代码按五个策略桶打分（现金地板、质量红利、产业链瓶颈 → 长线池；事件催化、预期修正 → 事件池），模型快筛只能淘汰、不能升级。
     <b>A 类 高胜率 + 高赔率</b>＝粗算赔率 ≥ {{ cfg.odds_a }}（事件池 {{ cfg.event_odds_a }}）、下行 ≤ {{ cfg.max_downside_a | pct(0, false) }}、有催化剂、无严重风险标记；
     <b>B 类 高胜率</b>＝质量红利（稳定现金牛）或「有催化剂 + 下行 ≤ {{ cfg.max_downside_a | pct(0, false) }}」，赔率 ≥ {{ cfg.odds_win }}；
     <b>C 类 高赔率</b>＝赔率 ≥ {{ cfg.odds_b }} 但胜率证据不足；<b>D 类</b> 观察。
@@ -17,10 +17,12 @@
   <div class="actions">
     <form method="post" action="/screen/run" class="inline">{{ csrf_field }}<input type="hidden" name="pool" value="{{ pool }}">
       <button class="btn" {{ 'disabled' if busy }}>运行{{ POOL_LABEL[pool] }}</button>
+      <label class="small">港股范围 <select name="hk_scope">
+        {% for k, label in HK_SCOPE_LABEL.items() %}<option value="{{ k }}" {{ 'selected' if k == cfg.hk_scope }}>{{ label }}</option>{% endfor %}</select></label>
       <label class="check small"><input type="checkbox" name="no_llm" value="1"> 不调用模型</label></form>
     {% if busy %}<span class="muted small">选股任务 #{{ busy.id }} {{ '运行中' if busy.status == 'running' else '排队中' }}</span>{% endif %}
     {% if cur %}<span class="muted small">当前：运行 #{{ cur.id }}（{{ cur.started_at | when }}），评估 {{ cur.stats.evaluated or '—' }} 只，
-      候选 {{ cur.stats.candidates or 0 }} 家{% if cur.stats.illiquid %}，流动性不足剔除 {{ cur.stats.illiquid }}{% endif %}{% if cur.stats.quick %}，模型快筛 {{ cur.stats.quick }} 家{% endif %}</span>{% endif %}
+      候选 {{ cur.stats.candidates or 0 }} 家{% if run_scope %}，港股范围：{{ HK_SCOPE_LABEL.get(run_scope, run_scope) }}{% endif %}{% if cur.stats.illiquid %}，流动性不足剔除 {{ cur.stats.illiquid }}{% endif %}{% if cur.stats.quick %}，模型快筛 {{ cur.stats.quick }} 家{% endif %}</span>{% endif %}
   </div>
   {% if runs | length > 1 %}<form method="get" action="/screen" class="inline small">
     <input type="hidden" name="pool" value="{{ pool }}"><select name="run" data-autosubmit>
@@ -28,9 +30,15 @@
     </select></form>{% endif %}
   <p class="small">显示：
     {% for key, label in [('AB', 'A、B 类'), ('ABC', 'A、B、C 类'), ('ABCD', 'A–D 类'), ('all', '全部（含快筛淘汰）')] %}
-      <a href="/screen?pool={{ pool }}{% if cur %}&run={{ cur.id }}{% endif %}&show={{ key }}" class="{{ 'on' if show == key }}">{{ label }}</a>{{ ' · ' if not loop.last }}
+      <a href="/screen?pool={{ pool }}{% if cur %}&run={{ cur.id }}{% endif %}&show={{ key }}&scope={{ scope }}" class="{{ 'on' if show == key }}">{{ label }}</a>{{ ' · ' if not loop.last }}
     {% endfor %}
     <span class="muted">（A {{ counts.A }} · B {{ counts.B }} · C {{ counts.C }} · D {{ counts.D }} · 淘汰 {{ counts.X }}）</span></p>
+  <p class="small">范围：
+    {% for key, label in scopes.items() %}
+      <a href="/screen?pool={{ pool }}{% if cur %}&run={{ cur.id }}{% endif %}&show={{ show }}&scope={{ key }}" class="{{ 'on' if scope == key }}">{{ label }}</a>{{ ' · ' if not loop.last }}
+    {% endfor %}
+    {% if scope != 'all' %}<span class="muted">（{{ n_hits }}/{{ n_all }} 家）</span>{% endif %}
+    <span class="muted">· 非港股通的港股无法通过港股通买入</span></p>
 </section>
 
 {% if not cur %}
@@ -46,7 +54,7 @@
     <tbody>
     {% for h in rows %}{% set fm = h.metrics.floor or {} %}{% set key = h.market ~ ':' ~ h.code %}
       <tr>
-        <td><b>{{ h.name }}</b><div class="muted small">{{ key }} · {{ h.industry or '' }}</div>
+        <td><b>{{ h.name }}</b><div class="muted small">{{ key }} · {{ h.industry or '' }}{% if h.market == 'HK' %} · {% if in_connect(h) %}港股通{% else %}<span class="tag">非港股通</span>{% endif %}{% endif %}</div>
           {% set liq = h.metrics.liquidity %}{% if liq %}<div class="muted small" title="20 日成交额中位数（{{ liq.basis }}）；可容纳资金≈中位数 × {{ cfg.participation | pct(0, false) }} × 5 天">成交额中位数 {{ (liq.median / 1e8) | num(2) }} 亿 · 可容纳 {{ (liq.capacity / 1e8) | num(2) }} 亿</div>{% endif %}
           {% set div = h.metrics.dividend or {} %}{% if div.years %}<div class="muted small">连续派息 {{ div.years }} 年{% if fm.get("dividend_yield") %} · 股息率 {{ fm.get("dividend_yield") | pct(1, false) }}{% endif %}</div>{% endif %}</td>
         <td class="small">{% for b in h.buckets.split(',') %}<span class="tag">{{ BUCKET_LABEL.get(b, b) }}</span> {% endfor %}
