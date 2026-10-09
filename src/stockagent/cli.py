@@ -429,7 +429,8 @@ def cmd_screen(args) -> None:
                 if not args.no_llm and (reason := app.llm.unavailable_reason("screen")):
                     print(f"模型不可用（{reason}），只做代码筛选")
                     args.no_llm = True
-                res = sc_run.run(app, pools, markets, use_llm=not args.no_llm, refresh=not args.no_refresh, progress=print)
+                res = sc_run.run(app, pools, markets, use_llm=not args.no_llm, refresh=not args.no_refresh, progress=print,
+                                 hk_scope=args.hk_scope)
                 _print(res.msgs)
                 for pool, rid in res.runs.items():
                     _screen_show(app, rid, tiers=("A", "B", "C"), limit=args.limit)
@@ -491,7 +492,8 @@ def _screen_line(h: dict) -> str:
 
     m = h["metrics"]
     fm = m.get("floor") or {}
-    parts = [f"{h['tier']} {h['name']} {h['market']}:{h['code']}", f"现价 {h['price']:.4g} {h['currency']}",
+    tag = " [非港股通]" if h["market"] == "HK" and not (m.get("info") or {}).get("in_connect", True) else ""
+    parts = [f"{h['tier']} {h['name']} {h['market']}:{h['code']}{tag}", f"现价 {h['price']:.4g} {h['currency']}",
              "[" + "、".join(BUCKET_LABEL.get(b, b) for b in h["buckets"].split(",")) + f"] 分 {h['score']:.0f}"]
     if fm:
         parts.append(f"保守 FCF Yield {pct(fm.get('yield_cons'), sign=False)} · 净现金/市值 {pct(fm.get('net_cash_ratio'), sign=False)}"
@@ -1039,13 +1041,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=10)
     sp.set_defaults(func=cmd_twitter)
 
-    scp = sub.add_parser("screen", help="选股器：港股通与 A 股全市场初筛 → 代码打分 → 模型快筛；点选送深研（研究候选，不是买卖建议）")
+    scp = sub.add_parser("screen", help="选股器：港股（可只看港股通）与 A 股全市场初筛 → 代码打分 → 模型快筛；点选送深研（研究候选，不是买卖建议）")
     ssub = scp.add_subparsers(dest="screen_cmd", required=True)
     sp = ssub.add_parser("refresh", help="刷新股票池、报表数据与全市场公告事件")
     sp.add_argument("--market", choices=["HK", "A"])
     sp.add_argument("--force", action="store_true", help="忽略缓存，重新抓取报表")
     sp = ssub.add_parser("run", help="运行选股（默认先刷新数据；两个池：长线池与事件池）")
     sp.add_argument("--market", choices=["HK", "A"])
+    sp.add_argument("--hk-scope", choices=["all", "connect"], help="港股范围：all 全部港股 | connect 只看港股通（默认用配置 screen.hk_scope）")
     sp.add_argument("--long-only", action="store_true", help="只跑长线池")
     sp.add_argument("--event-only", action="store_true", help="只跑事件池")
     sp.add_argument("--no-llm", action="store_true", help="不调用模型快筛，只用代码分层")

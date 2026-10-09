@@ -117,10 +117,11 @@ class RegimeConfig(BaseModel):
 
 
 class UniverseConfig(BaseModel):
-    """股票池：选股器的全市场表（港股通 + 全部 A 股）。第一阶段只用批量数据过滤，第二阶段才用日线。"""
+    """股票池：选股器的全市场表（港股默认只取港股通标的，加全部 A 股）。第一阶段只用批量数据过滤，第二阶段才用日线。"""
 
     model_config = ConfigDict(extra="forbid")
 
+    hk_connect_only: bool = True                                  # 港股只用港股通标的（选股器的股票池含全部港股）
     min_listing_days: int = 365                                   # 上市不满一年排除（A 股没有上市日期时按日线根数判断）
     min_mcap: dict[Market, float] = {"HK": 5e9, "A": 5e9}         # 第一阶段：总市值下限（上市地币种）
     min_turnover: dict[Market, float] = {"HK": 2e7, "A": 1e8}     # 第二阶段：20 日成交额中位数下限

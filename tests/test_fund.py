@@ -933,3 +933,14 @@ def test_cash_flows_keep_unit_nav(app):
     assert store.fund(app.db, "hk_value") is None
     with pytest.raises(ValueError):
         store.delete_fund(app.db, "a_trend")
+
+
+def test_stage1_hk_only_connect_by_default(app):
+    rows = [hk_row("00001", "通", 15, 8), hk_row("08001", "非通", 15, 8)]
+    rows[1]["info"] = {**rows[1]["info"], "in_connect": False}
+    seed_universe(app, rows)
+    cfg = fcfg.FundsFile.model_validate({"universe": {"min_mcap": {"HK": 1e9, "A": 5e9}}})
+    out, dropped = data.stage1(app, cfg, "HK")
+    assert [u["code"] for u in out] == ["00001"] and dropped == {"不在港股通": 1}
+    cfg = fcfg.FundsFile.model_validate({"universe": {"hk_connect_only": False, "min_mcap": {"HK": 1e9, "A": 5e9}}})
+    assert {u["code"] for u in data.stage1(app, cfg, "HK")[0]} == {"00001", "08001"}

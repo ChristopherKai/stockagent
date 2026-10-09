@@ -269,7 +269,10 @@ class ScreenConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    markets: list[Literal["HK", "A"]] = ["HK", "A"]   # 港股只看港股通标的
+    markets: list[Literal["HK", "A"]] = ["HK", "A"]
+    # 港股的筛选范围：all 全部港股（主板 + 创业板）| connect 只看港股通标的。股票池总是存全部港股并标出是否在港股通内，
+    # 运行时可用 stock screen run --hk-scope 临时改变（WebUI 选股页的「港股范围」）
+    hk_scope: Literal["all", "connect"] = "all"
     request_delay: float = 0.3             # 批量请求间隔（秒）；数据中心接口，与单公司查询共用熔断
     refresh_days: int = 6                  # 报表缓存多少天后重新抓取（已披露很久的报告期只抓一次）
     # ---- L1 硬过滤
