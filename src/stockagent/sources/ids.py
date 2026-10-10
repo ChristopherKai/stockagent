@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..config import Listing
-from . import cninfo, hkex, sec
+from . import cninfo, hkdi, hkex, sec
 
 
 def hkex_stock_id(db, session, listing: Listing) -> int | None:
@@ -11,6 +11,17 @@ def hkex_stock_id(db, session, listing: Listing) -> int | None:
     if v := db.kv_get(key):
         return int(v)
     sid = hkex.lookup_stock_id(session, listing.code)
+    if sid:
+        db.kv_set(key, str(sid))
+    return sid
+
+
+def hkex_di_sid(db, session, listing: Listing) -> int | None:
+    """港交所权益披露（DI）系统里的公司编号（与披露易公告的 stockId 不是同一个）。"""
+    key = f"hkex_di_sid:{listing.code}"
+    if v := db.kv_get(key):
+        return int(v)
+    sid = hkdi.lookup_sid(session, listing.code.zfill(5))
     if sid:
         db.kv_set(key, str(sid))
     return sid

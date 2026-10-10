@@ -27,6 +27,13 @@ LABELS: dict[str, tuple[str, str]] = {
     "sources.ccass": ("记录港股 CCASS 持股", "每天一份中央结算系统持股快照（港交所，T+1 可查）"),
     "sources.ccass_alert_pct": ("CCASS 异动阈值（百分点）", "某参与者持股变化占已发行股份的比例达到它时，生成一条数据异动进入分级"),
     "sources.ccass_keep": ("CCASS 快照保存前几名参与者", ""),
+    "sources.holdchg": ("大股东 / 董监高持股变动", "港股取港交所权益披露（DI），美股取 Form 4 内部人交易与 Schedule 13D / 13G；stock run 时抓取，达到下列阈值的变动生成事件进入分级；盘中提醒不抓"),
+    "sources.holdchg_lookback_days": ("持股变动首次回溯天数", "之后按水位增量抓取（每次再重叠 5 天，申报常晚几天才公布）"),
+    "sources.holdchg_hk_min_pct": ("港股持股变化阈值（百分点）", "大股东 / 董事的好仓比例相对上次报告的水平变化达到它才生成事件；被动基金的日常借还、小幅增减不会触发"),
+    "sources.holdchg_hk_streak": ("港股连续同向申报份数", "同一申报人连续这么多份同方向买入 / 卖出申报，净额达到持股变化阈值的一半就生成事件（控股股东每天小额增持，单日不起眼，连起来是信号）"),
+    "sources.holdchg_hk_insider_value": ("港股董事买卖金额阈值（港元）", "董事 / 最高行政人员一次买卖（同方向合并）达到它就生成事件，不看比例；缺成交价用最近收盘价估算"),
+    "sources.holdchg_us_insider_value": ("美股内部人买卖金额阈值（美元）", "只算公开市场买卖（Form 4 的 Buy / Sell），期权行权、授予、税款代扣不算；10b5-1 预设计划卖出在摘要里注明"),
+    "sources.holdchg_us_filer_pct": ("美股 13G 持股变化阈值（百分点）", "13G 申报人的持股比例较上次变化达到它或降到 5% 以下才生成事件；13D 与首次 13G 一律生成"),
     "sources.sec_forms": ("抓取的 SEC 文件类型", "每行一个"),
     # 推特 / X
     "twitter.agent_tools": ("研究 agent 可用推特", "深度报告、补缺和标的追踪的 agent 可以按需调用 twitter_search / twitter_user；推文只作线索，不作事实依据"),

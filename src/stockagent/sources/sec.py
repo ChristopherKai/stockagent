@@ -88,6 +88,46 @@ def filings(session: requests.Session, cik: int, user_agent: str, start: datetim
     return out
 
 
+BIG_FORMS = {"SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A", "SCHEDULE 13D", "SCHEDULE 13D/A", "SCHEDULE 13G", "SCHEDULE 13G/A"}
+
+
+def schedule13(session: requests.Session, url: str, user_agent: str) -> dict | None:
+    """Schedule 13D / 13G（2025 年起为结构化 XML）→ {"form", "amendment", "event_date", "persons": [{name, percent, shares}], "issuer"}。
+    url 用申报列表里的 primaryDocument 地址（带 xsl 渲染目录），这里换成原始 XML；旧的纯文本申报解析不了，返回 None。"""
+    import xml.etree.ElementTree as ET
+
+    raw = re.sub(r"/xsl[^/]+/", "/", url)
+    r = session.get(raw, headers={"User-Agent": user_agent}, timeout=30)
+    r.raise_for_status()
+    try:
+        root = ET.fromstring(r.content)
+    except ET.ParseError:
+        return None
+
+    def find(node, tag):  # 忽略命名空间
+        return next((e for e in node.iter() if e.tag.split("}")[-1] == tag), None)
+
+    def text(node, tag):
+        e = find(node, tag) if node is not None else None
+        return (e.text or "").strip() if e is not None and e.text else ""
+
+    persons = []
+    for e in root.iter():
+        if e.tag.split("}")[-1] != "coverPageHeaderReportingPersonDetails" and e.tag.split("}")[-1] != "reportingPersonInfo":
+            continue
+        name = text(e, "reportingPersonName")
+        if not name:
+            continue
+        pct = text(e, "classPercent") or text(e, "percentOfClass")
+        shares = text(e, "reportingPersonBeneficiallyOwnedAggregateNumberOfShares") or text(e, "aggregateAmountOwned")
+        persons.append({"name": name, "percent": float(pct) if re.fullmatch(r"-?[\d.]+", pct) else None,
+                        "shares": float(shares) if re.fullmatch(r"[\d.]+", shares) else None})
+    if not persons:
+        return None
+    return {"form": text(root, "submissionType"), "amendment": text(root, "amendmentNo"),
+            "event_date": text(root, "eventDateRequiresFilingThisStatement") or text(root, "dateOfEvent"), "issuer": text(root, "issuerName"), "persons": persons}
+
+
 def reports(session: requests.Session, cik: int, user_agent: str, start: datetime, end: datetime) -> list[dict]:
     """年报（10-K / 20-F / 40-F）与季报（10-Q），按申报时间倒序；doc_type 与港股、A 股的口径一致。
     period 取报告期截止日所在年份（年报）或 YYYY-MM-DD（季报，财年不一定是日历年，不硬套 Q1–Q4）。"""

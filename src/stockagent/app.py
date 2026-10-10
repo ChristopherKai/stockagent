@@ -25,7 +25,7 @@ MARKET_LABEL = {"HK": "港股", "A": "A股", "US": "美股"}
 SOURCE_LABEL = {
     "hkex": "港交所", "cninfo": "巨潮", "sec": "SEC", "eastmoney": "东方财富",
     "google_news": "Google新闻", "ima": "ima知识库", "twitter": "推特/X", "ccass": "港交所CCASS", "manual": "手动",
-    "consensus": "一致预期对比",
+    "consensus": "一致预期对比", "holdchg": "持股变动",
 }
 
 
@@ -222,6 +222,10 @@ def fetch(app: App, companies: list[Company], *, prices: bool = True, filings: b
         from . import twitterfeed  # twitterfeed 依赖本模块
 
         msgs += _guard("推特", twitterfeed.fetch, app, companies)
+    if market and app.settings.sources.holdchg:  # 港股权益披露按日更新，盘中 alert（market=False）不查
+        from . import holdchg  # holdchg 依赖本模块
+
+        msgs += _guard("持股变动", holdchg.fetch, app, companies)
     if market and prices:
         msgs += _guard("市场行情", fetch_market, app, companies)
         if app.settings.sources.ccass:  # 日终数据，每天一次；盘中 alert（market=False）不查

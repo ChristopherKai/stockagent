@@ -17,6 +17,7 @@ from datetime import date, timedelta
 from typing import Callable
 
 from . import fcf as fcf_mod
+from . import holdchg
 from . import usdata
 from . import imafeed, technical, twitterfeed
 from .app import FX_HKDCNH, FX_USDCNH, PRICE_SOURCES, SOURCE_LABEL, App, _is_down, _trip, _try, ccass_snapshot, klines
@@ -940,7 +941,7 @@ class ToolBox:
                  self.statements),
             Tool("shareholders",
                  "股东结构。A 股：十大股东与十大流通股东（最近两期，含增减变化与股东性质）、股东户数与户均持股趋势（户数减少常见于筹码集中）；"
-                 "港股：定期报告披露的主要股东与董事权益（同一批股份可能经多个受控法团重复披露，不能简单相加）。"
+                 "港股：定期报告披露的主要股东与董事权益（同一批股份可能经多个受控法团重复披露，不能简单相加），以及近 90 天港交所权益披露（DI）的逐笔申报汇总：大股东 / 董事的买卖、质押、最新好仓比例。"
                  "美股：机构持仓（13F 汇总，前十大持有人与增减）、内部人交易（Form 4 汇总与最近申报）、5% 以上大股东申报（13D/13G 链接）。"
                  "港股的券商/托管行持股分布用 ccass。ticker 不填表示本公司。",
                  _obj({"ticker": {"type": "string"}}, []),
@@ -1224,7 +1225,7 @@ class ToolBox:
         out = []
         for l in listings_for(self.app, self.company, ticker, markets=("A", "HK", "US")):
             out.append(_a_holders_text(self.app, l) if l.market == "A" else usdata.holders_text(self.app, l) if l.market == "US"
-                       else _hk_holders_text(self.app, l))
+                       else _hk_holders_text(self.app, l) + "".join("\n\n" + s for s in [holdchg.hk_recent_text(self.app, l)] if s))
         return "\n\n".join(out) or "股东数据只支持 A 股、港股和美股"
 
     def short_interest(self, ticker: str | None = None) -> str:

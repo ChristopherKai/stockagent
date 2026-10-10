@@ -264,7 +264,7 @@ def holders_text(app: App, listing: Listing) -> str:
     return "\n".join(out) or f"{listing.display}：没有取到股东数据（Nasdaq 与 SEC 都无返回）"
 
 
-BIG_FORMS = {"SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A", "SCHEDULE 13D", "SCHEDULE 13D/A", "SCHEDULE 13G", "SCHEDULE 13G/A"}
+BIG_FORMS = sec.BIG_FORMS
 
 
 def _big_holder_filings(app: App, listing: Listing, limit: int = 8) -> list[str]:
