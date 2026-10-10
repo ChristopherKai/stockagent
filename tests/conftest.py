@@ -59,6 +59,11 @@ def _no_external_search(monkeypatch):
     monkeypatch.setattr(ccass, "holdings", lambda *a, **k: None)  # 港交所 CCASS、SEC XBRL、Nasdaq 同理
     monkeypatch.setattr(sec, "company_facts", lambda *a, **k: {})
     monkeypatch.setattr(nasdaq, "_get", lambda *a, **k: {})
+    from stockagent.sources import hkdi
+
+    monkeypatch.setattr(hkdi, "lookup_sid", lambda *a, **k: 1)  # 港交所权益披露（DI）：持股变动一步用到
+    monkeypatch.setattr(hkdi, "notices", lambda *a, **k: [])
+    monkeypatch.setattr(sec, "schedule13", lambda *a, **k: None)
     from stockagent.sources import ima
 
     monkeypatch.delenv(ima.ENV_CLIENT_ID, raising=False)  # 本机 .env 里的 ima 凭证不带进测试；需要的测试自行设置

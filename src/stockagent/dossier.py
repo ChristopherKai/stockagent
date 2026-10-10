@@ -38,7 +38,7 @@ DISCLAIMER = "本报告由程序调用大模型与公开数据自动生成，仅
 
 AGENT_RULES = """今天是 {today}（北京时间）。工作规则：
 1. 先想清楚要回答哪些问题，再调用工具查证；不要凭记忆写数字。
-2. 核心财务数字先用 financials（结构化多期数据）；费用结构、减值、投资收益、有息负债各科目、折旧摊销、分红回购现金等报表明细用 statements（利润表 / 资产负债表 / 现金流量表，A 股、港股、美股）；股东结构用 shareholders（美股为机构 13F、Form 4 内部人交易与 13D/13G 申报），港股筹码分布用 ccass，美股做空持仓用 short_interest。美股的 financials / statements / fcf_yield / valuation_history 都由 SEC XBRL 派生（10-K、10-Q 原文在资料库，8-K 业绩新闻稿也会入库）；XBRL 比申报晚更新，工具提示「XBRL 落后」时最新一期要用 search_filings 查 10-Q 原文。其余细节（分部、客户、借款条款、股权、解禁）用 search_filings 检索年报原文、read_filing 读表格核对。注意用词差异：港股年报常写「五大客户」「附属公司」「非控股权益」，A 股常写「前五名客户」「子公司」「少数股东权益」；搜不到时换同义词再试。
+2. 核心财务数字先用 financials（结构化多期数据）；费用结构、减值、投资收益、有息负债各科目、折旧摊销、分红回购现金等报表明细用 statements（利润表 / 资产负债表 / 现金流量表，A 股、港股、美股）；股东结构用 shareholders（港股含近 90 天港交所权益披露的大股东 / 董事买卖与质押；美股为机构 13F、Form 4 内部人交易与 13D/13G 申报），港股筹码分布用 ccass，美股做空持仓用 short_interest。美股的 financials / statements / fcf_yield / valuation_history 都由 SEC XBRL 派生（10-K、10-Q 原文在资料库，8-K 业绩新闻稿也会入库）；XBRL 比申报晚更新，工具提示「XBRL 落后」时最新一期要用 search_filings 查 10-Q 原文。其余细节（分部、客户、借款条款、股权、解禁）用 search_filings 检索年报原文、read_filing 读表格核对。注意用词差异：港股年报常写「五大客户」「附属公司」「非控股权益」，A 股常写「前五名客户」「子公司」「少数股东权益」；搜不到时换同义词再试。
 3. 行情与估值用 market_data；历史估值分位用 valuation_history；EV 与自由现金流收益率用 fcf_yield；卖方一致预期用 broker_research（A 股为研报库，港股为目标价均值与区间，美股为 Nasdaq 的目标价、评级与 EPS 预测），各家机构的最新观点再用 web_search 核实。
 4. 所有计算（增速、利润率、倍数、隐含股价）都用 calculate / dcf_valuation / reverse_dcf / valuation_matrix / sotp / ddm，不要心算。
 5. 行业、竞争、政策、价格、卖方观点用 web_search 找线索，再用 fetch_url 读原文确认；网页信息要标注来源和日期，与年报冲突时以年报为准。来源可信度：政府部门文件、交易所公告、公司公告 > 主流财经媒体与券商研报摘要 > 行业网站 > 论坛与自媒体（雪球、股吧、财富号、知乎）；论坛与自媒体只能当线索，关键数字要找更可靠的来源印证，印证不了就写明「来源：某论坛帖子，未经核实」。

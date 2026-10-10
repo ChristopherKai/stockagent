@@ -175,6 +175,14 @@ class SourcesConfig(BaseModel):
     ccass: bool = True           # 每天记录自选港股的 CCASS（中央结算系统）持股快照
     ccass_alert_pct: float = 1.0  # 相邻两份快照间某参与者持股变化 ≥ 此值（占已发行股份的百分点）时生成一条「数据异动」进入分级
     ccass_keep: int = 60          # 每份快照保存持股最多的前几名参与者
+    # 大股东 / 董监高持股变动（港股：港交所权益披露 DI；美股：Form 4 内部人交易、Schedule 13D / 13G）；程序提取数字，事件交给分级
+    holdchg: bool = True
+    holdchg_lookback_days: int = 30     # 第一次抓取往回看多少天；之后从上次水位线再往回重叠几天（申报常晚几天才公布）
+    holdchg_hk_min_pct: float = 0.5     # 港股：大股东 / 董事的好仓比例相对上次报告的水平变化 ≥ 此值（占已发行股份的百分点）才生成事件；被动基金的日常借还、小幅增减达不到
+    holdchg_hk_streak: int = 5          # 港股：同一申报人连续这么多份同方向买入 / 卖出申报，净额达到上面阈值的一半就生成事件（控股股东每天小额增持，单日不起眼，连起来是信号）
+    holdchg_hk_insider_value: float = 1_000_000  # 港股：董事 / 最高行政人员一次买卖（同方向合并）金额 ≥ 此值（港元；缺成交价用最近收盘价）也生成事件，不看比例
+    holdchg_us_insider_value: float = 500_000    # 美股：内部人公开市场买卖（Form 4）金额 ≥ 此值（美元）才生成事件；期权行权、授予、税款代扣不算
+    holdchg_us_filer_pct: float = 1.0   # 美股：13G 申报人的持股比例较上次变化 ≥ 此值（百分点）或降到 5% 以下才生成事件；13D 与首次 13G 一律生成
     sec_forms: list[str] = Field(
         default_factory=lambda: [
             "8-K", "10-Q", "10-K", "6-K", "20-F", "S-1", "S-3", "424B4", "424B5",
