@@ -129,10 +129,16 @@
     const save = () => {
       try { localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(Object.entries(ctl).map(([k, c]) => [k, c.type === "checkbox" ? c.checked : c.value])))); } catch { /* 不记忆 */ }
     };
+    const marketBtns = [...bar.querySelectorAll(".mkt-seg button")];   // 市场：三个按钮，点哪个筛哪个，再点一次取消（= 全部市场）
+    marketBtns.forEach((b) => b.addEventListener("click", () => {
+      ctl.market.value = ctl.market.value === b.dataset.v ? "" : b.dataset.v;
+      ctl.market.dispatchEvent(new Event("input"));
+    }));
     const apply = () => {
+      marketBtns.forEach((b) => { const on = b.dataset.v === ctl.market.value; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on ? "true" : "false"); });
       const q = value(ctl.q), market = ctl.market?.value || "", stance = ctl.stance?.value || "";
       const tracked = ctl.tracked?.value || "", pinned = value(ctl.pinned);
-      // 排序：置顶永远在前；默认（服务端给的）顺序 = 情景立场 → 空间 → 多空比
+      // 排序：置顶永远在前；默认（服务端给的）顺序 = 立场 → 空间 → 多空比
       const mode = ctl.sort?.value || "";
       table.querySelectorAll("th.sortable").forEach((th) => th.classList.toggle("sorted", th.dataset.sort === mode));
       const num = (g, k) => Number(g.dataset[k]) || 0;

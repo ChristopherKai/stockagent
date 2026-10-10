@@ -855,6 +855,20 @@ def display_price(app, listing, ts: datetime | None = None) -> dict:
     return out
 
 
+def close_on(app, listing, day: str) -> float | None:
+    """day（含）之前最近一个交易日的收盘价（只读库）。"""
+    bars = app.bars(app.secid(listing), limit=4000)
+    if bars is None:
+        return None
+    older = bars[bars["date"] <= day]
+    return float(older["close"].iloc[-1]) if len(older) else None
+
+
+def cst_day(ts: str) -> str:
+    """UTC 时间戳 → 北京时间的日期（YYYY-MM-DD）。"""
+    return parse_iso(ts).astimezone(CST).date().isoformat()
+
+
 def _last_bar(app, listing) -> tuple[float | None, str | None]:
     """最近一根日线的 (收盘价, 日期)；展示与估值统计请用 display_price。"""
     close, day, _ = _bar_tail(app, app.secid(listing))
@@ -864,39 +878,44 @@ def _last_bar(app, listing) -> tuple[float | None, str | None]:
 STANCE_RANK = {"bullish": 0, "neutral": 1, "bearish": 2}
 
 
-def listing_views(app, company, model: ValuationModel, band: float, mode: str = "expected") -> list[dict]:
-    """每个上市地各自的视图（只读库，不联网）：现价（display_price：盘中最新价或收盘价）、日涨跌幅、目标价、牛 / 基准 / 熊价格与各自的空间、按该地现价算的参考立场。
-    定价上市地直接用模型；其他上市地按同股同权的汇率平价折算（ADS 乘换股比例，缺汇率或缺 ads_ratio 时折算不了），
-    所以 AH / ADS 溢价会体现为两地不同的空间与立场（例如 H 股折价→偏多，A 股溢价→偏空）。
-    统计量（空间、跌破概率、参考立场）用「该地现价折回定价上市地口径」代入 risk_stats，与定价上市地的算法一致。"""
+def listing_views(app, company, model: ValuationModel, band: float, mode: str = "expected", ref_day: str | None = None) -> list[dict]:
+    """每个上市地各自的视图（只读库，不联网）：现价（display_price：盘中最新价或收盘价）、日涨跌幅、目标价、牛 / 基准 / 熊价格与各自的空间、参考立场。
+    定价上市地直接用模型；其他上市地按两地价格之比折算（价格 × 该地价格 ÷ 定价上市地价格）——与报告里的「等值价格」同一口径（`equivalents`），
+    AH / ADS 溢价、换股比例都已包含在价格之比里，不需要汇率和 ads_ratio。ref_day（报告日）给出时，价格之比取该日（含）之前的收盘价：
+    情景价格不会跟着每天的两地价差浮动，与报告里写的数字对得上；缺那天的行情时退回现价之比。空间、立场始终按各地现价算。
+    汇率平价（不计溢价）只用来给出 `premium`：该地现价折回定价上市地口径相对定价地现价的溢价（正）/ 折价（负），缺汇率或缺 ads_ratio 时为 None。"""
     base = next((l for l in company.listings if l.key == model.listing), None) or company.pricing_listing
     p0 = display_price(app, base)["price"]
     out = []
     for l in company.listings:
         px = display_price(app, l)
         price, day = px["price"], px["day"]
-        k: float | None = 1.0
-        if l.key != base.key:
-            r = fx_rate(app, model.price_currency, l.currency)
-            a, b = _ads(l), _ads(base)
-            k = r[0] * a / b if r and a and b else None
+        primary = l.key == base.key
+        k: float | None = 1.0   # 定价上市地的 1 元对应本上市地多少价格
+        if not primary:
+            r0, r1 = (close_on(app, base, ref_day), close_on(app, l, ref_day)) if ref_day else (None, None)
+            k = r1 / r0 if r0 and r1 else (price / p0 if price and p0 else None)
         v = {"listing": l, "key": l.key, "label": l.display, "currency": l.currency, "price": price, "price_date": day, "px": px,
-             "primary": l.key == base.key, "multi": len(company.listings) > 1, "convertible": k is not None, "target": None, "upside": None, "scenarios": {},
+             "primary": primary, "multi": len(company.listings) > 1, "convertible": k is not None, "target": None, "upside": None, "scenarios": {},
              "stats": None, "stance": None, "reason": "", "premium": None}
         if k is not None and price:
-            eq = price / k
-            st = risk_stats(model, eq)
+            st = risk_stats(model, price / k)   # 该地现价折回定价上市地口径
             v["stats"] = st
             v["target"] = model.target(mode) * k
             v["upside"] = v["target"] / price - 1
             v["scenarios"] = {s.name: {"price": model.price(s) * k, "upside": model.price(s) * k / price - 1} for s in model.scenarios}
             v["stance"], v["reason"] = reference_stance(st, band)
-            v["premium"] = eq / p0 - 1 if p0 and not v["primary"] else None
+            if not primary:
+                r = fx_rate(app, model.price_currency, l.currency)
+                a, b = _ads(l), _ads(base)
+                v["premium"] = price / (r[0] * a / b) / p0 - 1 if r and a and b else None
         out.append(v)
     return out
 
 
-def view_sort_key(views: list[dict]) -> tuple:
-    """观点排序：偏多在前，同观点按空间从大到小，再按上行 / 下行比（多空比）从大到小；没有观点的排最后。取各上市地中最靠前的一个。"""
-    keys = [(STANCE_RANK[v["stance"]], -v["upside"], -(v["stats"]["ratio"] if v["stats"]["ratio"] is not None else 1e9)) for v in views if v["stance"] and v["upside"] is not None]
+def view_sort_key(views: list[dict], stance: str | None = None) -> tuple:
+    """观点排序：偏多在前，同观点按空间从大到小，再按上行 / 下行比（多空比）从大到小；没有观点的排最后。取各上市地中最靠前的一个。
+    stance：页面上显示的立场（当前立场）；不给时用各上市地由代码算出的参考立场。"""
+    keys = [(STANCE_RANK[stance or v["stance"]], -v["upside"], -(v["stats"]["ratio"] if v["stats"]["ratio"] is not None else 1e9))
+            for v in views if (stance or v["stance"]) in STANCE_RANK and v["upside"] is not None]
     return min(keys) if keys else (9, 0, 0)

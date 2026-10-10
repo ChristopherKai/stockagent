@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import thesis_badge, stance_badge, kind_badge, trigger_badge, delta, view_cells, scene_stance, filter_bar %}
+{% from "_macros.html" import thesis_badge, stance_badge, kind_badge, trigger_badge, delta, view_cells, code_line, filter_bar %}
 {% block title %}仪表盘{% endblock %}
 {% block content %}
 {% if llm_reason %}<div class="flash err">标的追踪的模型暂不可用：{{ llm_reason }}（到「设置 → LLM」配置）</div>{% endif %}
@@ -11,20 +11,22 @@
   {{ filter_bar('#watch', tracked=False) }}
   <div class="tblwrap">
   <table class="tbl watch" id="watch">
-    <thead><tr><th>公司</th><th>上市地</th><th class="r">现价</th><th class="r" title="{{ TARGET_LABEL }}">目标价 / 空间</th>
-      <th title="最新深度报告的立场">报告立场</th><th title="按情景数字与该上市地现价由代码算出的立场">情景立场</th>
+    <thead><tr><th>公司</th><th class="r">现价</th><th class="r" title="{{ TARGET_LABEL }}">目标价 / 空间</th>
+      <th title="当前立场：追踪中的公司取最新修正的立场（修正可以改变深度报告里的立场），未追踪的取最新深度报告">报告立场</th>
       <th title="深度报告核心判断的状态（完好时不显示）">论点</th><th>最近修正</th><th></th></tr></thead>
     {% for row in rows %}{% set c = row.company %}{% set s = row.s %}{% set rev = s.revision %}
     <tbody data-group data-i="{{ loop.index0 }}" data-k-stance="{{ row.key[0] }}" data-k-upside="{{ -row.key[1] }}" data-k-ratio="{{ -row.key[2] }}"
            data-k-date="{{ row.report_at or '' }}" data-tracked="1" data-pinned="{{ 1 if row.pinned else 0 }}"
            data-text="{{ (c.name ~ ' ' ~ c.id ~ ' ' ~ (c.name_en or '') ~ ' ' ~ (c.aliases | join(' ')) ~ ' ' ~ (c.listings | map(attribute='code') | join(' '))) | lower }}">
     {% for v in row.views %}
-      <tr class="{{ 'lead' if loop.first }}" data-market="{{ v.listing.market }}" data-stance="{{ v.stance or 'none' }}">
-        <td class="grp name-cell">{% if row.pinned %}<span class="pin on" title="已置顶">★</span> {% endif %}<a href="/c/{{ c.id }}"><b>{{ c.name }}</b></a>
-          {% if rev.prev_target and rev.kind != 'baseline' and v.primary %}<div class="small muted">较上次 {{ delta(rev.target, rev.prev_target) }}</div>{% endif %}</td>
-        {{ view_cells(v, scen=False) }}
-        <td class="grp">{% if row.report_stance %}{{ stance_badge(row.report_stance) }}{% else %}<span class="muted">—</span>{% endif %}</td>
-        <td>{{ scene_stance(v) }}</td>
+      <tr class="{{ 'lead' if loop.first }}" data-market="{{ v.listing.market }}" data-stance="{{ row.stance or 'none' }}">
+        <td class="name-cell">
+          <div class="lead-only">{% if row.pinned %}<span class="pin on" title="已置顶">★</span> {% endif %}<a href="/c/{{ c.id }}"><b>{{ c.name }}</b></a></div>
+          {{ code_line(v) }}
+          {% if rev.prev_target and rev.kind != 'baseline' and v.primary %}<div class="small muted lead-only">较上次 {{ delta(rev.target, rev.prev_target) }}</div>{% endif %}</td>
+        {{ view_cells(v, scen=False, lst=False) }}
+        <td class="grp">{% if row.stance %}{{ stance_badge(row.stance) }}{% else %}<span class="muted">—</span>{% endif %}
+          {%- if row.stance and row.report_stance and row.stance != row.report_stance %}<div class="muted small" title="深度报告原立场：{{ STANCE_LABEL.get(row.report_stance, row.report_stance) }}；追踪修正后改为当前立场">已修正</div>{% endif %}</td>
         <td class="grp">{{ thesis_badge(rev.thesis_status, quiet=True) }}
           {% if s.redo %}<a class="badge warn" href="/jobs/{{ s.redo.id }}">重跑报告{{ '排队中' if s.redo.status == 'queued' else '运行中' }}</a>{% endif %}</td>
         <td class="grp small rev-cell">{{ kind_badge(rev.kind) }} {{ rev.created_at | when }}<div>{{ rev.summary }}</div></td>

@@ -32,7 +32,7 @@ from .triage import DIRECTIONS, event_label, listing_market, short_id
 from .utils import fmt_local, iso, log, parse_iso, pct, sha1, today_local, utcnow
 from .valuation import (
     FACT_PATHS, SCENARIOS, TARGET_LABEL, ValuationModel, _range_model, apply_op, build_baseline, check_value, describe, fmt,
-    display_price, get_values, listing_views, load_model, path_label, paths, refresh_fx, risk_stats, set_value, stance_check,
+    cst_day, display_price, get_values, listing_views, load_model, path_label, paths, refresh_fx, risk_stats, set_value, stance_check,
 )
 
 THESIS_STATUS = {"intact": "完好", "strengthened": "加强", "weakened": "削弱", "broken": "失效"}
@@ -259,7 +259,7 @@ def status(app: App, company: Company) -> dict | None:
     stats = risk_stats(live_model, price)
     base = live_model.scenario("base")
     return {
-        "views": listing_views(app, company, live_model, app.settings.tracker.stance_band, app.settings.tracker.target),
+        "views": listing_views(app, company, live_model, app.settings.tracker.stance_band, app.settings.tracker.target, _report_day(app, rev)),
         "stats": stats, "stance_check": stance_check(rev.get("stance"), stats, app.settings.tracker.stance_band),
         "anchor_check": anchor.check(model.anchor, live_model.price(base), app.settings.tracker.anchor_band) if base else None,
         "enabled": bool(tr["enabled"]), "tracker": tr, "revision": rev, "model": model, "live_model": live_model,
@@ -270,6 +270,12 @@ def status(app: App, company: Company) -> dict | None:
     }
 
 
+def _report_day(app: App, rev: dict) -> str | None:
+    """修正所依据的深度报告的日期：其他上市地的情景价格按这一天两地收盘价之比折算（与报告里的等值价格对得上）。"""
+    d = app.db.dossier(rev["dossier_id"]) if rev.get("dossier_id") else None
+    return cst_day(d["created_at"]) if d else None
+
+
 def card_views(app: App, company: Company, dossier: dict) -> list[dict]:
     """没有追踪的公司：按深度报告跟踪卡的情景区间（中值）算各上市地的视图；卡片没有情景价格时为空。"""
     card = dossier["card"]
@@ -278,7 +284,7 @@ def card_views(app: App, company: Company, dossier: dict) -> list[dict]:
         return []
     listing = next((l for l in company.listings if l.key == card.get("price_listing")), company.listings[0])
     model = _range_model(scen, listing.key, listing.currency, f"深度报告 #{dossier['id']} · 跟踪卡情景区间")
-    return listing_views(app, company, model, app.settings.tracker.stance_band, app.settings.tracker.target)
+    return listing_views(app, company, model, app.settings.tracker.stance_band, app.settings.tracker.target, cst_day(dossier["created_at"]))
 
 
 def status_line(app: App, company: Company) -> str | None:
