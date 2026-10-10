@@ -42,7 +42,7 @@
       <td class="r small">{% if v.stats %}{{ (v.stats.p_below * 100) | round | int }}%{% else %}—{% endif %}</td>
       <td class="r small">{% if v.stats and v.stats.ratio is not none %}{{ '%.2f' | format(v.stats.ratio) }}{% else %}—{% endif %}</td></tr>{% endfor %}</tbody>
   </table></div>
-  <p class="muted small">定价上市地（{{ c.pricing_listing.display }}）用报告的估值；其他上市地按同股同权的汇率平价折算（ADS 乘换股比例），两地溢价 / 折价体现为不同的空间与立场。立场由代码按该地现价重算。</p>
+  <p class="muted small">定价上市地（{{ c.pricing_listing.display }}）用报告的估值；其他上市地的情景价格按报告日两地收盘价之比折算（与报告里的等值价格同一口径，AH / ADS 溢价已包含在价格之比里，不随每天的两地价差浮动），空间与立场按各地现价算。悬停上市地可看按汇率平价算的溢价 / 折价。</p>
   {% endif %}
   {% include "_stance_stats.html" %}
   {% if s.redo %}<div class="flash warn">深度报告重跑任务 <a href="/jobs/{{ s.redo.id }}">#{{ s.redo.id }}</a> {{ '排队中' if s.redo.status == 'queued' else '运行中' }}：{{ s.redo.note or '' }}</div>{% endif %}

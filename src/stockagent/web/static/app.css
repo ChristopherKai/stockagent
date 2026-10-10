@@ -315,6 +315,7 @@ details.rev-notes .md { margin-top: 8px; }
 .tbl.watch tbody tr + tr td { border-top: 1px dashed var(--line); }
 .tbl.watch tbody tr td { border-bottom: 0; }
 .tbl.watch tr:not(.lead) .grp > * { visibility: hidden; }
+.tbl.watch tr:not(.lead) .lead-only { display: none; }
 .tbl.watch .name-cell { min-width: 9.5em; }
 .tbl.watch .thesis-cell { max-width: 22em; min-width: 12em; }
 .tbl.watch .lst { white-space: nowrap; }
@@ -381,3 +382,10 @@ td.px-stale .px-main, td.px-stale .px-sub > :not(.px-warn) { opacity: .5; }
 .scen-ev { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; padding: 6px 0; border-top: 1px solid var(--line); }
 .scen-ev > div { flex: 1 1 100%; }
 .scen-ev .scn-bull { color: var(--up-c); } .scen-ev .scn-bear { color: var(--down-c); }
+
+.mkt-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; vertical-align: middle; }
+.mkt-seg button { border: 0; border-right: 1px solid var(--line); background: transparent; color: var(--fg); padding: 4px 12px; font: inherit; cursor: pointer; }
+.mkt-seg button:last-child { border-right: 0; }
+.mkt-seg button:hover { background: var(--accent-bg); }
+.mkt-seg button.on { background: var(--accent); color: #fff; }
+.tbl.watch td .btn { white-space: nowrap; }

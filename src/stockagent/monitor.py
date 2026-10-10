@@ -51,11 +51,13 @@ class _Results(BaseModel):
 
 
 def current_stance(app: App, company: Company) -> str | None:
-    """当前立场：追踪中的公司以最新修正为准，否则用最新深度报告的立场。"""
-    tr = app.db.tracker(company.id)
-    if tr and tr["revision_id"] and (rev := app.db.revision(tr["revision_id"])) and rev.get("stance"):
-        return rev["stance"]
+    """当前立场：追踪中的公司以最新修正为准（修正可以改立场；前提是它建立在最新一版深度报告上），否则用最新深度报告的立场。
+    观察清单、仪表盘、监控、简报、模拟基金都读这一个，立场不会各说各话。"""
     d = app.db.latest_dossier(company.id)
+    tr = app.db.tracker(company.id)
+    if tr and tr["revision_id"] and (rev := app.db.revision(tr["revision_id"])) and rev.get("stance") \
+            and (d is None or rev.get("dossier_id") in (None, d["id"])):
+        return rev["stance"]
     return d["card"].get("stance") if d else None
 
 

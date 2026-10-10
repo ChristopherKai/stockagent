@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import stance_badge, view_cells, scene_stance, ratio_cell, filter_bar %}
+{% from "_macros.html" import stance_badge, view_cells, code_line, ratio_cell, filter_bar %}
 {% block title %}观察清单{% endblock %}
 {% block content %}
 {% set banner_next = '/companies' %}{% include "_scen_banner.html" %}
@@ -13,42 +13,42 @@
   </form>
   <form method="post" action="/companies/track" id="bulk">{{ csrf_field }}</form>
   {{ filter_bar('#watch') }}
-  <p class="muted small">默认排序：置顶在前，然后按情景立场（偏多在上），同立场按空间、再按多空比（上行 / 下行）从高到低；也可以在上面改成按空间、多空比或报告日期排序。有多个上市地的公司按上市地分行展示：定价上市地用报告的估值，其他上市地按同股同权汇率平价折算（含两地溢价），各自有目标价与立场（现价在仪表盘）。</p>
+  <p class="muted small">默认排序：置顶在前，然后按立场（偏多在上），同立场按空间、再按多空比（上行 / 下行）从高到低；也可以在上面改成按空间、多空比或报告日期排序。有多个上市地的公司按上市地分行展示：定价上市地用报告的估值，其他上市地的情景价格按报告日两地收盘价之比折算（与报告里的等值价格同一口径，不随每天的两地价差浮动）。</p>
   <div class="tblwrap">
   <table class="tbl watch" id="watch">
-    <thead><tr><th><input type="checkbox" data-select-all="ids" title="全选（当前筛选结果）"></th><th>公司</th><th>上市地</th>
+    <thead><tr><th><input type="checkbox" data-select-all="ids" title="全选（当前筛选结果）"></th><th>公司</th>
       <th class="r sortable" data-sort="upside" title="{{ TARGET_LABEL }}，括号为相对现价；点击按空间排序">目标价 / 空间</th><th class="r">牛 / 基 / 熊（相对现价）</th>
       <th class="r sortable" data-sort="ratio" title="上行 / 下行：高于现价部分与低于现价部分的期望幅度之比；点击排序">多空比</th><th class="sortable" data-sort="date" title="最新一版深度报告的生成日期；点击排序">报告日期</th>
-      <th class="r" title="报告生成当天的价格（跟踪卡价格 → 基线价格 → 当日收盘价），下方为现价相对它的涨跌">报告日价格 / 至今</th>
-      <th title="最新深度报告的立场">报告立场</th><th class="sortable" data-sort="" title="按情景数字与该上市地现价由代码算出的立场；点击恢复默认排序（情景立场 → 空间 → 多空比）">情景立场</th>
+      <th class="r" title="各上市地：报告生成当天的价格（定价上市地取跟踪卡价格 → 基线价格 → 当日收盘价，其他上市地取当日收盘价）/ 现价（盘中为最新价）；下方为现价相对报告日价格的涨跌（至今）">报告日价格 / 现价（至今）</th>
+      <th class="sortable" data-sort="" title="当前立场：追踪中的公司取最新修正的立场（修正可以改变深度报告里的立场），未追踪的取最新深度报告；点击恢复默认排序（立场 → 空间 → 多空比）">报告立场</th>
       <th>追踪</th><th></th></tr></thead>
     {% for row in rows %}{% set c = row.company %}
     <tbody data-group data-i="{{ loop.index0 }}" data-k-stance="{{ row.key[0] }}" data-k-upside="{{ -row.key[1] }}" data-k-ratio="{{ -row.key[2] }}"
            data-k-date="{{ row.report_at or '' }}" data-tracked="{{ 1 if row.enabled else 0 }}" data-pinned="{{ 1 if row.pinned else 0 }}"
            data-text="{{ (c.name ~ ' ' ~ c.id ~ ' ' ~ (c.name_en or '') ~ ' ' ~ (c.aliases | join(' ')) ~ ' ' ~ (c.listings | map(attribute='code') | join(' '))) | lower }}">
     {% for v in row.views %}
-      <tr class="{{ 'lead' if loop.first }}" data-market="{{ v.listing.market }}" data-stance="{{ v.stance or 'none' }}">
+      <tr class="{{ 'lead' if loop.first }}" data-market="{{ v.listing.market }}" data-stance="{{ row.stance or 'none' }}">
         <td class="grp"><input type="checkbox" name="ids" value="{{ c.id }}" form="bulk"></td>
-        <td class="grp name-cell">
-          <form method="post" action="/companies/{{ c.id }}/pin" class="inline">{{ csrf_field }}<input type="hidden" name="pinned" value="{{ 0 if row.pinned else 1 }}">
+        <td class="name-cell">
+          <div class="lead-only"><form method="post" action="/companies/{{ c.id }}/pin" class="inline">{{ csrf_field }}<input type="hidden" name="pinned" value="{{ 0 if row.pinned else 1 }}">
             <button class="pin {{ 'on' if row.pinned }}" title="{{ '取消置顶' if row.pinned else '置顶' }}" aria-pressed="{{ 'true' if row.pinned else 'false' }}">{{ '★' if row.pinned else '☆' }}</button></form>
-          <a href="/c/{{ c.id }}"><b>{{ c.name }}</b></a>
-          <div class="muted small">{{ c.id }}</div>
-          {% if row.dossier %}<div class="small"><a href="/c/{{ c.id }}/report">报告</a> · <a href="/c/{{ c.id }}/reports">历史</a></div>
-          {% else %}<div class="small muted">无深度报告</div>{% endif %}</td>
-        {{ view_cells(v, price=False) }}
+            <a href="/c/{{ c.id }}"><b>{{ c.name }}</b></a></div>
+          {{ code_line(v) }}
+          {% if row.dossier %}<div class="small lead-only"><a href="/c/{{ c.id }}/report">报告</a> · <a href="/c/{{ c.id }}/reports">历史</a></div>
+          {% else %}<div class="small muted lead-only">无深度报告</div>{% endif %}</td>
+        {{ view_cells(v, price=False, lst=False) }}
         {{ ratio_cell(v) }}
         <td class="grp nowrap small">{{ row.report_at | when(false) if row.report_at else '—' }}</td>
-        <td class="grp r nowrap small">{% set rp = row.report_px %}{% if rp and rp.price %}<b>{{ rp.price | num }}</b> <span class="muted">{{ rp.listing.currency }}</span>
-          <div class="{{ rp.since | dirclass }}" title="现价相对报告日（{{ rp.day }}）价格的涨跌">{{ rp.since | pct if rp.since is not none else '—' }}</div>{% else %}<span class="muted">—</span>{% endif %}</td>
-        <td class="grp">{{ stance_badge(row.report_stance) if row.report_stance else '' }}{% if not row.report_stance %}<span class="muted">—</span>{% endif %}</td>
-        <td>{{ scene_stance(v) }}</td>
+        <td class="r nowrap small">{% set rp = row.report_pxs.get(v.key) %}{% if rp %}<div><b>{{ rp.price | num }}</b> / {% if rp.now %}<b>{{ rp.now | num }}</b>{% else %}<span class="muted">—</span>{% endif %} <span class="muted">{{ rp.currency }}</span></div>
+          <div class="{{ rp.since | dirclass }}" title="该上市地现价相对报告日（{{ rp.day }}）收盘价的涨跌">{{ ('至今 ' ~ (rp.since | pct)) if rp.since is not none else '—' }}</div>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="grp">{% if row.stance %}{{ stance_badge(row.stance) }}{% else %}<span class="muted">—</span>{% endif %}
+          {%- if row.stance and row.report_stance and row.stance != row.report_stance %}<div class="muted small" title="深度报告原立场：{{ STANCE_LABEL.get(row.report_stance, row.report_stance) }}；追踪修正后改为当前立场">已修正</div>{% endif %}</td>
         <td class="grp">
           <form method="post" action="/c/{{ c.id }}/{{ 'untrack' if row.enabled else 'track' }}" class="inline">{{ csrf_field }}<input type="hidden" name="next" value="/companies">
             <button class="switch {{ 'on' if row.enabled }}" role="switch" aria-checked="{{ 'true' if row.enabled else 'false' }}"
                     title="{{ '追踪中：点击停止' if row.enabled else ('开始追踪' if row.dossier else '还没有深度报告：开启后先生成报告再追踪（数分钟）') }}"><span class="sr">追踪</span></button></form>
           {% if row.tracker and not row.enabled %}<div class="muted small">已停止</div>{% endif %}</td>
-        <td class="grp nowrap">
+        <td class="grp">
           <form method="post" action="/c/{{ c.id }}/dossier" class="inline" data-confirm="重新生成「{{ c.name }}」的深度报告需要数分钟，同一时间只运行一个。继续？">{{ csrf_field }}<input type="hidden" name="next" value="/companies">
             <button class="btn tiny" title="重新生成深度报告（后台任务）">重跑报告</button></form>
           <a class="btn tiny ghost" href="/companies/{{ c.id }}/edit">编辑</a>

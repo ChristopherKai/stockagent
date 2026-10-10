@@ -412,5 +412,5 @@ def test_watchlist_report_day_price(web, monkeypatch):  # noqa: F811
     rp = _report_price(a, c, a.db.dossier(d["id"]), baselines={})
     assert rp["price"] == 11.0 and rp["day"] == "2026-10-07"                                  # 取报告日的收盘价
     html = web.get("/companies").text
-    assert "报告日价格 / 至今" in html and "11.00" in html and "+9.1%" in html
+    assert "报告日价格 / 现价（至今）" in html and "<b>11.00</b> / <b>12.00</b>" in html and "至今 +9.1%" in html
     assert "报告日价格" in web.get("/c/dongyue/reports").text                                  # 报告历史页沿用同一个函数

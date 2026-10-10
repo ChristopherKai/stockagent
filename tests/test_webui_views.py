@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from test_multilisting import mapp  # noqa: F401 - fixture
 from test_tracker import CARD, REPORT, _bars, save_dossier
@@ -9,6 +11,7 @@ from test_web import post, web  # noqa: F401 - fixture
 
 from stockagent import valuation as V
 from stockagent.cli import LLM_TASKS
+from stockagent.utils import iso, utcnow
 from stockagent.web import settings_views, yamledit
 from stockagent.web.views import watch_rows
 
@@ -18,29 +21,43 @@ def _model(listing="A:300308", ccy="CNY"):
                             scenarios=[V.ScenarioPoint(name="base", driver=900, multiple=1, probability=1)])
 
 
-def test_listing_views_split_by_listing(mapp):  # noqa: F811
-    """A 股折价、H 股溢价：同一份估值在两地有不同的目标价、空间和立场。"""
+def _bar_day(app, secid, i):
+    return str(app.bars(secid, limit=100)["date"].iloc[i])
+
+
+def test_listing_views_convert_by_price_ratio(mapp):  # noqa: F811
+    """其他上市地按两地现价之比折算（与报告的等值价格同一口径）：各地情景价、空间、立场与定价地一致；汇率平价只给出溢价。"""
     _bars(mapp, "0.300308", [700.0] * 30)
     _bars(mapp, "116.03308", [1300.0] * 30)
     c = mapp.watchlist.get("innolight")
     a, h = V.listing_views(mapp, c, _model(), 0.15)  # listings 顺序：A、HK
     assert (a["key"], a["primary"], a["stance"]) == ("A:300308", True, "bullish")
     assert a["target"] == pytest.approx(900) and a["upside"] == pytest.approx(900 / 700 - 1)
-    assert (h["key"], h["primary"], h["stance"]) == ("HK:03308", False, "bearish")
-    assert h["target"] == pytest.approx(900 / 0.9)  # 汇率平价：1 港元 = 0.9 人民币
-    assert h["upside"] == pytest.approx(1000 / 1300 - 1) and h["premium"] == pytest.approx(1300 * 0.9 / 700 - 1)
-    assert h["scenarios"]["base"]["price"] == pytest.approx(1000)
+    assert (h["key"], h["primary"], h["stance"]) == ("HK:03308", False, "bullish")
+    assert h["target"] == pytest.approx(900 * 1300 / 700)           # 900 元 × 两地现价之比（不是汇率平价的 1000 港元）
+    assert h["upside"] == pytest.approx(a["upside"]) and h["scenarios"]["base"]["price"] == pytest.approx(h["target"])
+    assert h["stats"]["p_below"] == pytest.approx(a["stats"]["p_below"])
+    assert h["premium"] == pytest.approx(1300 * 0.9 / 700 - 1)      # 汇率平价：1 港元 = 0.9 人民币，H 股较 A 股溢价
     assert V.view_sort_key([a, h])[0] == 0  # 取最靠前的观点（偏多）
+    # 给了报告日：价格之比取那天的收盘价，不随之后的两地价差浮动；缺那天的行情退回现价之比
+    _bars(mapp, "0.300308", [650.0] * 10 + [700.0] * 20)
+    h2 = V.listing_views(mapp, c, _model(), 0.15, ref_day=_bar_day(mapp, "0.300308", 0))[1]
+    assert h2["target"] == pytest.approx(900 * 1300 / 650) and h2["upside"] == pytest.approx(h2["target"] / 1300 - 1)
+    assert V.listing_views(mapp, c, _model(), 0.15, ref_day="1999-01-01")[1]["target"] == pytest.approx(900 * 1300 / 700)
+    assert V.view_sort_key([a, h], "bearish")[0] == 2 and V.view_sort_key([a, h], "neutral")[0] == 1   # 页面上显示的立场优先
 
 
 def test_listing_views_without_conversion_data(mapp):  # noqa: F811
-    _bars(mapp, "116.09868", [39.0] * 30)
+    """没有定价上市地的行情就折算不了；有行情时不再需要汇率和 ads_ratio。"""
     _bars(mapp, "106.XPEV", [11.0] * 30)
     c = mapp.watchlist.get("xpeng")
     mapp.watchlist.get("xpeng").listings[1].ads_ratio = None
     hk, us = V.listing_views(mapp, c, _model("HK:09868", "HKD"), 0.15)
-    assert hk["stance"] and us["price"] == 11.0 and not us["convertible"] and us["target"] is None and us["stance"] is None
+    assert hk["price"] is None and us["price"] == 11.0 and not us["convertible"] and us["target"] is None and us["stance"] is None
     assert V.view_sort_key([us]) == (9, 0, 0)
+    _bars(mapp, "116.09868", [39.0] * 30)
+    hk, us = V.listing_views(mapp, c, _model("HK:09868", "HKD"), 0.15)
+    assert us["convertible"] and us["upside"] == pytest.approx(hk["upside"]) and us["premium"] is None   # 无换股比例：只缺溢价
 
 
 def test_watchlist_sorted_filterable_and_pinnable(web):  # noqa: F811
@@ -49,8 +66,12 @@ def test_watchlist_sorted_filterable_and_pinnable(web):  # noqa: F811
         assert hint in html
     for gone in ("<th>行业</th>", "<th>推特账号</th>", "<th>上市地</th><th>行业</th>", "7 日事件", "<th class=\"r\">待补充</th>", "<th>画像</th>", "<th>深度报告</th>"):
         assert gone not in html
-    for needed in ("目标价 / 空间", "牛 / 基 / 熊", "多空比", "报告日期", "报告立场", "情景立场", "重跑报告", 'role="switch"', 'data-f="sort"'):
+    for needed in ("目标价 / 空间", "牛 / 基 / 熊", "多空比", "报告日期", "报告日价格 / 现价（至今）", "报告立场", "重跑报告", 'role="switch"', 'data-f="sort"'):
         assert needed in html
+    for gone in ("情景立场", "<th>上市地</th>", "至今</th>"):
+        assert gone not in html and gone not in web.get("/").text
+    assert 'class="mkt-seg"' in html and 'data-v="HK"' in html and 'data-v="A"' in html and 'data-v="US"' in html and '<select data-f="market"' not in html
+    assert '<div class="muted small code"' in html and "00189.HK" in html      # 上市地代码放在公司名下面
     assert "立即检查" not in html and ">论点<" not in html and "氟硅化工" not in html  # 行业、论点列、立即检查已去掉
     rows = watch_rows(web.holder.app)
     assert rows[0]["company"].id == "dongyue" and rows[0]["enabled"] and rows[0]["views"][0]["target"]
@@ -131,3 +152,35 @@ def test_chat_model_route_saves_and_takes_effect(web):  # noqa: F811
     _, etag = yamledit.load(h.config_path)
     post(web, "/settings/llm/routing", {"default_profile": "mock", "task_chat": "mock", "etag": etag})
     assert "alt-model" in h.app.llm.describe("screen") and "alt-model" not in h.app.llm.describe("chat")
+
+
+def test_watchlist_and_dashboard_follow_revision_stance(web):  # noqa: F811
+    """追踪修正改了立场（如 #222 由偏空转偏多）：观察清单、仪表盘显示、筛选、排序用的是当前立场，不是深度报告卡片里的旧立场。"""
+    a = web.holder.app
+    d = a.db.latest_dossier("dongyue")
+    tr = a.db.tracker("dongyue")
+    assert d["card"]["stance"] == "bullish"
+    a.db._exec("UPDATE revisions SET stance='bearish' WHERE id=?", (tr["revision_id"],))
+    row = watch_rows(a)[0]
+    assert row["stance"] == "bearish" and row["report_stance"] == "bullish" and row["key"][0] == 2
+    for url in ("/", "/companies"):
+        html = web.get(url).text
+        assert 'data-stance="bearish"' in html and 'data-stance="bullish"' not in html and "已修正" in html, url
+    # 修正建立在旧的一版报告上（新报告还没有重新建基线）：回到最新报告的立场
+    a.db._exec("UPDATE revisions SET dossier_id=dossier_id+999 WHERE id=?", (tr["revision_id"],))
+    assert watch_rows(a)[0]["stance"] == "bullish"
+
+
+def test_report_prices_per_listing(mapp):  # noqa: F811
+    """多地上市：每个上市地各有报告日价格 / 现价 / 至今；定价上市地用报告的价格，其他上市地取报告日的收盘价。"""
+    from stockagent.web.views import report_prices
+    _bars(mapp, "0.300308", [700.0] * 25 + [770.0] * 5)
+    _bars(mapp, "116.03308", [1300.0] * 25 + [1170.0] * 5)
+    c = mapp.watchlist.get("innolight")
+    dossier_id = save_dossier(mapp, {**CARD, "price_listing": "HK:03308", "stats": {"price": 1250.0}},
+                            created_at=iso(utcnow() - timedelta(days=10)))
+    views = V.listing_views(mapp, c, _model("HK:03308", "HKD"), 0.15)
+    out = report_prices(mapp, c, mapp.db.dossier(dossier_id), views)
+    assert out["HK:03308"]["price"] == 1250.0 and out["HK:03308"]["now"] == 1170.0 and out["HK:03308"]["since"] == pytest.approx(1170 / 1250 - 1)
+    assert out["A:300308"]["price"] == 700.0 and out["A:300308"]["now"] == 770.0 and out["A:300308"]["since"] == pytest.approx(0.1)
+    assert out["A:300308"]["currency"] == "CNY" and out["HK:03308"]["currency"] == "HKD"

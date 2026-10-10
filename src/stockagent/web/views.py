@@ -21,8 +21,8 @@ from .. import consensus as consensus_mod
 from .. import dossier as dossier_mod
 from ..config import Company
 from ..docs import DOC_TYPES, SUPPORTED
-from ..utils import CST, iso, lock_holder, parse_iso, today_local, utcnow
-from ..valuation import SCENARIO_LABEL, _range_model, display_price, listing_views, load_model, risk_stats, stance_check, view_sort_key
+from ..utils import iso, lock_holder, parse_iso, today_local, utcnow
+from ..valuation import SCENARIO_LABEL, _range_model, close_on, cst_day, display_price, load_model, risk_stats, stance_check, view_sort_key
 from . import charts, yamledit
 from .render import safe_url
 from .security import SANDBOX_CSP, verify_csrf
@@ -85,8 +85,9 @@ def _price_views(app, c: Company) -> list[dict]:
 
 
 def watch_rows(app) -> list[dict]:
-    """观察清单与仪表盘共用的行：每家公司的追踪状态、各上市地视图（现价、目标价、情景价、立场）。
-    排序：置顶在前；然后按观点（偏多在前）、同观点按空间、再按上行/下行比（多空比）从高到低；没有观点的在最后。"""
+    """观察清单与仪表盘共用的行：每家公司的追踪状态、各上市地视图（现价、目标价、情景价）和当前立场（monitor.current_stance：
+    追踪中以最新修正为准，否则为最新深度报告）。页面上显示、筛选、排序用的都是这一个立场。
+    排序：置顶在前；然后按立场（偏多在前）、同立场按空间、再按上行/下行比（多空比）从高到低；没有立场的在最后。"""
     pins = app.db.kv_prefix(PIN_PREFIX)
     rows = []
     for c in app.watchlist.companies:
@@ -94,13 +95,16 @@ def watch_rows(app) -> list[dict]:
         t = app.db.tracker(c.id)
         s = tracker.status(app, c)
         views = (s["views"] if s else (tracker.card_views(app, c, d) if d else [])) or _price_views(app, c)
-        views = sorted(views, key=lambda v: (view_sort_key([v]), not v["primary"]))
-        report = _report_price(app, c, d, baselines={r["dossier_id"]: r for r in app.db.revisions(c.id) if r["kind"] == "baseline"}) if d else None
+        stance = monitor.current_stance(app, c)
+        views = sorted(views, key=lambda v: (view_sort_key([v], stance), not v["primary"]))
+        baselines = {r["dossier_id"]: r for r in app.db.revisions(c.id) if r["kind"] == "baseline"}
+        report = _report_price(app, c, d, baselines=baselines) if d else None
+        report_pxs = report_prices(app, c, d, views, baselines) if d else {}
         rows.append({"company": c, "dossier": d, "tracker": t, "s": s, "views": views, "pinned": PIN_PREFIX + c.id in pins,
-                     "enabled": bool(s and s["enabled"]), "report_stance": d["card"].get("stance") if d else None,
+                     "enabled": bool(s and s["enabled"]), "stance": stance, "report_stance": d["card"].get("stance") if d else None,
                      "thesis": d["card"].get("thesis") if d else None,
                      "thesis_status": s["revision"]["thesis_status"] if s else None,
-                     "key": view_sort_key(views), "report_at": d["created_at"] if d else None, "report_px": report})
+                     "key": view_sort_key(views, stance), "report_at": d["created_at"] if d else None, "report_px": report, "report_pxs": report_pxs})
     rows.sort(key=lambda r: (not r["pinned"], r["key"], r["company"].name))
     return rows
 
@@ -638,31 +642,30 @@ def report_page(request: Request, cid: str, did: int | None = None):
                 chat_reason=app.llm.unavailable_reason("chat"), chat_model=app.llm.describe("chat"))
 
 
-def utc_day(ts: str) -> str:
-    """UTC 时间戳 → 北京时间的日期（YYYY-MM-DD）。"""
-    return parse_iso(ts).astimezone(CST).date().isoformat()
-
-
-def _bar_close_on(app, listing, day: str) -> float | None:
-    """day（含）之前最近一个交易日的收盘价（只读库）。"""
-    bars = app.bars(app.secid(listing), limit=4000)
-    if bars is None:
-        return None
-    older = bars[bars["date"] <= day]
-    return float(older["close"].iloc[-1]) if len(older) else None
-
-
 def _report_price(app, c: Company, d: dict, baselines: dict | None = None) -> dict:
     """某版深度报告的报告日价格（只读库）：跟踪卡 stats.price → 基线修正的 price → 报告日（含）之前最近的收盘价；
     再给出现价（display_price，盘中为最新价）与至今涨跌。{listing, day, price, now, since}"""
     card = d["card"]
     listing = next((l for l in c.listings if l.key == card.get("price_listing")), c.listings[0])
-    day = utc_day(d["created_at"])
+    day = cst_day(d["created_at"])
     if baselines is None:
         baselines = {r["dossier_id"]: r for r in app.db.revisions(c.id) if r["kind"] == "baseline"}
-    price = (card.get("stats") or {}).get("price") or (baselines.get(d["id"]) or {}).get("price") or _bar_close_on(app, listing, day)
+    price = (card.get("stats") or {}).get("price") or (baselines.get(d["id"]) or {}).get("price") or close_on(app, listing, day)
     now = display_price(app, listing)["price"]
     return {"listing": listing, "day": day, "price": price, "now": now, "since": now / price - 1 if now and price else None}
+
+
+def report_prices(app, c: Company, d: dict, views: list[dict], baselines: dict | None = None) -> dict[str, dict]:
+    """每个上市地各自的 报告日价格 / 现价 / 至今涨跌（只读库）：定价上市地沿用 _report_price，其他上市地取报告日（含）之前的收盘价；
+    现价用各行视图里的 display_price。缺报告日行情时该上市地没有条目。{listing key: {price, now, since, currency, day}}"""
+    rp = _report_price(app, c, d, baselines)
+    out = {}
+    for v in views:
+        price = rp["price"] if v["key"] == rp["listing"].key else close_on(app, v["listing"], rp["day"])
+        if price:
+            out[v["key"]] = {"price": price, "now": v["price"], "since": v["price"] / price - 1 if v["price"] else None,
+                             "currency": v["currency"], "day": rp["day"]}
+    return out
 
 
 def _history(app, c: Company) -> list[dict]:

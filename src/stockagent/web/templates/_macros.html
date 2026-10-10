@@ -69,11 +69,11 @@
 {%- endmacro %}
 
 
-{# 各上市地的视图单元格：上市地、现价（盘中最新价 + 日涨跌幅 + 「盘中 HH:MM」，收盘后为收盘价与「收盘 MM-DD」）、目标价（相对现价）、牛 / 基准 / 熊价格（各自相对现价）。v 来自 valuation.listing_views #}
-{% macro view_cells(v, scen=True, price=True) -%}
-<td class="lst"><span class="mk mk-{{ v.listing.market }}">{{ MARKET_LABEL.get(v.listing.market, v.listing.market) }}</span>
+{# 各上市地的视图单元格：（lst=True 时先有上市地）、现价（盘中最新价 + 日涨跌幅 + 「盘中 HH:MM」，收盘后为收盘价与「收盘 MM-DD」）、目标价（相对现价）、牛 / 基准 / 熊价格（各自相对现价）。v 来自 valuation.listing_views #}
+{% macro view_cells(v, scen=True, price=True, lst=True) -%}
+{% if lst %}<td class="lst"><span class="mk mk-{{ v.listing.market }}">{{ MARKET_LABEL.get(v.listing.market, v.listing.market) }}</span>
   <span class="small">{{ v.label }}</span>{% if v.primary and v.multi %} <span class="muted small" title="估值按这个上市地定价，其他上市地按汇率平价折算">·定价</span>{% endif %}
-  {%- if v.premium is not none %}<div class="muted small" title="按汇率平价折回定价上市地口径的溢价（正）/ 折价（负）">较定价地 <span class="{{ v.premium | dirclass }}">{{ v.premium | pct(0) }}</span></div>{% endif %}</td>
+  {%- if v.premium is not none %}<div class="muted small" title="按汇率平价折回定价上市地口径的溢价（正）/ 折价（负）">较定价地 <span class="{{ v.premium | dirclass }}">{{ v.premium | pct(0) }}</span></div>{% endif %}</td>{% endif %}
 {% if price %}<td class="r nowrap px{{ ' px-stale' if v.px.stale }}">{% if v.price %}<div class="px-main"><b>{{ v.price | num }}</b> <span class="muted small">{{ v.currency }}</span></div>
   <div class="px-sub small">
     {%- if v.px.change_pct is not none %}<span class="{{ v.px.change_pct | dirclass }}">{{ v.px.change_pct | pct(2) }}</span>{% endif %}
@@ -82,7 +82,7 @@
     {%- if v.px.stale %} <span class="px-warn" title="盘中快照超过 30 分钟没有更新（行情刷新没有在运行，或数据源暂时不可用）">行情未更新</span>{% endif %}</div>
   {%- else %}<span class="muted">—</span>{% endif %}</td>{% endif %}
 <td class="r nowrap">{% if v.target is not none %}<b>{{ v.target | num }}</b><div class="small {{ v.upside | dirclass }}">{{ v.upside | pct }}</div>
-  {%- elif v.price and not v.convertible %}<span class="muted small" title="缺汇率数据或美股 ADS 换股比例，无法按平价折算">无法折算</span>
+  {%- elif v.price and not v.convertible %}<span class="muted small" title="缺少定价上市地或本上市地的行情，无法按两地价格之比折算">无法折算</span>
   {%- else %}<span class="muted">—</span>{% endif %}</td>
 {% if scen %}<td class="r nowrap small scn-cell">{% for n, lab in [('bull', '牛'), ('base', '基'), ('bear', '熊')] %}{% set x = v.scenarios.get(n) %}{% if x -%}
   <div><span class="muted">{{ lab }}</span> {{ x.price | num }} <span class="{{ x.upside | dirclass }}">{{ x.upside | pct(0) }}</span></div>{% endif %}{% endfor %}
@@ -94,6 +94,12 @@
 <td class="r small">{% if v.stats %}{% if v.stats.ratio is not none %}{% if v.stats.ratio >= 100 %}<b title="{{ '%.0f' | format(v.stats.ratio) }}">&gt;100</b>{% else %}<b>{{ '%.2f' | format(v.stats.ratio) }}</b>{% endif %}{% else %}<span class="muted" title="所有情景都高于现价">无下行</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
 {%- endmacro %}
 
+{# 公司名下的小字：上市地代码（如 00189.HK）。定价上市地在多地上市时加「·定价」；溢价 / 折价放在悬停说明里 #}
+{% macro code_line(v) -%}
+<div class="muted small code" {% if v.premium is not none %}title="按汇率平价折回定价上市地口径，较定价地{{ '溢价' if v.premium >= 0 else '折价' }} {{ v.premium | pct(0) }}"{% endif %}>
+  {{- v.label }}{% if v.primary and v.multi %} <span title="估值按这个上市地定价，其他上市地按报告日两地收盘价之比折算">·定价</span>{% endif %}</div>
+{%- endmacro %}
+
 {# 立场：stance_badge + 悬停说明；没有观点时显示「—」 #}
 {% macro scene_stance(v) -%}
 {%- if v.stance %}<span title="{{ v.reason }}">{{ stance_badge(v.stance) }}</span>{% else %}<span class="muted">—</span>{% endif -%}
@@ -103,12 +109,13 @@
 {% macro filter_bar(target, tracked=True) -%}
 <div class="filterbar" data-filter-bar="{{ target }}">
   <input type="search" data-f="q" placeholder="搜索名称 / 代码" aria-label="搜索名称或代码" autocomplete="off">
-  <select data-f="market" aria-label="市场"><option value="">全部市场</option><option value="HK">港股</option><option value="A">A 股</option><option value="US">美股</option></select>
+  <span class="mkt-seg" role="group" aria-label="市场（再点一次取消，显示全部）"><input type="hidden" data-f="market" value="">
+    <button type="button" data-v="HK">港股</button><button type="button" data-v="A">A 股</button><button type="button" data-v="US">美股</button></span>
   <select data-f="stance" aria-label="观点"><option value="">全部观点</option><option value="bullish">偏多</option><option value="neutral">中性</option>
     <option value="bearish">偏空</option><option value="none">暂无观点</option></select>
   {% if tracked %}<select data-f="tracked" aria-label="追踪状态"><option value="">全部状态</option><option value="1">追踪中</option><option value="0">未追踪</option></select>{% endif %}
   <label class="check inline"><input type="checkbox" data-f="pinned"> 仅置顶</label>
-  <select data-f="sort" aria-label="排序"><option value="">按情景立场排序</option><option value="upside">按空间排序</option><option value="ratio">按多空比排序</option>
+  <select data-f="sort" aria-label="排序"><option value="">默认排序（立场 → 空间 → 多空比）</option><option value="upside">按空间排序</option><option value="ratio">按多空比排序</option>
     <option value="date">按报告日期排序</option></select>
   <button type="button" class="btn tiny ghost" data-filter-reset>清除</button>
   <span class="muted small" data-filter-count></span>
