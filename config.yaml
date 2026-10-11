@@ -98,22 +98,22 @@ llm:
       model: cn:deepseek-v4-pro
       api_key_env: CCLOAD_KEY
   tasks:
-    triage: free            # 事件分级
+    triage: {profile: free, max_tokens: 48000}    # 事件分级、共享账号分流（推理模型光思考就要约 16000，预算给足省掉一次白跑）
     stock_brief: free       # 个股研判
     market_brief: free      # 今日要点
     profile: free           # 公司画像（读年报，输入很长）
     research: free            # 深度报告：带工具的研究 agent
     dossier: free            # 深度报告：撰写与跟踪卡
-    monitor: free           # 事件类证伪条件检查
+    monitor: {profile: free, max_tokens: 32000}   # 事件类证伪条件检查（同上）
     tracker: free           # 标的追踪：按新事件修正估值假设（带工具的 agent + 结构化修正）
-    chat: local             # 报告研读对话：WebUI 报告页讲解深度报告（带工具的 agent）
+    chat: free              # 报告研读对话：WebUI 报告页讲解深度报告（带工具的 agent）
 
 # ------------------------------------------------------------------ 数据源
 sources:
   announcements_lookback_days: 90   # 首次运行回溯多少天的公告
   news_lookback_days: 30
   price_history_days: 400
-  price_sources: [eastmoney, tencent]   # 行情源顺序：前一个失败自动切换到下一个
+  price_sources: [eastmoney, tencent, sina, yahoo]   # 行情源顺序：前一个失败自动切换到下一个
   request_delay: 0.6                # 同一网站两次请求的最小间隔（秒）；太小会被东方财富断开
   eastmoney_news: true
   eastmoney_news_page_size: 20
@@ -270,27 +270,32 @@ scheduler:
   enabled: true
   catchup_minutes: 120              # 电脑睡眠等原因错过的时点，醒来后在该窗口内补跑一次
   jobs:
-    - {name: 早盘日报, task: run, args: [--push], cron: 30 8 * * 1-5, enabled: false}
-    - {name: 收盘日报, task: run, args: [--push], cron: 30 17 * * 1-5, enabled: false}
+    - {name: 早盘日报, task: run, args: [--push], cron: 30 8 * * 1-5, enabled: true}
+    - {name: 收盘日报, task: run, args: [--push], cron: 30 17 * * 1-5, enabled: true}
     - {name: 盘中提醒, task: alert, args: [], cron: '*/20 9-16 * * 1-5', enabled: false}
     # 行情刷新：每 5 分钟取追踪中公司的实时快照（无模型；调度器在 web 进程内直接执行，不产生任务记录；休市的市场自动跳过）。
+    # 两条合起来覆盖 A 股 / 港股时段与美股夜盘（夏令时 21:30–04:00，冬令时 22:30–05:00，北京时间；美股凌晨跨到周六）
     - {name: 行情刷新·日间与美股夜盘, task: quotes_refresh, args: [], cron: '*/5 9-16,21-23 * * 1-5', enabled: true}
     - {name: 行情刷新·美股凌晨, task: quotes_refresh, args: [], cron: '*/5 0-5 * * 2-6', enabled: true}
     - {name: 周末深度报告, task: dossier, args: [], cron: 0 20 * * 6, enabled: false}
     - {name: 选股·事件池, task: screen_run, args: [--event-only], cron: 0 18 * * 1-5, enabled: true}
     - {name: 选股·长线池, task: screen_run, args: [--long-only], cron: 0 10 * * 6, enabled: true}
     - {name: 选股·主题 agent, task: screen_themes, args: [], cron: 0 14 1 * *, enabled: false}
-    - {name: 模拟基金·日线刷新, task: fund_refresh, args: [], cron: 0 19 * * 1-5, enabled: true}
-    - {name: 模拟基金·盘前计划, task: fund_plan, args: [--push], cron: 30 8 * * 1-5, enabled: true}
-    - {name: 模拟基金·盘中提醒, task: fund_alert, args: [--push], cron: '*/20 9-16 * * 1-5', enabled: true}
-    - {name: 模拟基金·盘后复盘, task: fund_close, args: [--push], cron: 30 17 * * 1-5, enabled: true}
-    - {name: 模拟基金·周报, task: fund_weekly, args: [--push], cron: 30 10 * * 6, enabled: true}
+    - {name: 模拟基金·日线刷新, task: fund_refresh, args: [], cron: 0 19 * * 1-5, enabled: false}
+    - {name: 模拟基金·盘前计划, task: fund_plan, args: [--push], cron: 30 8 * * 1-5, enabled: false}
+    - {name: 模拟基金·盘中提醒, task: fund_alert, args: [--push], cron: '*/20 9-16 * * 1-5', enabled: false}
+    - {name: 模拟基金·盘后复盘, task: fund_close, args: [--push], cron: 30 17 * * 1-5, enabled: false}
+    - {name: 模拟基金·周报, task: fund_weekly, args: [--push], cron: 30 10 * * 6, enabled: false}
 notify:
   feishu_webhook_env: FEISHU_WEBHOOK
   feishu_secret_env: FEISHU_SECRET  # 飞书机器人开启"签名校验"时需要
   wecom_webhook_env: WECOM_WEBHOOK
   telegram_token_env: TELEGRAM_BOT_TOKEN
   telegram_chat_id: 'YOUR_TELEGRAM_CHAT_ID'
+  feishu_app_id_env: FEISHU_APP_ID        # 飞书应用机器人：值在 .env；见 README「飞书应用机器人」
+  feishu_app_secret_env: FEISHU_APP_SECRET
+  feishu_chat_id: ou_YOUR_OPEN_ID                     # 可选：oc_ 开头；填了定时推送也走应用机器人
+  feishu_allowed_users: ['ou_YOUR_OPEN_ID']       # 允许下指令的 open_id 或 user_id；先给机器人发消息，回复里会带上你的 open_id
   alert_min_materiality: 4          # stock alert 推送的最低重要性（1–5）
 
 # ------------------------------------------------------------------ 简报
@@ -298,7 +303,7 @@ report:
   lookback_hours: 36                # 简报收录最近多少小时的事件
   min_materiality: 2                # 简报里显示的最低重要性
   max_items_per_company: 12
-  triage_batch_size: 20             # 每次送给模型分级的条数（同一时段的转载尽量在同一批，便于模型去重）
+  triage_batch_size: 10             # 每次送给模型分级的条数（同一时段的转载尽量在同一批，便于模型去重）
   profile_max_doc_chars: 180000     # 生成公司画像时最多送入的字数；年报超出时按关键章节节选
   auto_profile: true                # stock run 时资料有更新就自动重新生成画像
   dossier_stale_days: 30            # 深度报告超过多少天在简报里提示更新

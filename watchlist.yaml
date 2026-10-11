@@ -150,6 +150,7 @@ companies:
       - {market: HK, code: "03696"}
     sector: 医疗保健设备与用品 · 医疗保健用品
     notes: 主要从事人工智能驱动的药物发现及管线开发业务。该公司主要业务包括自主开发候选药物,共同开发,授权药物并保留部分知识产权及与其他制药公司合作但不保留任何知识产权。该公司通过自主开发的人工智能平台 Pharma.AI产生了多项临床或新药临床试验申请阶段的资产。此外,该公司也涉足软体解决方案和其他与非制药领域相关的研发业务。（东方财富公司概况，自动填写）
+    twitter_accounts: [FredaDuan]
   - id: crealights
     name: 海光芯正
     name_en: Crealights Technology
@@ -379,6 +380,118 @@ companies:
       - {market: HK, code: "09911"}
     sector: 软件 · 应用软件
     notes: 是一家主要从事泛人群社交业务的投资控股公司。该公司经营两个分部,包括社交业务和创新业务。社交业务分部主要推出开放式社交平台MICO、语音社交平台YoHo、陪伴社交平台SUGO、游戏社交平台TopTop等产品。创新业务分部主要打造Mergeland-Alice’s Adventure等精品游戏。（东方财富公司概况，自动填写）
+  - id: xiaomi
+    name: 小米集团
+    name_en: XIAOMI
+    aliases: [小米集團]
+    listings:
+      - {market: HK, code: "01810"}
+    sector: 电子设备、仪器和元件 · 电子制造服务
+    notes: 主要从事智能手机、物联网(IoT)和生活消费产品研发和销售业务,提供互联网服务,以及从事投资业务的中国投资控股公司。该公司主要通过四个部门开展业务。智能手机部门主要从事智能手机销售业务。IoT和生活销售产品部门主要销售其他自家产品(包括智能电视机、笔记本电脑、人工智能(AI)音箱和智能路由器)、生态链产品(包括IoT和其他智能硬件产品)以及部分生活消费产品。互联网服务部门提供广告服务及互联网增值服务。其他部门提供硬件产品维修服务。该公司在国内市场和海外市场销售产品。（东方财富公司概况，自动填写）
+  - id: kingsoft
+    name: 金山云
+    name_en: Kingsoft Cloud
+    aliases: [金山雲]
+    listings:
+      - {market: HK, code: "03896"}
+      - {market: US, code: "KC", exchange: NASDAQ}
+    sector: 信息技术服务 · 互联网服务与基础设施
+    notes: 主要从事独立云服务的中国公司。该公司提供全套云产品,结合了统一的IaaS基础设施和PaaS中间件,以及定制的业务应用程序,支持广泛的用例,使客户能够实现不同的业务目标。该公司还通过将云解决方案与专门的客户服务相结合,以整体方式提供解决方案。该公司提供的端到端客户服务涵盖规划、解决方案开发、实施和部署,以及持续维护和升级。（东方财富公司概况，自动填写）
+  - id: applied
+    name: 应用光电
+    name_en: Applied Optoelectronics
+    aliases: [應用光電]
+    listings:
+      - {market: US, code: "AAOI", exchange: NASDAQ}
+    sector: 通信设备
+    notes: 应用光电公司于1997年2月28日在德克萨斯州组建，2013年3月注册地改为特拉华州。公司是行业领先的光纤网络产品的供应商，主要供应三个网络终端市场：有线电视、光纤入户和网络数据中心。AOI公司设计并制造各种光纤通讯产品，包括部件、组件和成套设备的模块。（东方财富公司概况，自动填写）
+  - id: space
+    name: SpaceX
+    name_en: Space Exploration Technologies
+    listings:
+      - {market: US, code: "SPCX", exchange: NASDAQ}
+    sector: 航天航空与国防
+    notes: Space Exploration Technologies Corp.于2002年3月14日成立并注册为特拉华州公司,并于2024年2月14日重新注册为德克萨斯州公司。 该公司是唯一一家在太空、连接和人工智能领域构建未来集成硬件和软件基础设施的公司。其核心是建设者。该公司设计、制造、发射和运营基于尖端技术的产品和服务,包括世界上最先进的火箭和航天器。该公司安全可靠地运输宇航员、卫星和其他有效载荷,执行造福地球生命的任务。（东方财富公司概况，自动填写）
+    twitter_official: [SpaceX]
+    twitter_accounts: [elonmusk]
+  - id: axt
+    name: AXT Inc
+    name_en: AXT
+    listings:
+      - {market: US, code: "AXTI", exchange: NASDAQ}
+    sector: 半导体材料与设备
+    notes: AXT, Inc.于1986年12月成立于加州，与1998年在特拉华州重组。公司设计、开发、制造和分发高性能复合半导体基板。该公司的基板产品主要用于无线通信、照明显示应用程序和通讯用光纤。该公司认为其垂直梯度冻结或 VGF，制造半导体基板技术其他方法相比具有显著的优势，使它能够成为这种基体材料的领先制造商。公司率先发展的VGF 技术制造砷化镓 (GaAs) 基板和随后使用的 VGF 技术制造从磷化铟（InP) 和锗(Ge) 基板的商业使用。该公司还通过其设在中国的合资企业生产和销售原料及其有关的基板业务。这些合资企业生产的产品包括 99.99%纯镓 (4N Ga)、高纯镓、砷和锗、氧化锗、热解（东方财富公司概况，自动填写）
+  - id: boost
+    name: Boost Run Inc-A
+    name_en: Boost Run
+    listings:
+      - {market: US, code: "BRUN", exchange: NASDAQ}
+    sector: 数据处理与外包服务
+    notes: Boost Run Inc.是 NVIDIA 的首选云合作伙伴,并且在 NVIDIA 的Blackwell架构上还获得了 NVIDIA 优秀云服务认证。Boost Run 平台通过直观的管理控制台和强大的 API 层提供 GPU 计算、CPU 节点、托管的 Kubernetes 指挥调度以及共享存储服务,使组织能够在几分钟内对数千个节点的资源进行配置和扩展。企业依靠 Boost Run 来为他们最苛刻的 AI 工作负载提供所需的性能、安全性和可靠性。Boost Run 在运营层面保持了 SOC 2 Type II、HIPAA、ISO 27001 和 ISO 27701 认证,并与符合同等安全和（东方财富公司概况，自动填写）
+  - id: ast
+    name: AST SpaceMobile Inc-A
+    name_en: AST SpaceMobile
+    listings:
+      - {market: US, code: "ASTS", exchange: NASDAQ}
+    sector: 综合电信业务
+    notes: AST SpaceMobile, Inc.于2019年5月28日在特拉华州注册成立。AST是一家创新的卫星设计师和制造商。AST及其全球合作伙伴正在建设第一个也是唯一一个可由标准智能手机接入的天基蜂窝宽带网络。AST的SpaceMobile近地轨道卫星网络预计将提供全球直接移动宽带网络，以提供与任何标准、未经修改的现成移动电话或2G/3G/4G LTE/5G和物联网设备的连接。（东方财富公司概况，自动填写）
+  - id: tempus
+    name: Tempus AI Inc-A
+    name_en: Tempus AI
+    listings:
+      - {market: US, code: "TEM", exchange: NASDAQ}
+    sector: 数据处理与外包服务
+    notes: Tempus AI, Inc.致力于通过人工智能(AI)在医疗保健领域的实际应用,创造智能诊断,从而释放精准医疗的真正力量。智能诊断使用人工智能,包括生成式人工智能,使实验室测试更加准确、量身定制和个性化。（东方财富公司概况，自动填写）
+  - id: uspowi
+    name: 帕沃英蒂格盛
+    name_en: Power Integrations
+    listings:
+      - {market: US, code: "POWI", exchange: NASDAQ}
+    sector: 半导体产品
+    notes: Power Integrations, Inc.是一家提供用于高压电源转换系统的高性能电子元器件的供应商,总部位于美国硅谷。公司所推出的集成电路和二极管可帮助包括电视机、PC、家电、智能电表和LED灯在内的大量电子产品设计出小巧紧凑的高能效AC-DC电源。公司的SCALE IGBT驱动器可提高大功率应用的效率、可靠性和成本效益,其应用领域包括工业电机、太阳能和风能系统、电动汽车和高压直流输电等。自1998年问世以来,Power Integrations的EcoSmart(R)节能技术已节省了数十亿美元的能耗,避免了数以百万吨的碳排放。由于公司的产品对环境保护的作用,Power Integrat（东方财富公司概况，自动填写）
+  - id: nebius
+    name: Nebius Group NV-A
+    name_en: Nebius
+    listings:
+      - {market: US, code: "NBIS", exchange: NASDAQ}
+    sector: 互联网服务与基础设施
+    notes: Nebius Group N.V.(前身Yandex N.V.)是欧洲最大的互联网公司之一,经营俄罗斯最受欢迎的搜索引擎及其最受欢迎的网站。 Yandex的目标是帮助消费者和企业更好地在线浏览、获取信息。 自1997年以来,Yandex基于创新技术,在所有数字平台上提供世界地理位置相关搜索和本地定制体验。 此外,它为全球数百万消费者开发了市场领先的按需运输服务,导航产品和其他移动应用。（东方财富公司概况，自动填写）
+  - id: genscript
+    name: 金斯瑞生物科技
+    name_en: Genscript Biotech
+    listings:
+      - {market: HK, code: "01548"}
+    sector: 制药、生物科技和生命科学 · 生命科学工具和服务
+    notes: 是一家主要从事生物科学研究及相关业务的公司。该公司通过四个分部运营。生命科学服务及产品分部为基因治疗、细胞治疗、抗体疗法、疫苗及诊断提供综合试剂服务及产品、工具及定制化解决方案。生物制剂开发服务分部以一个综合平台提供全面服务,旨在帮助生物制药及生物技术公司加快治疗性抗体及基因、细胞疗法产品的开发。工业合成生物产品分部通过使用基因工程建构非病源微生物株,提供工业酶开发和生产。细胞疗法分部专门从事发现并开发针对肿瘤及其他适应症的新型细胞疗法。（东方财富公司概况，自动填写）
+  - id: xtalpi
+    name: 晶泰控股
+    name_en: XtalPi
+    listings:
+      - {market: HK, code: "02228"}
+    sector: 制药、生物科技和生命科学 · 生物科技
+    notes: 是一家主要从事为制药及材料科学等产业提供药物及材料科学研发解决方案及服务的控股公司。该公司主要经营两个业务。药物发现解决方案业务从事就新型药物发现工作为各类生物技术与制药公司和学术机构提供模块独立解决方案或与之合作。智能自动化解决方案业务从事提供固态研发服务及自动化化学合成服务。该公司在国内和国外市场开展业务。（东方财富公司概况，自动填写）
+  - id: joinn
+    name: 昭衍新药
+    name_en: JOINN LABORATORIESCO
+    aliases: [昭衍新藥]
+    listings:
+      - {market: A, code: "603127", exchange: SH}
+      - {market: HK, code: "06127"}
+    sector: 医疗服务 · 医疗研发外包
+    notes: 药物非临床服务:非临床评价服务、药物发现服务;药物临床服务;实验模型研究（东方财富公司概况，自动填写）
+  - id: hk03998
+    name: 波司登
+    listings:
+      - {market: HK, code: "03998"}
+    sector: 纺织及服饰
+    notes: 由选股器加入（2026-10-10）：事件池（1–3 个月），D 类：观察，入选价 4.41 HKD
+  - id: oklo
+    name: Oklo Inc-A
+    name_en: Oklo
+    listings:
+      - {market: US, code: "OKLO", exchange: NYSE}
+    sector: 投资银行业与经纪业
+    notes: Oklo Inc.(前身为AltC Acquisition Corp.)正在开发快速裂变发电厂,以大规模提供清洁、可靠和负担得起的能源。Oklo获得了美国能源部的场地使用许可,从爱达荷国家实验室获得了燃料材料,向核管理委员会提交了第一个先进裂变定制组合许可证申请,并正在与美国能源部和美国国家实验室合作开发先进的燃料回收技术。（东方财富公司概况，自动填写）
 benchmarks:
   HK:
     - {secid: "100.HSI", name: 恒生指数}
